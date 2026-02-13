@@ -1,3 +1,8 @@
+## TO DO
+- [ ] compare api
+- [ ] revalidate schema and logic.
+
+
 # grc-policy-server
 
 Production‑grade Python service template using **uv**, designed to run consistently across local development, CI, and containerized environments.

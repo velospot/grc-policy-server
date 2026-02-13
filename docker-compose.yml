@@ -2,6 +2,7 @@
 
 services:
   neo4j:
+    container_name: rag_neo4j
     image: neo4j:community-trixie
     volumes:
       - ./neo4j/logs:/logs
@@ -29,7 +30,7 @@ services:
       - 8080:8080
       - 50051:50051
     volumes:
-      - weaviate_data:/var/lib/weaviate
+      - ./weaviate_data:/var/lib/weaviate
     restart: on-failure:2
     environment:
       DISABLE_TELEMETRY: true

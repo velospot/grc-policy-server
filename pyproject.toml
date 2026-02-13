@@ -9,8 +9,12 @@ dependencies = [
     "fastapi>=0.128.0",
     "neo4j>=6.1.0",
     "neo4j-graphrag>=1.13.0",
+    "opik>=1.10.13",
     "pydantic-settings>=2.11.0",
+    "python-multipart>=0.0.22",
+    "structlog>=25.5.0",
     "uvicorn>=0.39.0",
+    "weaviate-client>=4.19.2",
 ]
 
 [project.optional-dependencies]

@@ -41,3 +41,17 @@ class ComparisonResult(BaseModel):
     keyDifferences: List[KeyDifference]
     actionPlan: List[ActionItem]
     followUpQuestions: List[str]
+
+
+class CompareRequest(BaseModel):
+    doc1: Document
+    doc2: Document
+
+
+class DiffChunk(BaseModel):
+    type: str
+    content: str
+
+
+class CompareResponse(BaseModel):
+    diffs: List[DiffChunk]

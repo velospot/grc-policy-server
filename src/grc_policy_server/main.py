@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 
-from grc_policy_server.config import settings
-from grc_policy_server.health import router as health_router
-from grc_policy_server.logging import setup_logging
+from grc_policy_server.api.routes import compare, health
+from grc_policy_server.core.config import settings
+from grc_policy_server.core.logging import setup_logging
 
 setup_logging(
     level=settings.log_level,
@@ -10,7 +10,9 @@ setup_logging(
 )
 app = FastAPI(title=settings.app_name)
 
-app.include_router(health_router)
+app.include_router(health.router)
+# app.include_router(documents.router)
+app.include_router(compare.router)
 
 
 def run() -> None:
