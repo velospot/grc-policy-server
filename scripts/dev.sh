@@ -2,4 +2,4 @@
 set -e
 
 uv sync
-uv run uvicorn grc-policy-server.main:app --reload
+uv run uvicorn grc_policy_server.main:app --reload

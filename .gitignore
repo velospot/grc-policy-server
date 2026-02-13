@@ -1,10 +1,20 @@
-# Python-generated files
+ Python-generated files
 __pycache__/
 *.py[oc]
 build/
 dist/
 wheels/
 *.egg-info
+neo4j*
 
 # Virtual environments
 .venv
+!scripts/*
+!src/*
+!.python-version
+!docker-compose.*
+!Dockerfile
+!Makefile
+!pyproject.toml
+!README.md
+!uv.lock

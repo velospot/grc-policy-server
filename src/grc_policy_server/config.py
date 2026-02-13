@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # Feature flags / runtime behavior
-    debug: bool = False
+    debug: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",
