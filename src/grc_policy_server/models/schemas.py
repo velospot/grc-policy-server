@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -21,12 +21,13 @@ class DocumentReference(BaseModel):
 
 
 class KeyDifference(BaseModel):
+    changeType: Literal["ADDED", "REMOVED", "MODIFIED"]
     section: str
-    doc1Content: str
-    doc2Content: str
+    doc1Content: str | None
+    doc2Content: str | None
     impact: str
-    doc1Reference: DocumentReference
-    doc2Reference: DocumentReference
+    doc1Reference: DocumentReference | None
+    doc2Reference: DocumentReference | None
 
 
 class ActionItem(BaseModel):

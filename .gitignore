@@ -18,3 +18,4 @@ neo4j*
 !pyproject.toml
 !README.md
 !uv.lock
+!*.py

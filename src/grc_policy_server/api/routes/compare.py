@@ -1,7 +1,9 @@
 from fastapi import APIRouter
 
-from grc_policy_server.models.schemas import CompareRequest, ComparisonResult
-from grc_policy_server.services.comparision.diff_engine import DiffEngine
+from grc_policy_server.models.schemas import (
+    CompareRequest,
+    ComparisonResult,
+)
 from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
 
 router = APIRouter()
@@ -42,15 +44,12 @@ async def compare_documents(doc_a: str, doc_b: str):
 
     return {"documents": [doc_a, doc_b], "differences": [diff]}
 
-    router = APIRouter(prefix="/compare", tags=["compare"])
+    # router = APIRouter(prefix="/compare", tags=["compare"])
 
 
-@router.post("/", response_model=CompareResponse)
+@router.post("/compare", response_model=ComparisonResult)
 async def compare_route_documents(payload: CompareRequest):
 
-    diffs = RealDiffEngine.compare(
-        payload.doc1.content,
-        payload.doc2.content,
-    )
+    diffs = RealDiffEngine().compare(payload.doc1, payload.doc2)
 
-    return CompareResponse(diffs=diffs)
+    return diffs

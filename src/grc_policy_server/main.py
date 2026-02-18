@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from grc_policy_server.api.routes import compare, health
+from grc_policy_server.api.routes import compare, documents, health
 from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import setup_logging
 
@@ -11,8 +11,8 @@ setup_logging(
 app = FastAPI(title=settings.app_name)
 
 app.include_router(health.router)
-# app.include_router(documents.router)
-app.include_router(compare.router)
+app.include_router(documents.router)
+app.include_router(compare.router, prefix="/compare")
 
 
 def run() -> None:
