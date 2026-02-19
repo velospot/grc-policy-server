@@ -235,3 +235,188 @@ This ensures predictable behavior across environments.
 This template is intentionally conservative. It is meant to survive growth, audits, and on‑call rotations.
 
 ---
+
+## Update 19th Feb 2026
+# grc-policy-server
+
+FastAPI service for GRC policy ingestion and comparison.
+
+## What it does
+
+- Uploads policy documents and ingests them through:
+  - Docling conversion
+  - Hierarchical chunking
+  - Embedding generation
+  - Storage in Weaviate (vector) and Neo4j (graph)
+- Lists uploaded documents from local metadata.
+- Compares two documents using stored chunks and returns:
+  - Key differences
+  - Summary
+  - Action plan
+  - Follow-up questions
+
+## API docs (Swagger)
+
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+- OpenAPI JSON: `http://localhost:8000/openapi.json`
+
+## Requirements
+
+- Python `>=3.13` (from `pyproject.toml`)
+- `uv`
+- Running dependencies:
+  - Weaviate
+  - Neo4j
+  - Ollama (for embeddings/summaries used by ingestion and compare)
+
+## Local setup
+
+1. Install dependencies:
+
+```bash
+uv sync --dev
+```
+
+2. Copy env file:
+
+```bash
+cp .env.example .env
+```
+
+3. Start Weaviate + Neo4j:
+
+```bash
+docker compose up -d
+```
+
+4. Run API:
+
+```bash
+make dev
+```
+
+## Core environment variables
+
+`Settings` (`src/grc_policy_server/core/config.py`):
+
+- `APP_NAME`
+- `ENVIRONMENT`
+- `LOG_LEVEL`
+- `HOST`
+- `PORT`
+- `DEBUG`
+- `WEAVIATE_URL`
+- `WEAVIATE_COLLECTION`
+- `WEAVIATE_EMBEDDED`
+- `UPLOAD_ROOT` (defaults to `/data/uploads`)
+
+Dependency wiring (`src/grc_policy_server/api/deps.py`):
+
+- `NEO4J_URI`
+- `NEO4J_USER`
+- `NEO4J_PASSWORD`
+- `NEO4J_DATABASE`
+- `OLLAMA_URL`
+- `OLLAMA_CHAT_MODEL`
+- `OLLAMA_EMBED_MODEL`
+- `OLLAMA_TIMEOUT_SEC`
+
+## Endpoints
+
+### Health
+
+- `GET /health`
+
+Response:
+
+```json
+{"status":"ok"}
+```
+
+### Documents
+
+- `GET /documents`
+  - Lists uploaded documents from metadata under `UPLOAD_ROOT`.
+- `POST /documents/upload`
+  - Multipart form upload (`file` field).
+  - Runs full ingestion pipeline.
+
+Upload response shape:
+
+```json
+{
+  "filename": "policy.pdf",
+  "contentType": "application/pdf",
+  "accepted": true,
+  "documentId": "uuid",
+  "chunksStored": 42
+}
+```
+
+### Compare
+
+- `POST /compare`
+- `POST /compare/with-summary`
+
+Both endpoints accept:
+
+```json
+{
+  "doc1": {
+    "id": "policy-v1",
+    "name": "Security Policy",
+    "version": "1.0",
+    "uploadDate": "2026-02-01",
+    "size": "2 MB",
+    "category": "security"
+  },
+  "doc2": {
+    "id": "policy-v2",
+    "name": "Security Policy",
+    "version": "2.0",
+    "uploadDate": "2026-02-15",
+    "size": "2.2 MB",
+    "category": "security"
+  }
+}
+```
+
+They return `ComparisonResult`:
+- `summary`
+- `keyDifferences`
+- `actionPlan`
+- `followUpQuestions`
+
+## Upload ingestion flow
+
+`POST /documents/upload` calls `DocumentIngestionService`:
+
+1. Convert upload bytes with `DoclingAdapter`.
+2. Chunk docling document via hierarchical chunker.
+3. Embed each chunk using Ollama client.
+4. Upsert chunk vectors into Weaviate.
+5. Upsert document/chunk/section graph into Neo4j.
+6. Persist file + `metadata.json` to `UPLOAD_ROOT/<document_id>/`.
+
+## Development commands
+
+- Run app: `make dev`
+- Run tests: `make test`
+- Lint: `make lint`
+
+## Tests
+
+Current API tests validate:
+
+- Swagger/OpenAPI availability
+- Health endpoint
+- Documents list endpoint
+- Document upload endpoint contract
+- Compare endpoints contract
+
+Run all tests:
+
+```bash
+make test
+```
