@@ -56,3 +56,15 @@ class DiffChunk(BaseModel):
 
 class CompareResponse(BaseModel):
     diffs: List[DiffChunk]
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
+
+
+class UploadDocumentResponse(BaseModel):
+    filename: str
+    contentType: str | None = None
+    accepted: bool
+    documentId: str | None = None
+    chunksStored: int | None = None

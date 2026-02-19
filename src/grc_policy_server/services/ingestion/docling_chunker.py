@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from docling_core.transforms.chunker.doc_chunk import DocChunk
@@ -8,10 +9,15 @@ from docling_core.transforms.chunker.hierarchical_chunker import (
 )
 from docling_core.types.doc.labels import DocItemLabel
 
+logger = logging.getLogger(__name__)
+
 
 def chunk_document(dl_doc, *, merge_list_items: bool) -> list[Any]:
     chunker = HierarchicalChunker(merge_list_items=merge_list_items)
-    return list(chunker.chunk(dl_doc))
+
+    chunksList = list(chunker.chunk(dl_doc))
+    logger.info(" filechunks ", chunksList[:25])
+    return chunksList
 
 
 def _section_path_from_chunk(doc_chunk: DocChunk) -> list[str]:

@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
+from pathlib import Path
 
+from grc_policy_server.core.config import settings
+from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
+from grc_policy_server.services.ingestion.document_ingestion_service import (
+    DocumentIngestionService,
+)
 from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
 from grc_policy_server.services.comparision.real_diff_engine_stream import (
     RealDiffEngineStream,
 )
+from grc_policy_server.respositories.documents import DocumentRepository
 from grc_policy_server.services.graph.graph_neo4j_client import (
     Neo4jClient,
     Neo4jSettings,
@@ -43,6 +51,10 @@ def get_ollama_client() -> OllamaClient:
     )
 
 
+def get_docling_adapter() -> DoclingAdapter:
+    return DoclingAdapter()
+
+
 def get_diff_engine() -> RealDiffEngine:
     return RealDiffEngine(
         weaviate=get_weaviate_client(),
@@ -57,3 +69,21 @@ def get_diff_engine_stream() -> RealDiffEngineStream:
         neo4j=get_neo4j_client(),
         llm=get_ollama_client(),
     )
+
+
+def get_document_repository() -> DocumentRepository:
+    return DocumentRepository()
+
+
+def get_document_ingestion_service() -> DocumentIngestionService:
+    return DocumentIngestionService(
+        docling_adapter=get_docling_adapter(),
+        weaviate=get_weaviate_client(),
+        neo4j=get_neo4j_client(),
+        llm=get_ollama_client(),
+        upload_root=Path(settings.upload_root),
+    )
+
+
+def get_document_ingestion_service_factory() -> Callable[[], DocumentIngestionService]:
+    return get_document_ingestion_service

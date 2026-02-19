@@ -24,8 +24,45 @@ class Neo4jClient:
     def close(self) -> None:
         self._driver.close()
 
+    def upsert_document_with_chunks(
+        self,
+        *,
+        document_id: str,
+        filename: str,
+        chunks: list[dict[str, Any]],
+    ) -> None:
+        self._driver.execute_query(
+            """
+            MERGE (d:Document {id: $document_id})
+            SET d.document_id = $document_id,
+                d.name = $filename,
+                d.updated_at = datetime()
+            WITH d
+            UNWIND $chunks AS ch
+            MERGE (c:Chunk {id: ch.chunk_id})
+            SET c.chunk_id = ch.chunk_id,
+                c.document_id = $document_id,
+                c.text = coalesce(ch.text, ""),
+                c.source_text = coalesce(ch.text, ""),
+                c.section_path = coalesce(ch.section_path, "Unknown Section"),
+                c.page = coalesce(ch.page_number, 0),
+                c.line_start = ch.line_start,
+                c.line_end = ch.line_end,
+                c.chunk_index = coalesce(ch.chunk_index, 0),
+                c.docling_path = ch.docling_path
+            MERGE (d)-[:HAS_CHUNK]->(c)
+            MERGE (s:Section {path: coalesce(ch.section_path, "Unknown Section")})
+            SET s.full_path = coalesce(ch.section_path, "Unknown Section")
+            MERGE (s)-[:HAS_CHUNK]->(c)
+            """,
+            document_id=document_id,
+            filename=filename,
+            chunks=chunks,
+            database_=self.settings.database,
+        )
+
     def resolve_section_path(self, chunk_id: str) -> str:
-        with self._driver.session() as session:
+        with self._driver.session(database=self.settings.database) as session:
             res = session.run(
                 """
             MATCH (s:Section)-[:HAS_CHUNK]->(c:Chunk {id: $chunk_id})

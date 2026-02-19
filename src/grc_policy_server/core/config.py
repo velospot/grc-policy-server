@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     # Download
     download_timeout_seconds: float = 30.0
     max_download_mb: int = 50
+    upload_root: str = "/data/uploads"
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="",  # no APP_ prefix unless you want one

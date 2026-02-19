@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 neo4j*
+weaviate_data/*
 
 # Virtual environments
 .venv

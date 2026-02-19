@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List
+from uuid import NAMESPACE_URL, uuid5
 
 import weaviate
 from weaviate.classes.config import Configure, DataType, Property
@@ -92,10 +93,41 @@ class WeaviateClient:
                 "section_path",
                 "text",
                 "chunk_index",
+                "page_number",
             ],
         )
 
-        return [dict(o.properties) for o in resp.objects]
+        out: List[Dict[str, Any]] = []
+        for obj in resp.objects:
+            item = dict(obj.properties)
+            if "page" not in item and "page_number" in item:
+                item["page"] = item.get("page_number")
+            out.append(item)
+        return out
+
+    def upsert_chunks(self, chunks: List[Dict[str, Any]]) -> None:
+        with self.collection.batch.dynamic() as batch:
+            for chunk in chunks:
+                vector = chunk.get("vector")
+                if vector is None:
+                    raise ValueError(
+                        "Weaviate upsert requires a vector when vectorizer is disabled"
+                    )
+
+                chunk_id = str(chunk["chunk_id"])
+                props = {
+                    "chunk_id": chunk_id,
+                    "document_id": str(chunk["document_id"]),
+                    "section_path": str(chunk.get("section_path") or "Unknown Section"),
+                    "text": str(chunk.get("text") or ""),
+                    "chunk_index": int(chunk.get("chunk_index") or 0),
+                }
+
+                batch.add_object(
+                    properties=props,
+                    vector=vector,
+                    uuid=str(uuid5(NAMESPACE_URL, chunk_id)),
+                )
 
     def semantic_search_in_document(
         self,

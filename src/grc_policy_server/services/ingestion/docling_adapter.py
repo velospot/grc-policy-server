@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from io import BytesIO
 from typing import Optional
 
@@ -13,6 +14,8 @@ from docling.document_converter import (
 
 # Updated Import Paths
 from docling_core.types.io import DocumentStream
+
+logger = logging.getLogger(__name__)
 
 
 class DoclingAdapter:
