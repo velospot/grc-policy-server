@@ -23,11 +23,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class UploadIngestionResult:
+    """Identifiers returned after a document is successfully ingested."""
+
     document_id: str
     chunks_stored: int
 
 
 class DocumentIngestionService:
+    """Converts uploaded files into chunks and stores metadata/index entries."""
+
     def __init__(
         self,
         *,
@@ -50,6 +54,7 @@ class DocumentIngestionService:
         content: bytes,
         content_type: str | None = None,
     ) -> UploadIngestionResult:
+        """Convert an uploaded document, store chunks, and persist upload metadata."""
         document_id = str(uuid4())
         dl_doc = self.docling_adapter.convert_bytes(
             filename=filename,
@@ -125,6 +130,7 @@ class DocumentIngestionService:
         content: bytes,
         content_type: str | None,
     ) -> None:
+        """Persist the original file and metadata under the upload root."""
         target_dir = self.upload_root / document_id
         target_dir.mkdir(parents=True, exist_ok=True)
 

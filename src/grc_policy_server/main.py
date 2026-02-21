@@ -8,6 +8,8 @@ setup_logging(
     level=settings.log_level,
     service_name=settings.app_name,
 )
+
+# Main FastAPI application for upload, listing, and comparison workflows.
 app = FastAPI(
     title=settings.app_name,
     description="API for GRC policy ingestion and comparison workflows.",
@@ -29,6 +31,7 @@ app.include_router(with_summary.router)
 
 
 def run() -> None:
+    """Run the API using runtime settings from environment configuration."""
     import uvicorn
 
     uvicorn.run(

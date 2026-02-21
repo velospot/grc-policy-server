@@ -1,7 +1,6 @@
 # src/grc_policy_server/api/deps.py
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -32,10 +31,10 @@ def get_weaviate_client() -> WeaviateClient:
 def get_neo4j_client() -> Neo4jClient:
     return Neo4jClient(
         Neo4jSettings(
-            uri=os.getenv("NEO4J_URI", "bolt://neo4j:7687"),
-            user=os.getenv("NEO4J_USER", "neo4j"),
-            password=os.getenv("NEO4J_PASSWORD", "password"),
-            database=os.getenv("NEO4J_DATABASE", "neo4j"),
+            uri=settings.neo4j_uri,
+            user=settings.neo4j_user,
+            password=settings.neo4j_password,
+            database=settings.neo4j_database,
         )
     )
 
@@ -43,10 +42,9 @@ def get_neo4j_client() -> Neo4jClient:
 def get_ollama_client() -> OllamaClient:
     return OllamaClient(
         OllamaSettings(
-            base_url=os.getenv("OLLAMA_URL", "http://192.168.178.23:11434"),
-            chat_model=os.getenv("OLLAMA_CHAT_MODEL", "granite3.3:8b"),
-            embed_model=os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b"),
-            # request_timeout_sec=float(os.getenv("OLLAMA_TIMEOUT_SEC", "180")),
+            base_url=settings.ollama_url,
+            chat_model=settings.ollama_chat_model,
+            embed_model=settings.ollama_embed_model,
         )
     )
 

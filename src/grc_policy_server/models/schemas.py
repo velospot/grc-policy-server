@@ -68,3 +68,10 @@ class UploadDocumentResponse(BaseModel):
     accepted: bool
     documentId: str | None = None
     chunksStored: int | None = None
+    error: str | None = None
+
+
+class UploadDocumentsResponse(BaseModel):
+    acceptedCount: int
+    rejectedCount: int
+    results: List[UploadDocumentResponse]

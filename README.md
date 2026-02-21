@@ -1,422 +1,190 @@
-## TO DO
-- [ ] compare api
-- [ ] revalidate schema and logic.
-
-
 # grc-policy-server
 
-Production‑grade Python service template using **uv**, designed to run consistently across local development, CI, and containerized environments.
+FastAPI service for GRC policy ingestion and policy comparison.
 
-This repository provides:
+## Features
 
-* Modern dependency management with `uv`
-* Typed, environment‑driven configuration with sensible defaults
-* Docker and Docker Compose support
-* A clean FastAPI service skeleton
-* Optional, open‑source LLM observability and monitoring
+- Upload one or many policy documents in one request (`POST /documents/upload`).
+- Convert documents with Docling and chunk for retrieval pipelines.
+- Persist chunk vectors in Weaviate for semantic/hybrid search.
+- Persist upload metadata on disk for document listing (`GET /documents`).
+- Compare two document versions and return structured GRC deltas (`POST /compare`).
+- Produce summarized comparison output from streamed diff events (`POST /compare/with-summary`).
+- Auto-generated OpenAPI docs via Swagger/ReDoc.
 
-The goal is not cleverness. The goal is *predictability under pressure*.
+## Runtime flow (starting at `main.py`)
 
----
+Entry point: `src/grc_policy_server/main.py`
 
-## Requirements
+1. `setup_logging(...)` configures service logging from environment settings.
+2. `FastAPI(...)` app is created with OpenAPI metadata.
+3. Routers are registered:
+   - `health.router` (`/health`)
+   - `documents.router` (`/documents`, `/documents/upload`)
+   - `compare.router` (`/compare`)
+   - `with_summary.router` (`/compare/with-summary`)
+4. `run()` starts Uvicorn with configured `host`, `port`, `log_level`, and `debug` reload mode.
 
-Before you begin, ensure you have:
+The dependency graph for routes is wired in `src/grc_policy_server/api/deps.py`.
 
-* Python **3.11+**
-* Docker (optional, required for containerized runs)
-* Git (recommended)
+## API endpoints
 
-Verify Python:
+- `GET /health`
+  - Basic service health.
 
-```bash
-python --version
-```
+- `GET /documents`
+  - Lists uploaded document metadata from `upload_root`.
 
----
+- `POST /documents/upload`
+  - Uploads one or more documents in a single request.
+  - Use multipart form-data and repeat the `file` field for batch upload.
+  - Returns per-file ingestion status.
 
-## Install `uv`
+- `POST /compare`
+  - Compares two documents and returns structured differences.
 
-`uv` replaces `pip`, `virtualenv`, and most waiting.
+- `POST /compare/with-summary`
+  - Runs streamed comparison and returns summarized result payload.
 
-```bash
-pip install --upgrade uv
-```
+## Upload API contract
 
-Verify:
+`POST /documents/upload` request (multipart):
 
-```bash
-uv --version
-```
+- `file`: one or more files (repeat field for multiple uploads)
 
----
-
-## Project Structure
-
-```
-my_uv_project/
-├── pyproject.toml        # Dependencies and project metadata
-├── uv.lock               # Locked, reproducible dependency graph
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example          # Documented environment variables
-├── src/
-│   └── my_uv_project/
-│       ├── main.py       # Application entrypoint
-│       ├── config.py     # Environment-based configuration
-│       └── health.py     # Health check endpoint
-│       └── logging.py    # logging
-├── tests/
-│   └── test_health.py
-└── README.md
-```
-
----
-
-## Setup (Local Development)
-
-### 1. Clone the repository
-
-```bash
-git clone <repo-url>
-cd my_uv_project
-```
-
-### 2. Install dependencies
-
-```bash
-uv sync --dev
-```
-
-This will:
-
-* Resolve dependencies
-* Create an isolated environment
-* Generate `uv.lock`
-
-Commit `uv.lock`. It is the source of truth for production.
-
----
-
-## Environment Configuration
-
-All configuration is driven by environment variables with defaults.
-
-### 1. Create a local `.env` file
-
-```bash
-cp .env.example .env
-```
-
-Edit as needed:
-
-```env
-APP_NAME=my-uv-project
-ENVIRONMENT=development
-LOG_LEVEL=info
-PORT=8000
-DEBUG=true
-```
-
-If a variable is not provided, the application falls back to its default value.
-
----
-
-## Run the Service Locally
-
-```bash
-uv run uvicorn my_uv_project.main:app --reload
-```
-
-Verify:
-
-```bash
-curl http://localhost:8000/health
-```
-
-Expected response:
+Response shape:
 
 ```json
-{"status": "ok"}
+{
+  "acceptedCount": 2,
+  "rejectedCount": 1,
+  "results": [
+    {
+      "filename": "policy-v1.pdf",
+      "contentType": "application/pdf",
+      "accepted": true,
+      "documentId": "...",
+      "chunksStored": 42,
+      "error": null
+    },
+    {
+      "filename": "broken.pdf",
+      "contentType": "application/pdf",
+      "accepted": false,
+      "documentId": null,
+      "chunksStored": null,
+      "error": "Uploaded file is empty"
+    }
+  ]
+}
 ```
 
----
+## Environment Variables
 
-## Run Tests
+Key runtime variables (all available in `.env.example`):
 
-```bash
-uv run pytest
-```
+- `APP_NAME`, `ENVIRONMENT`, `LOG_LEVEL`
+- `HOST`, `PORT`, `DEBUG`
+- `UPLOAD_ROOT`
+- `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
+- `WEAVIATE_URL`, `WEAVIATE_COLLECTION`, `WEAVIATE_EMBEDDED`
+- `OLLAMA_URL`, `OLLAMA_CHAT_MODEL`, `OLLAMA_EMBED_MODEL`, `OLLAMA_TIMEOUT_SEC`
+- `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_COLLECTION`
+- `DOWNLOAD_TIMEOUT_SECONDS`, `MAX_DOWNLOAD_MB`, `EMBED_BATCH_SIZE`
 
----
+## Core modules
 
-## Containerized Execution
+- `src/grc_policy_server/api/routes/`
+  - HTTP route handlers.
+- `src/grc_policy_server/services/ingestion/document_ingestion_service.py`
+  - Docling conversion, chunking, vector upsert, metadata persistence.
+- `src/grc_policy_server/services/vector/weaviate_client.py`
+  - Weaviate integration.
+- `src/grc_policy_server/services/graph/graph_neo4j_client.py`
+  - Neo4j integration.
+- `src/grc_policy_server/services/comparision/`
+  - Policy diff/comparison engines.
+- `src/grc_policy_server/respositories/documents.py`
+  - Uploaded document metadata listing.
 
-### Build the image
+## Local development
 
-```bash
-docker build -t my-uv-project .
-```
+### Prerequisites
 
-### Run with environment variables
-
-```bash
-docker run \
-  -e PORT=9000 \
-  -e LOG_LEVEL=debug \
-  -p 9000:9000 \
-  my-uv-project
-```
-
-Defaults apply for any variables not provided.
-
----
-
-## Docker Compose (Recommended for Teams)
-
-```bash
-docker-compose up --build
-```
-
-Docker Compose reads from `.env` and ensures local and container runs behave identically.
-
----
-
-## Optional: LLM Observability & Monitoring
-
-This project supports **optional, open‑source observability** for applications that call LLMs.
-
-You can enable this later without restructuring the app.
-
-### Supported tooling
-
-* **OpenTelemetry** – request tracing and latency
-* **Opik (by Comet ML)** – LLM‑specific observability (prompts, outputs, evaluations)
-
-### When to enable observability
-
-Enable observability if you need:
-
-* Prompt and response inspection
-* Latency and cost tracking
-* Regression detection
-* Debugging non‑deterministic LLM behavior
-
-### How to enable (high level)
-
-1. Add the Opik and OpenTelemetry dependencies
-2. Run the Opik backend (Docker Compose or Kubernetes)
-3. Configure environment variables pointing to the observability backend
-4. Wrap LLM calls with Opik tracing decorators
-
-This setup is entirely optional. If you do nothing, the application runs normally.
-
----
-
-## Configuration Precedence
-
-From strongest to weakest:
-
-1. Runtime environment variables
-2. `.env` file
-3. Defaults defined in `config.py`
-
-This ensures predictable behavior across environments.
-
----
-
-## Production Notes
-
-* Stateless by design
-* Configuration via environment variables only
-* Health endpoint suitable for load balancers and orchestration
-* Deterministic dependency resolution via `uv.lock`
-
-This template is intentionally conservative. It is meant to survive growth, audits, and on‑call rotations.
-
----
-
-## Update 19th Feb 2026
-# grc-policy-server
-
-FastAPI service for GRC policy ingestion and comparison.
-
-## What it does
-
-- Uploads policy documents and ingests them through:
-  - Docling conversion
-  - Hierarchical chunking
-  - Embedding generation
-  - Storage in Weaviate (vector) and Neo4j (graph)
-- Lists uploaded documents from local metadata.
-- Compares two documents using stored chunks and returns:
-  - Key differences
-  - Summary
-  - Action plan
-  - Follow-up questions
-
-## API docs (Swagger)
-
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-- OpenAPI JSON: `http://localhost:8000/openapi.json`
-
-## Requirements
-
-- Python `>=3.13` (from `pyproject.toml`)
+- Python 3.13+
 - `uv`
-- Running dependencies:
-  - Weaviate
-  - Neo4j
-  - Ollama (for embeddings/summaries used by ingestion and compare)
+- Docker (optional, for dependencies/services)
 
-## Local setup
-
-1. Install dependencies:
+### Install dependencies
 
 ```bash
 uv sync --dev
 ```
 
-2. Copy env file:
+### Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
-3. Start Weaviate + Neo4j:
+Update values in `.env` as needed.
 
-```bash
-docker compose up -d
-```
-
-4. Run API:
+### Run the API
 
 ```bash
 make dev
 ```
 
-## Core environment variables
+Or directly:
 
-`Settings` (`src/grc_policy_server/core/config.py`):
-
-- `APP_NAME`
-- `ENVIRONMENT`
-- `LOG_LEVEL`
-- `HOST`
-- `PORT`
-- `DEBUG`
-- `WEAVIATE_URL`
-- `WEAVIATE_COLLECTION`
-- `WEAVIATE_EMBEDDED`
-- `UPLOAD_ROOT` (defaults to `/data/uploads`)
-
-Dependency wiring (`src/grc_policy_server/api/deps.py`):
-
-- `NEO4J_URI`
-- `NEO4J_USER`
-- `NEO4J_PASSWORD`
-- `NEO4J_DATABASE`
-- `OLLAMA_URL`
-- `OLLAMA_CHAT_MODEL`
-- `OLLAMA_EMBED_MODEL`
-- `OLLAMA_TIMEOUT_SEC`
-
-## Endpoints
-
-### Health
-
-- `GET /health`
-
-Response:
-
-```json
-{"status":"ok"}
+```bash
+uv run uvicorn grc_policy_server.main:app --reload
 ```
 
-### Documents
+Swagger UI:
 
-- `GET /documents`
-  - Lists uploaded documents from metadata under `UPLOAD_ROOT`.
-- `POST /documents/upload`
-  - Multipart form upload (`file` field).
-  - Runs full ingestion pipeline.
+- [http://localhost:8000/docs](http://localhost:8000/docs)
 
-Upload response shape:
-
-```json
-{
-  "filename": "policy.pdf",
-  "contentType": "application/pdf",
-  "accepted": true,
-  "documentId": "uuid",
-  "chunksStored": 42
-}
-```
-
-### Compare
-
-- `POST /compare`
-- `POST /compare/with-summary`
-
-Both endpoints accept:
-
-```json
-{
-  "doc1": {
-    "id": "policy-v1",
-    "name": "Security Policy",
-    "version": "1.0",
-    "uploadDate": "2026-02-01",
-    "size": "2 MB",
-    "category": "security"
-  },
-  "doc2": {
-    "id": "policy-v2",
-    "name": "Security Policy",
-    "version": "2.0",
-    "uploadDate": "2026-02-15",
-    "size": "2.2 MB",
-    "category": "security"
-  }
-}
-```
-
-They return `ComparisonResult`:
-- `summary`
-- `keyDifferences`
-- `actionPlan`
-- `followUpQuestions`
-
-## Upload ingestion flow
-
-`POST /documents/upload` calls `DocumentIngestionService`:
-
-1. Convert upload bytes with `DoclingAdapter`.
-2. Chunk docling document via hierarchical chunker.
-3. Embed each chunk using Ollama client.
-4. Upsert chunk vectors into Weaviate.
-5. Upsert document/chunk/section graph into Neo4j.
-6. Persist file + `metadata.json` to `UPLOAD_ROOT/<document_id>/`.
-
-## Development commands
-
-- Run app: `make dev`
-- Run tests: `make test`
-- Lint: `make lint`
-
-## Tests
-
-Current API tests validate:
-
-- Swagger/OpenAPI availability
-- Health endpoint
-- Documents list endpoint
-- Document upload endpoint contract
-- Compare endpoints contract
-
-Run all tests:
+## Tests and lint
 
 ```bash
 make test
+make lint
 ```
+
+## Infrastructure
+
+`docker-compose.yml` includes:
+
+- `neo4j`
+- `weaviate`
+
+Start with:
+
+```bash
+docker-compose up --build
+```
+
+## TODOs
+
+- Re-enable and validate Neo4j chunk upsert in ingestion once graph schema is finalized.
+- Add integration tests for upload+ingestion against local Weaviate and Neo4j containers.
+- Improve metadata persistence abstraction (allow pluggable storage backend).
+- Add request/response validation tests for error-path upload outcomes in batch mode.
+
+## Contributing
+
+1. Create a branch from `main` (recommended prefix: `codex/`).
+2. Run setup and checks:
+   - `uv sync --dev`
+   - `make test`
+3. Keep changes scoped, add/adjust tests, and update README/API contract when behavior changes.
+4. Open a PR with a concise change summary and verification notes.
+
+## Acknowledgements
+
+- [FastAPI](https://fastapi.tiangolo.com/) for API framework and OpenAPI tooling.
+- [Docling](https://github.com/docling-project/docling) for document conversion/chunking pipeline building blocks.
+- [Weaviate](https://weaviate.io/) for vector storage and retrieval.
+- [Neo4j](https://neo4j.com/) for graph-based document relation modeling.
+- [Ollama](https://ollama.com/) for local model serving.

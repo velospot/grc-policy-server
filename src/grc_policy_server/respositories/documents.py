@@ -1,18 +1,24 @@
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 
+from grc_policy_server.core.config import settings
 from grc_policy_server.models.domain import DocumentDomain
-
-UPLOAD_ROOT = Path(os.getenv("UPLOAD_ROOT", "/data/uploads"))
-
 
 ## TO DO : save metadata about uploaded info in mongodb
 # TO DO : remove metadata.json dependency on doc_dir
 class DocumentRepository:
-    def __init__(self, upload_root: Path = UPLOAD_ROOT):
-        self.upload_root = upload_root
+    """Read uploaded document metadata from local storage."""
+
+    def __init__(self, upload_root: Path | None = None):
+        self.upload_root = upload_root or Path(settings.upload_root)
+
+    @staticmethod
+    def _load_metadata(metadata_path: Path) -> dict | None:
+        try:
+            return json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
 
     def list_documents(self) -> list[DocumentDomain]:
         documents = []
@@ -27,8 +33,9 @@ class DocumentRepository:
             if not meta_file.exists():
                 continue
 
-            with open(meta_file) as f:
-                meta = json.load(f)
+            meta = self._load_metadata(meta_file)
+            if not meta:
+                continue
 
             upload_date = meta.get("upload_date")
             if not upload_date:

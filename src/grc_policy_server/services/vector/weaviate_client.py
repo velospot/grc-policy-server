@@ -81,9 +81,9 @@ class WeaviateClient:
                 Property(name="page_number", data_type=DataType.INT),
             ],
             vector_config=Configure.Vectors.text2vec_ollama(
-                api_endpoint="http://192.168.178.23:11434",
-                model="qwen3-embedding:0.6b",
-                source_properties=["text", "section_path"],  # ← only embed this field
+                api_endpoint=settings.ollama_url,
+                model=settings.ollama_embed_model,
+                source_properties=["text", "section_path"],
             ),
         )
 
@@ -134,10 +134,10 @@ class WeaviateClient:
                     "chunk_index": int(chunk.get("chunk_index") or 0),
                     "page_number": chunk.get("page_number"),
                 }
-                uniqueId = str(uuid5(NAMESPACE_URL, chunk_id))
+                unique_id = str(uuid5(NAMESPACE_URL, chunk_id))
                 batch.add_object(
                     properties=props,
-                    uuid=uniqueId,
+                    uuid=unique_id,
                 )
                 # chunks_Ids.append(uniqueId)
 

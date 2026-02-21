@@ -137,10 +137,14 @@ class StubDiffEngineStream:
 
 class StubDocumentIngestionService:
     async def ingest_upload(self, *, filename: str, content: bytes, content_type: str | None):
-        assert filename == "policy.pdf"
-        assert content == b"policy content"
         assert content_type == "application/pdf"
-        return UploadIngestionResult(document_id="doc-upload-1", chunks_stored=3)
+        if filename == "policy.pdf":
+            assert content == b"policy content"
+            return UploadIngestionResult(document_id="doc-upload-1", chunks_stored=3)
+        if filename == "policy-2.pdf":
+            assert content == b"policy second content"
+            return UploadIngestionResult(document_id="doc-upload-2", chunks_stored=5)
+        raise AssertionError(f"Unexpected filename: {filename}")
 
 
 @pytest.fixture(autouse=True)
@@ -194,21 +198,77 @@ def test_upload_document():
     )
     assert response.status_code == 201
     assert response.json() == {
-        "filename": "policy.pdf",
-        "contentType": "application/pdf",
-        "accepted": True,
-        "documentId": "doc-upload-1",
-        "chunksStored": 3,
+        "acceptedCount": 1,
+        "rejectedCount": 0,
+        "results": [
+            {
+                "filename": "policy.pdf",
+                "contentType": "application/pdf",
+                "accepted": True,
+                "documentId": "doc-upload-1",
+                "chunksStored": 3,
+                "error": None,
+            }
+        ],
     }
 
 
-def test_upload_document_rejects_empty_file():
+def test_upload_multiple_documents():
+    app.dependency_overrides[get_document_ingestion_service_factory] = (
+        lambda: (lambda: StubDocumentIngestionService())
+    )
+    response = client.post(
+        "/documents/upload",
+        files=[
+            ("file", ("policy.pdf", b"policy content", "application/pdf")),
+            ("file", ("policy-2.pdf", b"policy second content", "application/pdf")),
+        ],
+    )
+    assert response.status_code == 201
+    assert response.json() == {
+        "acceptedCount": 2,
+        "rejectedCount": 0,
+        "results": [
+            {
+                "filename": "policy.pdf",
+                "contentType": "application/pdf",
+                "accepted": True,
+                "documentId": "doc-upload-1",
+                "chunksStored": 3,
+                "error": None,
+            },
+            {
+                "filename": "policy-2.pdf",
+                "contentType": "application/pdf",
+                "accepted": True,
+                "documentId": "doc-upload-2",
+                "chunksStored": 5,
+                "error": None,
+            },
+        ],
+    }
+
+
+def test_upload_document_rejects_empty_file_in_results():
     response = client.post(
         "/documents/upload",
         files={"file": ("empty.pdf", b"", "application/pdf")},
     )
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Uploaded file is empty"
+    assert response.status_code == 201
+    assert response.json() == {
+        "acceptedCount": 0,
+        "rejectedCount": 1,
+        "results": [
+            {
+                "filename": "empty.pdf",
+                "contentType": "application/pdf",
+                "accepted": False,
+                "documentId": None,
+                "chunksStored": None,
+                "error": "Uploaded file is empty",
+            }
+        ],
+    }
 
 
 def test_compare_documents():
