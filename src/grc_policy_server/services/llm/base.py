@@ -9,7 +9,7 @@ from grc_policy_server.models.schemas import KeyDifference
 
 class BaseLLM(ABC):
     @abstractmethod
-    async def embed(self, text: str) -> list[float]:
+    def embed(self, text: str) -> list[float]:
         """Return embedding vector for text."""
         raise NotImplementedError
 

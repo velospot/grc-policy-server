@@ -6,17 +6,20 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import httpx
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 
+from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import KeyDifference
 from grc_policy_server.services.llm.base import BaseLLM
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class OllamaSettings:
-    base_url: str = "http://ollama:11434"
-    chat_model: str = "llama3.1"
-    embed_model: str = "nomic-embed-text"
-    request_timeout_sec: float = 180.0
+    base_url: str = "http://192.168.178.23:11434"
+    chat_model: str = "granite3.3:8b"
+    embed_model: str = "qwen3-embedding"
 
 
 class OllamaClient(BaseLLM):
@@ -33,17 +36,13 @@ class OllamaClient(BaseLLM):
     def __init__(self, settings: Optional[OllamaSettings] = None):
         self.settings = settings or OllamaSettings()
 
-    async def embed(self, text: str) -> list[float]:
-        payload = {
-            "model": self.settings.embed_model,
-            "prompt": text,
-        }
-        data = await self._post_json("/api/embeddings", payload, timeout=120.0)
-        emb = data.get("embedding")
-        if not isinstance(emb, list):
-            raise RuntimeError(
-                f"Ollama embeddings response missing 'embedding': {data}"
-            )
+    def embed(self, text: str) -> list[float]:
+
+        llm = OllamaEmbeddings(
+            model=self.settings.embed_model, base_url=self.settings.base_url
+        )
+        emb = llm.embed_query(text)
+
         return emb
 
     async def summarize_diff(
@@ -56,15 +55,14 @@ class OllamaClient(BaseLLM):
         prompt = self._prompt_summarize_diff(
             old_text=old_text, new_text=new_text, section=section
         )
-        payload = {
-            "model": self.settings.chat_model,
-            "prompt": prompt,
-            "stream": False,
-        }
-        data = await self._post_json(
-            "/api/generate", payload, timeout=self.settings.request_timeout_sec
+
+        llm = ChatOllama(
+            model=self.settings.chat_model,
+            base_url=self.settings.base_url,
+            # other params...
         )
-        return (data.get("response") or "").strip()
+        ai_msg = await llm.ainvoke(prompt)
+        return str(ai_msg.content)
 
     async def summarize_changes(
         self,
@@ -77,15 +75,13 @@ class OllamaClient(BaseLLM):
         prompt = self._prompt_summarize_changes(
             doc1_name=doc1_name, doc2_name=doc2_name, diffs=compact
         )
-        payload = {
-            "model": self.settings.chat_model,
-            "prompt": prompt,
-            "stream": False,
-        }
-        data = await self._post_json(
-            "/api/generate", payload, timeout=self.settings.request_timeout_sec
+
+        llm = ChatOllama(
+            model=self.settings.chat_model,
+            base_url=self.settings.base_url,
         )
-        return (data.get("response") or "").strip()
+        ai_msg = await llm.ainvoke(prompt)
+        return str(ai_msg.content)
 
     async def generate_followups(
         self,
@@ -93,7 +89,7 @@ class OllamaClient(BaseLLM):
         doc1_name: str,
         doc2_name: str,
         key_differences: List[KeyDifference],
-        max_questions: int = 6,
+        max_questions: int = 4,
     ) -> List[str]:
         compact = self._compact_diffs_for_followups(key_differences)
         prompt = self._prompt_followups(
@@ -102,26 +98,22 @@ class OllamaClient(BaseLLM):
             diffs=compact,
             max_questions=max_questions,
         )
-        payload = {
-            "model": self.settings.chat_model,
-            "prompt": prompt,
-            "stream": False,
-        }
-        data = await self._post_json(
-            "/api/generate", payload, timeout=self.settings.request_timeout_sec
+
+        llm = ChatOllama(
+            model=self.settings.chat_model,
+            base_url=self.settings.base_url,
         )
-        text = (data.get("response") or "").strip()
+        ai_msg = await llm.ainvoke(prompt)
+        text = str(ai_msg.content)
         return self._parse_numbered_questions(text, max_questions=max_questions)
 
     # -------------------------
     # HTTP helpers
     # -------------------------
 
-    async def _post_json(
-        self, path: str, payload: Dict[str, Any], timeout: float
-    ) -> Dict[str, Any]:
+    async def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.settings.base_url}{path}"
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient() as client:
             r = await client.post(url, json=payload)
             r.raise_for_status()
             data = r.json()

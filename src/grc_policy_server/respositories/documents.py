@@ -44,9 +44,7 @@ class DocumentRepository:
                     id=doc_id,
                     name=doc_name,
                     version=meta.get("version", "unknown"),
-                    upload_date=datetime.fromisoformat(
-                        upload_date.replace("Z", "")
-                    ),
+                    upload_date=datetime.fromisoformat(upload_date.replace("Z", "")),
                     size_bytes=meta.get("size_bytes", 0),
                     category=meta.get("category", "unknown"),
                     file_path=str(

@@ -34,6 +34,8 @@ class DoclingAdapter:
         pdf_options = PdfPipelineOptions()
         pdf_options.do_ocr = auto_ocr
         pdf_options.do_table_structure = do_table_structure
+        pdf_options.images_scale = 0.5
+        # pdf_options.do_formula_enrichment = True
 
         if force_full_page_ocr:
             # In latest versions, use OcrOptions for configuration

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import (
     ActionItem,
     ComparisonResult,
@@ -40,19 +41,23 @@ def impact_from_distance(distance: Optional[float], change_type: str) -> str:
     return "Low"
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class RealDiffEngine:
     weaviate: WeaviateClient
     neo4j: Neo4jClient
     llm: OllamaClient
     thresholds: DiffThresholds = DiffThresholds()
-    topk: int = 3
+    topk: int = 5
     max_diffs: int = 40  # cap for UI sanity
 
     async def compare(self, doc1: Document, doc2: Document) -> ComparisonResult:
         a_chunks = self.weaviate.fetch_chunks_by_document(doc1.id)
         b_chunks = self.weaviate.fetch_chunks_by_document(doc2.id)
-
+        logger.info("a_chunks count = %s", len(a_chunks))
+        logger.info("b_chunks count = %s", len(b_chunks))
         # Build candidate match edges: (distance, a_chunk_id, b_chunk_id)
         candidate_edges: List[Tuple[float, str, str, dict, dict]] = []
 
@@ -64,15 +69,17 @@ class RealDiffEngine:
 
         for a in a_chunks:
             text_a = (a.get("text") or "").strip()
-            if not text_a:
+            a_section = (a.get("section_path") or "").strip()
+            if not text_a or "..." not in text_a:
                 continue
 
             # embed A chunk text
-            v = await self.llm.embed(text_a)
+            # v = self.llm.embed(text_a)
 
             # Search ONLY inside doc2
-            matches = self.weaviate.semantic_search_in_document(
-                query_vector=v,
+            matches = self.weaviate.search_section_in_document(
+                query_string=a_section,
+                query_text=text_a,
                 target_document_id=doc2.id,
                 limit=self.topk,
             )
@@ -111,16 +118,17 @@ class RealDiffEngine:
         # A side: removed or modified
         for a in a_chunks:
             a_id = a.get("chunk_id") or ""
+            a_section = a.get("section_path") or ""
             if not a_id:
                 continue
 
             if a_id not in matched_a:
                 # REMOVED
-                section = self._resolve_section(a)
+                # section = self._resolve_section(a)
                 diffs.append(
                     KeyDifference(
                         changeType="REMOVED",
-                        section=section,
+                        section=a_section,
                         doc1Content=self._short(a.get("text", "")),
                         doc2Content=None,
                         impact=impact_from_distance(None, "REMOVED"),
@@ -137,11 +145,11 @@ class RealDiffEngine:
                 continue
 
             # MODIFIED
-            section = self._resolve_section(a_obj)
+            # section = self._resolve_section(a_obj)
             diffs.append(
                 KeyDifference(
                     changeType="MODIFIED",
-                    section=section,
+                    section=a_section,
                     doc1Content=self._short(a_obj.get("text", "")),
                     doc2Content=self._short(b_obj.get("text", "")),
                     impact=impact_from_distance(dist, "MODIFIED"),
@@ -153,16 +161,17 @@ class RealDiffEngine:
         # B side: added (not matched by any A)
         for b in b_chunks:
             b_id = b.get("chunk_id") or ""
+            b_section = b.get("section_path") or ""
             if not b_id:
                 continue
             if b_id in matched_b:
                 continue
 
-            section = self._resolve_section(b)
+            # section = self._resolve_section(b)
             diffs.append(
                 KeyDifference(
                     changeType="ADDED",
-                    section=section,
+                    section=b_section,
                     doc1Content=None,
                     doc2Content=self._short(b.get("text", "")),
                     impact=impact_from_distance(None, "ADDED"),

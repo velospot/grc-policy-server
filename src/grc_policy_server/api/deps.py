@@ -6,18 +6,18 @@ from collections.abc import Callable
 from pathlib import Path
 
 from grc_policy_server.core.config import settings
-from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
-from grc_policy_server.services.ingestion.document_ingestion_service import (
-    DocumentIngestionService,
-)
+from grc_policy_server.respositories.documents import DocumentRepository
 from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
 from grc_policy_server.services.comparision.real_diff_engine_stream import (
     RealDiffEngineStream,
 )
-from grc_policy_server.respositories.documents import DocumentRepository
 from grc_policy_server.services.graph.graph_neo4j_client import (
     Neo4jClient,
     Neo4jSettings,
+)
+from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
+from grc_policy_server.services.ingestion.document_ingestion_service import (
+    DocumentIngestionService,
 )
 from grc_policy_server.services.llm.ollama_client import OllamaClient, OllamaSettings
 from grc_policy_server.services.vector.weaviate_client import (
@@ -43,10 +43,10 @@ def get_neo4j_client() -> Neo4jClient:
 def get_ollama_client() -> OllamaClient:
     return OllamaClient(
         OllamaSettings(
-            base_url=os.getenv("OLLAMA_URL", "http://ollama:11434"),
-            chat_model=os.getenv("OLLAMA_CHAT_MODEL", "llama3.1"),
-            embed_model=os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
-            request_timeout_sec=float(os.getenv("OLLAMA_TIMEOUT_SEC", "180")),
+            base_url=os.getenv("OLLAMA_URL", "http://192.168.178.23:11434"),
+            chat_model=os.getenv("OLLAMA_CHAT_MODEL", "granite3.3:8b"),
+            embed_model=os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b"),
+            # request_timeout_sec=float(os.getenv("OLLAMA_TIMEOUT_SEC", "180")),
         )
     )
 
@@ -72,7 +72,7 @@ def get_diff_engine_stream() -> RealDiffEngineStream:
 
 
 def get_document_repository() -> DocumentRepository:
-    return DocumentRepository()
+    return DocumentRepository(upload_root=Path(settings.upload_root))
 
 
 def get_document_ingestion_service() -> DocumentIngestionService:

@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from docling_core.transforms.chunker.doc_chunk import DocChunk
+
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
 from grc_policy_server.services.ingestion.docling_chunker import (
@@ -59,9 +61,12 @@ class DocumentIngestionService:
 
         raw_chunks = chunk_document(dl_doc, merge_list_items=True)
         chunks_to_store: list[dict] = []
+        doc_to_store: list[dict] = []
 
         for idx, raw_chunk in enumerate(raw_chunks):
             fields = extract_basic_chunk_fields(raw_chunk)
+            doc_chunk = DocChunk.model_validate(raw_chunk)
+            doc_to_store.append(doc_chunk.export_json_dict())
             text = (fields.get("text") or "").strip()
             if not text:
                 continue
@@ -70,7 +75,6 @@ class DocumentIngestionService:
             section_path = (
                 " / ".join(section_titles) if section_titles else "Unknown Section"
             )
-            vector = await self.llm.embed(text)
 
             chunks_to_store.append(
                 {
@@ -80,10 +84,8 @@ class DocumentIngestionService:
                     "text": text,
                     "chunk_index": idx,
                     "page_number": fields.get("page_number"),
-                    "docling_path": fields.get("docling_path"),
                     "line_start": None,
                     "line_end": None,
-                    "vector": vector,
                 }
             )
 
@@ -91,11 +93,11 @@ class DocumentIngestionService:
             raise ValueError("No text chunks produced from uploaded document")
 
         self.weaviate.upsert_chunks(chunks_to_store)
-        self.neo4j.upsert_document_with_chunks(
-            document_id=document_id,
-            filename=filename,
-            chunks=chunks_to_store,
-        )
+        # self.neo4j.upsert_document_with_chunks(
+        #     document_id=document_id,
+        #     filename=filename,
+        #     chunks=chunks_to_store,
+        # )
         self._persist_upload_metadata(
             document_id=document_id,
             filename=filename,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Dict, Iterable, Optional
 
 from docling_core.transforms.chunker.doc_chunk import DocChunk
 from docling_core.transforms.chunker.hierarchical_chunker import (
@@ -13,10 +13,11 @@ logger = logging.getLogger(__name__)
 
 
 def chunk_document(dl_doc, *, merge_list_items: bool) -> list[Any]:
-    chunker = HierarchicalChunker(merge_list_items=merge_list_items)
-
+    chunker = HierarchicalChunker(
+        merge_list_items=merge_list_items, always_emit_headings=True
+    )
     chunksList = list(chunker.chunk(dl_doc))
-    logger.info(" filechunks ", chunksList[:25])
+
     return chunksList
 
 
@@ -86,7 +87,9 @@ def extract_table_and_image_info(
 
 def extract_basic_chunk_fields(chunk: Any) -> dict[str, Any]:
     doc_chunk = DocChunk.model_validate(chunk)
-    page = getattr(chunk, "page", None)
+    # doc_items_refs = [it.self_ref for it in doc_chunk.meta.doc_items]
+    # has_provInfo = any(it. == DocItemLabel.TABLE for it in doc_items_refs)
+    page = extract_page_number(doc_chunk.meta)
 
     return {
         "text": getattr(chunk, "text", "") or "",
@@ -94,3 +97,112 @@ def extract_basic_chunk_fields(chunk: Any) -> dict[str, Any]:
         "page_number": page if isinstance(page, int) else None,
         "section_path": _section_path_from_chunk(doc_chunk),
     }
+
+
+def meta_to_dict(meta: Any) -> Dict[str, Any]:
+    """
+    Convert Docling metadata objects (e.g., DocMeta) into a plain dict.
+
+    Supports common patterns:
+    - pydantic v2: model_dump()
+    - pydantic v1: dict()
+    - dataclasses / attrs: __dict__
+    - already a dict
+    Fallback: best-effort via vars()
+    """
+    if meta is None:
+        return {}
+
+    if isinstance(meta, dict):
+        return meta
+
+    # pydantic v2
+    if hasattr(meta, "model_dump") and callable(getattr(meta, "model_dump")):
+        try:
+            return meta.model_dump()
+        except Exception:
+            pass
+
+    # pydantic v1
+    if hasattr(meta, "dict") and callable(getattr(meta, "dict")):
+        try:
+            return meta.dict()
+        except Exception:
+            pass
+
+    # generic python object -> __dict__
+    if hasattr(meta, "__dict__"):
+        try:
+            return dict(meta.__dict__)
+        except Exception:
+            pass
+
+    # last resort
+    try:
+        return dict(vars(meta))
+    except Exception:
+        return {}
+
+
+def iter_dicts(v: Any) -> Iterable[Dict[str, Any]]:
+    """
+    Yield dicts from: dict | list[dict] | object that can be normalized to dict.
+    """
+    if v is None:
+        return
+    if isinstance(v, dict):
+        yield v
+        return
+    if isinstance(v, list):
+        for it in v:
+            if isinstance(it, dict):
+                yield it
+            else:
+                d = meta_to_dict(it)
+                if d:
+                    yield d
+        return
+
+    d = meta_to_dict(v)
+    if d:
+        yield d
+
+
+def safe_int(x: Any) -> Optional[int]:
+    try:
+        if x is None:
+            return None
+        return int(x)
+    except Exception:
+        return None
+
+
+def extract_page_number(meta_any: Any) -> int:
+    """
+    Best-effort page extraction. Accepts dict OR DocMeta-like object.
+
+    Priority:
+      1) direct keys: page_number/page/page_no/pageNo/page_idx
+      2) meta.doc_items[*].prov[*].page_no   (doc_items/prov can be list[dict] or list[obj])
+      3) meta.prov[*].page_no                (prov can be list[dict] or list[obj])
+      else -1
+    """
+    meta = meta_to_dict(meta_any)
+
+    for key in ("page_number", "page", "page_no", "pageNo", "page_idx"):
+        n = safe_int(meta.get(key))
+        if n is not None:
+            return n
+
+    for doc_item in iter_dicts(meta.get("doc_items")):
+        for prov in iter_dicts(doc_item.get("prov")):
+            n = safe_int(prov.get("page_no"))
+            if n is not None:
+                return n
+
+    for prov in iter_dicts(meta.get("prov")):
+        n = safe_int(prov.get("page_no"))
+        if n is not None:
+            return n
+
+    return -1
