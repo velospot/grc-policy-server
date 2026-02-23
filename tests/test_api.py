@@ -7,11 +7,12 @@ from grc_policy_server.api.deps import (
     get_diff_engine,
     get_diff_engine_stream,
     get_document_ingestion_service_factory,
+    get_neo4j_client,
     get_document_repository,
     get_weaviate_client,
 )
 from grc_policy_server.core.config import settings
-from grc_policy_server.main import app
+from grc_policy_server.main import app, request_lock
 from grc_policy_server.models.domain import DocumentDomain
 from grc_policy_server.models.schemas import (
     ActionItem,
@@ -181,6 +182,36 @@ class StubWeaviateDeleteClient:
         return self.deleted_chunks.get(document_id, 0)
 
 
+class StubWeaviateHybridSearchClient:
+    def __init__(
+        self,
+        *,
+        results_by_document: dict[str, list[dict]] | None = None,
+        should_fail: bool = False,
+    ):
+        self.results_by_document = results_by_document or {}
+        self.should_fail = should_fail
+        self.calls: list[dict[str, str | int]] = []
+
+    def hybrid_search_in_document(
+        self,
+        *,
+        query_string: str,
+        target_document_id: str,
+        limit: int = 3,
+    ) -> list[dict]:
+        self.calls.append(
+            {
+                "query_string": query_string,
+                "target_document_id": target_document_id,
+                "limit": limit,
+            }
+        )
+        if self.should_fail:
+            raise RuntimeError("hybrid search failure")
+        return self.results_by_document.get(target_document_id, [])
+
+
 @pytest.fixture(autouse=True)
 def clear_dependency_overrides():
     app.dependency_overrides.clear()
@@ -194,6 +225,12 @@ def test_swagger_ui_is_available():
     assert "Swagger UI" in response.text
 
 
+def test_request_lock_is_released_after_request():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert request_lock.locked() is False
+
+
 def test_openapi_includes_core_routes():
     response = client.get("/openapi.json")
     assert response.status_code == 200
@@ -203,6 +240,7 @@ def test_openapi_includes_core_routes():
     assert "/health" in paths
     assert "/documents" in paths
     assert "/documents/delete" in paths
+    assert "/documents/search/hybrid" in paths
     assert "/documents/upload" in paths
     assert "/compare" in paths
     assert "/compare/with-summary" in paths
@@ -476,6 +514,126 @@ def test_delete_documents_returns_error_on_weaviate_failure():
     assert repository.deleted_document_ids == []
 
 
+def test_hybrid_search_documents():
+    weaviate = StubWeaviateHybridSearchClient(
+        results_by_document={
+            "doc-1": [
+                {
+                    "chunk_id": "doc-1:2",
+                    "document_id": "doc-1",
+                    "section_path": "Access Control",
+                    "text": "MFA is required for admins.",
+                    "chunk_index": 2,
+                    "_distance": 0.12,
+                }
+            ],
+            "doc-2": [
+                {
+                    "chunk_id": "doc-2:4",
+                    "document_id": "doc-2",
+                    "section_path": "Authentication",
+                    "text": "MFA is mandatory for all users.",
+                    "chunk_index": 4,
+                    "_distance": 0.08,
+                }
+            ],
+        }
+    )
+    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+
+    response = client.post(
+        "/documents/search/hybrid",
+        json={
+            "documentId1": "doc-1",
+            "documentId2": "doc-2",
+            "query": "mfa requirement",
+            "limit": 2,
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "query": "mfa requirement",
+        "results": [
+            {
+                "documentId": "doc-1",
+                "chunks": [
+                    {
+                        "chunkId": "doc-1:2",
+                        "documentId": "doc-1",
+                        "sectionPath": "Access Control",
+                        "text": "MFA is required for admins.",
+                        "chunkIndex": 2,
+                        "score": 0.12,
+                    }
+                ],
+            },
+            {
+                "documentId": "doc-2",
+                "chunks": [
+                    {
+                        "chunkId": "doc-2:4",
+                        "documentId": "doc-2",
+                        "sectionPath": "Authentication",
+                        "text": "MFA is mandatory for all users.",
+                        "chunkIndex": 4,
+                        "score": 0.08,
+                    }
+                ],
+            },
+        ],
+    }
+    assert weaviate.calls == [
+        {"query_string": "mfa requirement", "target_document_id": "doc-1", "limit": 2},
+        {"query_string": "mfa requirement", "target_document_id": "doc-2", "limit": 2},
+    ]
+
+
+def test_hybrid_search_documents_rejects_invalid_payload():
+    response = client.post(
+        "/documents/search/hybrid",
+        json={
+            "documentId1": "doc-1",
+            "documentId2": "doc-1",
+            "query": "   ",
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 400
+    assert response.json() == {"detail": "documentId1 and documentId2 must be different"}
+
+
+def test_hybrid_search_documents_rejects_blank_query():
+    response = client.post(
+        "/documents/search/hybrid",
+        json={
+            "documentId1": "doc-1",
+            "documentId2": "doc-2",
+            "query": "   ",
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Query must not be empty"}
+
+
+def test_hybrid_search_documents_returns_error_on_weaviate_failure():
+    weaviate = StubWeaviateHybridSearchClient(should_fail=True)
+    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+
+    response = client.post(
+        "/documents/search/hybrid",
+        json={
+            "documentId1": "doc-1",
+            "documentId2": "doc-2",
+            "query": "mfa",
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Failed to run hybrid search in Weaviate"}
+
+
 def test_compare_documents():
     app.dependency_overrides[get_diff_engine] = lambda: StubDiffEngine()
     response = client.post("/compare", json=compare_payload(), headers=auth_headers())
@@ -498,3 +656,40 @@ def test_compare_with_summary():
     payload = response.json()
     assert payload["summary"] == "Compared policy-v1 with policy-v2"
     assert payload["keyDifferences"][0]["changeType"] == "ADDED"
+
+
+def test_weaviate_dependency_closes_client(monkeypatch):
+    closed = {"value": False}
+
+    class StubWeaviateClient:
+        def close(self):
+            closed["value"] = True
+
+    monkeypatch.setattr("grc_policy_server.api.deps.WeaviateClient", StubWeaviateClient)
+
+    dep = get_weaviate_client()
+    _ = next(dep)
+    with pytest.raises(StopIteration):
+        next(dep)
+
+    assert closed["value"] is True
+
+
+def test_neo4j_dependency_closes_client(monkeypatch):
+    closed = {"value": False}
+
+    class StubNeo4jClient:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def close(self):
+            closed["value"] = True
+
+    monkeypatch.setattr("grc_policy_server.api.deps.Neo4jClient", StubNeo4jClient)
+
+    dep = get_neo4j_client()
+    _ = next(dep)
+    with pytest.raises(StopIteration):
+        next(dep)
+
+    assert closed["value"] is True

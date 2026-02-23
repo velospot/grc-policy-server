@@ -6,6 +6,8 @@ FastAPI service for GRC policy ingestion and policy comparison.
 
 - Upload one or many policy documents in one request (`POST /documents/upload`).
 - Delete one or many documents and their Weaviate chunks (`POST /documents/delete`).
+- Hybrid-search two documents for matching chunks (`POST /documents/search/hybrid`).
+- Serialize API request handling with an app-level lock for deterministic processing.
 - Convert documents with Docling and chunk for retrieval pipelines.
 - Persist chunk vectors in Weaviate for semantic/hybrid search.
 - Persist upload metadata on disk for document listing (`GET /documents`).
@@ -21,10 +23,11 @@ Entry point: `src/grc_policy_server/main.py`
 2. `FastAPI(...)` app is created with OpenAPI metadata.
 3. Routers are registered:
    - `health.router` (`/health`)
-   - `documents.router` (`/documents`, `/documents/upload`, `/documents/delete`)
+   - `documents.router` (`/documents`, `/documents/upload`, `/documents/delete`, `/documents/search/hybrid`)
    - `compare.router` (`/compare`)
    - `with_summary.router` (`/compare/with-summary`)
 4. `run()` starts Uvicorn with configured `host`, `port`, `log_level`, and `debug` reload mode.
+5. HTTP middleware acquires a process-local request lock and always releases it in `finally`.
 
 The dependency graph for routes is wired in `src/grc_policy_server/api/deps.py`.
 
@@ -48,6 +51,10 @@ In Swagger (`/docs`), use the `Authorize` button and paste the token value (with
   - Deletes one or more documents by `documentIds`.
   - Removes local document artifacts and matching Weaviate chunk records.
   - Returns per-document deletion status with deleted chunk counts.
+
+- `POST /documents/search/hybrid`
+  - Runs hybrid search in Weaviate for both `documentId1` and `documentId2`.
+  - Uses one shared `query` and returns matched chunks grouped by document.
 
 - `POST /compare`
   - Compares two documents and returns structured differences.

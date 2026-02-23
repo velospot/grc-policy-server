@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+import asyncio
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from grc_policy_server.api.routes import compare, documents, health, with_summary
@@ -36,6 +38,19 @@ app.add_middleware(
     allow_methods=_parse_cors_items(settings.cors_allow_methods),
     allow_headers=_parse_cors_items(settings.cors_allow_headers),
 )
+
+request_lock = asyncio.Lock()
+
+
+@app.middleware("http")
+async def with_request_lock(request: Request, call_next):
+    await request_lock.acquire()
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        request_lock.release()
+
 
 app.include_router(health.router)
 app.include_router(documents.router)

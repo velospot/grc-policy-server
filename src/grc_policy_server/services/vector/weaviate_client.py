@@ -202,7 +202,7 @@ class WeaviateClient:
                 "text",
                 "chunk_index",
             ],
-            return_metadata=["distance"],
+            return_metadata=MetadataQuery(score=True, distance=True),
         )
 
         out: List[Dict[str, Any]] = []

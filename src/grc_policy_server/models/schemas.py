@@ -1,6 +1,6 @@
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Document(BaseModel):
@@ -92,3 +92,29 @@ class DeleteDocumentsResponse(BaseModel):
     deletedCount: int
     failedCount: int
     results: List[DeleteDocumentResult]
+
+
+class HybridSearchRequest(BaseModel):
+    documentId1: str
+    documentId2: str
+    query: str
+    limit: int = Field(default=3, ge=1, le=50)
+
+
+class HybridSearchChunk(BaseModel):
+    chunkId: str
+    documentId: str
+    sectionPath: str
+    text: str
+    chunkIndex: int | None = None
+    score: float | None = None
+
+
+class HybridSearchDocumentResult(BaseModel):
+    documentId: str
+    chunks: List[HybridSearchChunk]
+
+
+class HybridSearchResponse(BaseModel):
+    query: str
+    results: List[HybridSearchDocumentResult]
