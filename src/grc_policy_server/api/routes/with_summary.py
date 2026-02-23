@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from grc_policy_server.api.deps import get_diff_engine_stream
+from grc_policy_server.api.deps import (
+    get_diff_engine_stream,
+    require_api_bearer_token,
+)
 from grc_policy_server.models.schemas import (
     ActionItem,
     CompareRequest,
@@ -11,7 +14,11 @@ from grc_policy_server.services.comparision.real_diff_engine_stream import (
     RealDiffEngineStream,
 )
 
-router = APIRouter(prefix="/compare", tags=["compare"])
+router = APIRouter(
+    prefix="/compare",
+    tags=["compare"],
+    dependencies=[Depends(require_api_bearer_token)],
+)
 
 
 @router.post(

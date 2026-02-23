@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
+    api_bearer_token: str = "dummy-token"
+    cors_allow_origins: str = "*"
+    cors_allow_methods: str = "*"
+    cors_allow_headers: str = "*"
+    cors_allow_credentials: bool = False
 
     # Feature flags / runtime behavior
     debug: bool = True

@@ -91,6 +91,12 @@ class WeaviateClient:
     def collection(self):
         return self.client.collections.get(self.collection_name)
 
+    def delete_chunks_by_document(self, document_id: str) -> int:
+        result = self.collection.data.delete_many(
+            where=Filter.by_property("document_id").equal(document_id)
+        )
+        return int(result.successful)
+
     def fetch_chunks_by_document(self, document_id: str) -> List[Dict[str, Any]]:
         # filter = Filter.all_of(
         #      # Combines the below with `|`

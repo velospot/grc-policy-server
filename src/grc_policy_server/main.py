@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from grc_policy_server.api.routes import compare, documents, health, with_summary
 from grc_policy_server.core.config import settings
@@ -22,6 +23,18 @@ app = FastAPI(
         {"name": "documents", "description": "Document management endpoints"},
         {"name": "compare", "description": "Document comparison endpoints"},
     ],
+)
+
+def _parse_cors_items(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_parse_cors_items(settings.cors_allow_origins),
+    allow_credentials=settings.cors_allow_credentials,
+    allow_methods=_parse_cors_items(settings.cors_allow_methods),
+    allow_headers=_parse_cors_items(settings.cors_allow_headers),
 )
 
 app.include_router(health.router)

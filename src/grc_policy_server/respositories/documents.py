@@ -1,4 +1,5 @@
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +20,18 @@ class DocumentRepository:
             return json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
+
+    def _resolve_document_dir(self, document_id: str) -> Path:
+        doc_id = document_id.strip()
+        if not doc_id:
+            raise ValueError("Document id must not be empty")
+
+        upload_root = self.upload_root.resolve()
+        document_dir = (upload_root / doc_id).resolve()
+        if upload_root not in document_dir.parents:
+            raise ValueError("Invalid document id")
+
+        return document_dir
 
     def list_documents(self) -> list[DocumentDomain]:
         documents = []
@@ -61,3 +74,13 @@ class DocumentRepository:
             )
 
         return documents
+
+    def delete_document(self, document_id: str) -> bool:
+        document_dir = self._resolve_document_dir(document_id)
+        if not document_dir.exists():
+            return False
+        if not document_dir.is_dir():
+            return False
+
+        shutil.rmtree(document_dir)
+        return True

@@ -75,3 +75,20 @@ class UploadDocumentsResponse(BaseModel):
     acceptedCount: int
     rejectedCount: int
     results: List[UploadDocumentResponse]
+
+
+class DeleteDocumentsRequest(BaseModel):
+    documentIds: List[str]
+
+
+class DeleteDocumentResult(BaseModel):
+    documentId: str
+    deleted: bool
+    deletedChunks: int | None = None
+    error: str | None = None
+
+
+class DeleteDocumentsResponse(BaseModel):
+    deletedCount: int
+    failedCount: int
+    results: List[DeleteDocumentResult]

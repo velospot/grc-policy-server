@@ -4,6 +4,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from fastapi import HTTPException, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from grc_policy_server.core.config import settings
 from grc_policy_server.respositories.documents import DocumentRepository
 from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
@@ -22,6 +25,31 @@ from grc_policy_server.services.llm.ollama_client import OllamaClient, OllamaSet
 from grc_policy_server.services.vector.weaviate_client import (
     WeaviateClient,
 )
+
+bearer_scheme = HTTPBearer(
+    auto_error=False,
+    description="Provide `Bearer <API_BEARER_TOKEN>`.",
+)
+
+
+def require_api_bearer_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+) -> None:
+    expected_token = settings.api_bearer_token.strip()
+    if not expected_token:
+        raise RuntimeError("API_BEARER_TOKEN must be configured with a non-empty value.")
+
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing bearer token",
+        )
+
+    if credentials.credentials != expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid bearer token",
+        )
 
 
 def get_weaviate_client() -> WeaviateClient:
