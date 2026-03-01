@@ -1,22 +1,34 @@
 import asyncio
+import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from grc_policy_server.api.routes import compare, documents, health, with_summary
 from grc_policy_server.core.config import settings
-from grc_policy_server.core.logging import setup_logging
+from grc_policy_server.core.logging import log_runtime_environment, setup_logging
 
 setup_logging(
     level=settings.log_level,
     service_name=settings.app_name,
 )
 
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    log_runtime_environment(settings.as_env_items(), logger_name=logger.name)
+    yield
+
+
 # Main FastAPI application for upload, listing, and comparison workflows.
 app = FastAPI(
     title=settings.app_name,
     description="API for GRC policy ingestion and comparison workflows.",
     version="0.1.0",
+    lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",

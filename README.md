@@ -191,7 +191,10 @@ Or directly:
 ```bash
 uv run uvicorn grc_policy_server.main:app --reload
 ```
-
+or
+```bash
+./scripts/dev.sh
+```
 Swagger UI:
 
 - [http://localhost:8000/docs](http://localhost:8000/docs)

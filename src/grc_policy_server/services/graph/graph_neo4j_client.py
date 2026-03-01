@@ -18,7 +18,7 @@ class Neo4jSettings:
 class Neo4jClient:
     def __init__(self, settings: Neo4jSettings):
         self.settings = settings
-        print("Connecting to:", settings.uri)  # 👈 ADD THIS
+        print("Connecting to:", settings.uri)  # ADD THIS
         self._driver = GraphDatabase.driver(
             settings.uri, auth=(settings.user, settings.password)
         )

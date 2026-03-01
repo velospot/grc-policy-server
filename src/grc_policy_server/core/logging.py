@@ -1,6 +1,7 @@
 import logging
 import sys
-from typing import Optional
+from collections.abc import Mapping
+from typing import Any, Optional
 
 
 def setup_logging(
@@ -40,3 +41,14 @@ def setup_logging(
             "logging initialized",
             extra={"service": service_name},
         )
+
+
+def log_runtime_environment(
+    env_items: Mapping[str, Any],
+    *,
+    logger_name: str = __name__,
+) -> None:
+    logger = logging.getLogger(logger_name)
+
+    for key in sorted(env_items):
+        logger.info("runtime env %s=%s", key, env_items[key])
