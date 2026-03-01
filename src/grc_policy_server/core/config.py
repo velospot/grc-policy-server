@@ -63,11 +63,7 @@ class Settings(BaseSettings):
     embed_batch_size: int = 32
     download_timeout_seconds: float = 30.0
     max_download_mb: int = 50
-<<<<<<< HEAD
     upload_root: str = "/Users/aruntejasriramula/ChatEnginePDF/grc-policy-server/data/uploads"
-=======
-    upload_root: str = "./data/uploads"
->>>>>>> fixes-functional-weaviate-docling
 
     model_config = SettingsConfigDict(
         env_file=".env",
