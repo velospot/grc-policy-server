@@ -76,7 +76,7 @@ class RealDiffEngineStream:
                 continue
 
             # embed doc1 chunk
-            v = await self.llm.embed(text_a)
+            v = self.llm.embed(text_a)
 
             matches = self.weaviate.semantic_search_in_document(
                 query_vector=v,
@@ -225,7 +225,7 @@ class RealDiffEngineStream:
         # fallback to Weaviate metadata if Neo4j missing (not ideal, but prevents crashes)
         return DocumentReference(
             section=fallback.get("section_path", "Unknown Section"),
-            page=int(fallback.get("page") or 0),
+            page=int(fallback.get("page_number") or fallback.get("page") or 0),
             lineStart=fallback.get("line_start"),
             lineEnd=fallback.get("line_end"),
             sourceText=fallback.get("text", "") or "",

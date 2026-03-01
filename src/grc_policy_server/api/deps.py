@@ -1,10 +1,14 @@
 # src/grc_policy_server/api/deps.py
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from pathlib import Path
 
+from fastapi import Depends, HTTPException, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from grc_policy_server.core.config import settings
+from grc_policy_server.core.logging import logging
 from grc_policy_server.respositories.documents import DocumentRepository
 from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
 from grc_policy_server.services.comparision.real_diff_engine_stream import (
@@ -23,13 +27,46 @@ from grc_policy_server.services.vector.weaviate_client import (
     WeaviateClient,
 )
 
+logger = logging.getLogger(__name__)
+bearer_scheme = HTTPBearer(
+    auto_error=False,
+    description="Provide `Bearer <API_BEARER_TOKEN>`.",
+)
 
-def get_weaviate_client() -> WeaviateClient:
-    return WeaviateClient()
+
+def require_api_bearer_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+) -> None:
+    expected_token = settings.api_bearer_token.strip()
+    if not expected_token:
+        raise RuntimeError("API_BEARER_TOKEN must be configured with a non-empty value.")
+
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing bearer token",
+        )
+
+    if credentials.credentials != expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid bearer token",
+        )
 
 
-def get_neo4j_client() -> Neo4jClient:
-    return Neo4jClient(
+def get_weaviate_client() -> Generator[WeaviateClient, None, None]:
+    client = WeaviateClient()
+    try:
+        yield client
+    finally:
+        try:
+            client.close()
+        except Exception:
+            logger.exception("failed to close Weaviate client")
+
+
+def get_neo4j_client() -> Generator[Neo4jClient, None, None]:
+    client = Neo4jClient(
         Neo4jSettings(
             uri=settings.neo4j_uri,
             user=settings.neo4j_user,
@@ -37,6 +74,13 @@ def get_neo4j_client() -> Neo4jClient:
             database=settings.neo4j_database,
         )
     )
+    try:
+        yield client
+    finally:
+        try:
+            client.close()
+        except Exception:
+            logger.exception("failed to close Neo4j client")
 
 
 def get_ollama_client() -> OllamaClient:
@@ -53,19 +97,27 @@ def get_docling_adapter() -> DoclingAdapter:
     return DoclingAdapter()
 
 
-def get_diff_engine() -> RealDiffEngine:
+def get_diff_engine(
+    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    neo4j: Neo4jClient = Depends(get_neo4j_client),
+    llm: OllamaClient = Depends(get_ollama_client),
+) -> RealDiffEngine:
     return RealDiffEngine(
-        weaviate=get_weaviate_client(),
-        neo4j=get_neo4j_client(),
-        llm=get_ollama_client(),
+        weaviate=weaviate,
+        neo4j=neo4j,
+        llm=llm,
     )
 
 
-def get_diff_engine_stream() -> RealDiffEngineStream:
+def get_diff_engine_stream(
+    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    neo4j: Neo4jClient = Depends(get_neo4j_client),
+    llm: OllamaClient = Depends(get_ollama_client),
+) -> RealDiffEngineStream:
     return RealDiffEngineStream(
-        weaviate=get_weaviate_client(),
-        neo4j=get_neo4j_client(),
-        llm=get_ollama_client(),
+        weaviate=weaviate,
+        neo4j=neo4j,
+        llm=llm,
     )
 
 
@@ -73,15 +125,34 @@ def get_document_repository() -> DocumentRepository:
     return DocumentRepository(upload_root=Path(settings.upload_root))
 
 
-def get_document_ingestion_service() -> DocumentIngestionService:
+def get_document_ingestion_service(
+    docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
+    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    neo4j: Neo4jClient = Depends(get_neo4j_client),
+    llm: OllamaClient = Depends(get_ollama_client),
+) -> DocumentIngestionService:
     return DocumentIngestionService(
-        docling_adapter=get_docling_adapter(),
-        weaviate=get_weaviate_client(),
-        neo4j=get_neo4j_client(),
-        llm=get_ollama_client(),
+        docling_adapter=docling_adapter,
+        weaviate=weaviate,
+        neo4j=neo4j,
+        llm=llm,
         upload_root=Path(settings.upload_root),
     )
 
 
-def get_document_ingestion_service_factory() -> Callable[[], DocumentIngestionService]:
-    return get_document_ingestion_service
+def get_document_ingestion_service_factory(
+    docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
+    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    neo4j: Neo4jClient = Depends(get_neo4j_client),
+    llm: OllamaClient = Depends(get_ollama_client),
+) -> Callable[[], DocumentIngestionService]:
+    def _factory() -> DocumentIngestionService:
+        return DocumentIngestionService(
+            docling_adapter=docling_adapter,
+            weaviate=weaviate,
+            neo4j=neo4j,
+            llm=llm,
+            upload_root=Path(settings.upload_root),
+        )
+
+    return _factory

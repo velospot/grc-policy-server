@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from docling_core.transforms.chunker.doc_chunk import DocChunk
@@ -63,6 +64,7 @@ class DocumentIngestionService:
             force_full_page_ocr=False,
             do_table_structure=True,
         )
+        docJson = dl_doc.export_to_dict()
 
         raw_chunks = chunk_document(dl_doc, merge_list_items=True)
         chunks_to_store: list[dict] = []
@@ -108,6 +110,7 @@ class DocumentIngestionService:
             filename=filename,
             content=content,
             content_type=content_type,
+            docling_doc=docJson,
         )
 
         logger.info(
@@ -129,6 +132,7 @@ class DocumentIngestionService:
         filename: str,
         content: bytes,
         content_type: str | None,
+        docling_doc: dict[str, Any],
     ) -> None:
         """Persist the original file and metadata under the upload root."""
         target_dir = self.upload_root / document_id
@@ -136,6 +140,10 @@ class DocumentIngestionService:
 
         stored_file = target_dir / filename
         stored_file.write_bytes(content)
+
+        doclingFilename = (
+            f"{filename}_{datetime.now(UTC).isoformat().replace('+00:00', 'Z')}.json"
+        )
 
         metadata = {
             "id": document_id,
@@ -148,5 +156,9 @@ class DocumentIngestionService:
         }
         (target_dir / "metadata.json").write_text(
             json.dumps(metadata, indent=2),
+            encoding="utf-8",
+        )
+        (target_dir / doclingFilename).write_text(
+            json.dumps(docling_doc, indent=2),
             encoding="utf-8",
         )

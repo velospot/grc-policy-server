@@ -1,4 +1,7 @@
-from fastapi import FastAPI
+import asyncio
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from grc_policy_server.api.routes import compare, documents, health, with_summary
 from grc_policy_server.core.config import settings
@@ -23,6 +26,31 @@ app = FastAPI(
         {"name": "compare", "description": "Document comparison endpoints"},
     ],
 )
+
+def _parse_cors_items(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_parse_cors_items(settings.cors_allow_origins),
+    allow_credentials=settings.cors_allow_credentials,
+    allow_methods=_parse_cors_items(settings.cors_allow_methods),
+    allow_headers=_parse_cors_items(settings.cors_allow_headers),
+)
+
+request_lock = asyncio.Lock()
+
+
+@app.middleware("http")
+async def with_request_lock(request: Request, call_next):
+    await request_lock.acquire()
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        request_lock.release()
+
 
 app.include_router(health.router)
 app.include_router(documents.router)

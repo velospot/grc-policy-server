@@ -13,9 +13,14 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
+    api_bearer_token: str = "dummy-token"
+    cors_allow_origins: str = "*"
+    cors_allow_methods: str = "*"
+    cors_allow_headers: str = "*"
+    cors_allow_credentials: bool = False
 
     # Feature flags / runtime behavior
-    debug: bool = True
+    debug: bool = False
 
     # MongoDB
     mongodb_uri: str = "mongodb://localhost:27017"
@@ -58,7 +63,11 @@ class Settings(BaseSettings):
     embed_batch_size: int = 32
     download_timeout_seconds: float = 30.0
     max_download_mb: int = 50
+<<<<<<< HEAD
     upload_root: str = "/Users/aruntejasriramula/ChatEnginePDF/grc-policy-server/data/uploads"
+=======
+    upload_root: str = "./data/uploads"
+>>>>>>> fixes-functional-weaviate-docling
 
     model_config = SettingsConfigDict(
         env_file=".env",

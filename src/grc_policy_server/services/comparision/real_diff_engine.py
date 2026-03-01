@@ -70,7 +70,7 @@ class RealDiffEngine:
         for a in a_chunks:
             text_a = (a.get("text") or "").strip()
             a_section = (a.get("section_path") or "").strip()
-            if not text_a or "..." not in text_a:
+            if not text_a:
                 continue
 
             # embed A chunk text
@@ -221,9 +221,12 @@ class RealDiffEngine:
         return t if len(t) <= n else t[:n] + "..."
 
     def _ref_from_chunk(self, ch: dict) -> DocumentReference:
+        page = ch.get("page_number")
+        if page is None:
+            page = ch.get("page")
         return DocumentReference(
             section=ch.get("section_path", "Unknown Section"),
-            page=int(ch.get("page") or 0),
+            page=int(page or 0),
             lineStart=ch.get("line_start"),
             lineEnd=ch.get("line_end"),
             sourceText=ch.get("text", "") or "",
