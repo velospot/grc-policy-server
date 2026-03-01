@@ -23,9 +23,9 @@ class Settings(BaseSettings):
     mongodb_collection: str = "documents"
 
     # Neo4j
-    neo4j_uri: str = "bolt://neo4j:7687"
+    neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = "password"
+    neo4j_password: str = "your_password"
     neo4j_database: str = "neo4j"
 
     # Weaviate
@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     weaviate_embedded: bool = False
 
     # Ollama
-    ollama_url: str = "http://192.168.178.23:11434"
+    ollama_url: str = "http://localhost:11434"
     ollama_chat_model: str = Field(
         default="granite3.3:8b",
         validation_alias=AliasChoices("OLLAMA_CHAT_MODEL", "OLLAMA_GENERATION_MODEL"),
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     embed_batch_size: int = 32
     download_timeout_seconds: float = 30.0
     max_download_mb: int = 50
-    upload_root: str = "/Users/navm/projects/grc-policy-server/data/uploads"
+    upload_root: str = "/Users/aruntejasriramula/ChatEnginePDF/grc-policy-server/data/uploads"
 
     model_config = SettingsConfigDict(
         env_file=".env",

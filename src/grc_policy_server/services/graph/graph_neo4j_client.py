@@ -8,15 +8,17 @@ from neo4j import GraphDatabase
 
 @dataclass(frozen=True)
 class Neo4jSettings:
-    uri: str = "bolt://neo4j:7687"
+    # uri: str = "bolt://neo4j:7687"
+    uri: str = "bolt://localhost:7687"
     user: str = "neo4j"
-    password: str = "password"
+    password: str = "your_password"
     database: str = "neo4j"
 
 
 class Neo4jClient:
     def __init__(self, settings: Neo4jSettings):
         self.settings = settings
+        print("Connecting to:", settings.uri)  # 👈 ADD THIS
         self._driver = GraphDatabase.driver(
             settings.uri, auth=(settings.user, settings.password)
         )

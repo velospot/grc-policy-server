@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class OllamaSettings:
-    base_url: str = "http://192.168.178.23:11434"
+    base_url: str = "http://localhost:11434"
     chat_model: str = "granite3.3:8b"
     embed_model: str = "qwen3-embedding"
 

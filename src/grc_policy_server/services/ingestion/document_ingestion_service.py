@@ -98,11 +98,11 @@ class DocumentIngestionService:
             raise ValueError("No text chunks produced from uploaded document")
 
         self.weaviate.upsert_chunks(chunks_to_store)
-        # self.neo4j.upsert_document_with_chunks(
-        #     document_id=document_id,
-        #     filename=filename,
-        #     chunks=chunks_to_store,
-        # )
+        self.neo4j.upsert_document_with_chunks(
+            document_id=document_id,
+            filename=filename,
+            chunks=chunks_to_store,
+        )
         self._persist_upload_metadata(
             document_id=document_id,
             filename=filename,
