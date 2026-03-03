@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from grc_policy_server.api.deps import (
     get_document_ingestion_service_factory,
     get_document_repository,
+    get_neo4j_client,
     get_weaviate_client,
     require_api_bearer_token,
 )
@@ -24,6 +25,7 @@ from grc_policy_server.models.schemas import (
 )
 from grc_policy_server.respositories.documents import DocumentRepository
 from grc_policy_server.services.documents.mapper import to_document_response
+from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     DocumentIngestionService,
 )
@@ -183,8 +185,9 @@ def delete_documents(
     payload: DeleteDocumentsRequest,
     repository: DocumentRepository = Depends(get_document_repository),
     weaviate: WeaviateClient = Depends(get_weaviate_client),
+    neo4j: Neo4jClient = Depends(get_neo4j_client),
 ):
-    """Delete local document artifacts and associated vector records."""
+    """Delete local document artifacts and associated vector and graph records."""
     if not payload.documentIds:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -233,6 +236,20 @@ def delete_documents(
             continue
 
         try:
+            deleted_graph_nodes = neo4j.delete_document_subgraph(document_id)
+        except Exception:
+            logger.exception("failed to delete graph records document_id=%s", document_id)
+            results.append(
+                DeleteDocumentResult(
+                    documentId=document_id,
+                    deleted=False,
+                    deletedChunks=deleted_chunks,
+                    error="Failed to delete document records from Neo4j",
+                )
+            )
+            continue
+
+        try:
             deleted_local = repository.delete_document(document_id)
         except ValueError as exc:
             results.append(
@@ -256,7 +273,7 @@ def delete_documents(
             )
             continue
 
-        if not deleted_local and deleted_chunks == 0:
+        if not deleted_local and deleted_chunks == 0 and deleted_graph_nodes == 0:
             results.append(
                 DeleteDocumentResult(
                     documentId=document_id,

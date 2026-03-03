@@ -8,16 +8,19 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from docling_core.transforms.chunker.doc_chunk import DocChunk
-
+from grc_policy_server.core.config import settings
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
 from grc_policy_server.services.ingestion.docling_chunker import (
     chunk_document,
-    extract_basic_chunk_fields,
+    parse_docling_chunks,
 )
+from grc_policy_server.services.ingestion.hierarchy_builder import build_document_hierarchy
+from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
+from grc_policy_server.services.ingestion.ocr_fallback import build_ocr_fallback_chunks
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.utils.hashing import sha256_hex
 
 logger = logging.getLogger(__name__)
 
@@ -64,65 +67,117 @@ class DocumentIngestionService:
             force_full_page_ocr=False,
             do_table_structure=True,
         )
-        docJson = dl_doc.export_to_dict()
+        doc_json = dl_doc.export_to_dict()
+        content_hash = sha256_hex(content)
 
         raw_chunks = chunk_document(dl_doc, merge_list_items=True)
-        chunks_to_store: list[dict] = []
-        doc_to_store: list[dict] = []
+        parsed_chunks = parse_docling_chunks(dl_doc, raw_chunks)
+        parsed_chunks, ocr_metadata = self._apply_ocr_fallback(
+            filename=filename,
+            content=content,
+            page_count=len(getattr(dl_doc, "pages", {}) or {}),
+            parsed_chunks=parsed_chunks,
+        )
 
-        for idx, raw_chunk in enumerate(raw_chunks):
-            fields = extract_basic_chunk_fields(raw_chunk)
-            doc_chunk = DocChunk.model_validate(raw_chunk)
-            doc_to_store.append(doc_chunk.export_json_dict())
-            text = (fields.get("text") or "").strip()
-            if not text:
-                continue
-
-            section_titles = fields.get("section_path") or []
-            section_path = (
-                " / ".join(section_titles) if section_titles else "Unknown Section"
-            )
-
-            chunks_to_store.append(
-                {
-                    "chunk_id": f"{document_id}:{idx}",
-                    "document_id": document_id,
-                    "section_path": section_path,
-                    "text": text,
-                    "chunk_index": idx,
-                    "page_number": fields.get("page_number"),
-                    "line_start": None,
-                    "line_end": None,
-                }
-            )
-
-        if not chunks_to_store:
-            raise ValueError("No text chunks produced from uploaded document")
-
-        self.weaviate.upsert_chunks(chunks_to_store)
-        self.neo4j.upsert_document_with_chunks(
+        hierarchy = build_document_hierarchy(
             document_id=document_id,
             filename=filename,
-            chunks=chunks_to_store,
+            parsed_chunks=parsed_chunks,
+            content_hash=content_hash,
+        )
+        vector_records = [node.to_vector_record() for node in hierarchy.indexable_nodes]
+        if not vector_records:
+            raise ValueError("No indexable text nodes produced from uploaded document")
+
+        self.weaviate.upsert_chunks(vector_records)
+        self.neo4j.upsert_document_hierarchy(
+            document_id=document_id,
+            filename=filename,
+            document_stable_id=hierarchy.document_stable_id,
+            document_family=hierarchy.document_family,
+            content_hash=content_hash,
+            nodes=[node.to_graph_record() for node in hierarchy.nodes],
+            metadata={
+                **hierarchy.metadata,
+                "ocr": ocr_metadata,
+                "content_type": content_type,
+            },
         )
         self._persist_upload_metadata(
             document_id=document_id,
             filename=filename,
             content=content,
             content_type=content_type,
-            docling_doc=docJson,
+            docling_doc=doc_json,
+            hierarchy={
+                "documentStableId": hierarchy.document_stable_id,
+                "documentFamily": hierarchy.document_family,
+                "contentHash": hierarchy.content_hash,
+                "metadata": hierarchy.metadata,
+                "nodes": [node.to_graph_record() for node in hierarchy.nodes],
+            },
+            ocr_metadata=ocr_metadata,
+            chunks_stored=len(vector_records),
         )
 
         logger.info(
-            "ingested upload document_id=%s filename=%s chunks=%s",
+            "ingested upload document_id=%s filename=%s nodes=%s indexed=%s",
             document_id,
             filename,
-            len(chunks_to_store),
+            len(hierarchy.nodes),
+            len(vector_records),
         )
 
         return UploadIngestionResult(
             document_id=document_id,
-            chunks_stored=len(chunks_to_store),
+            chunks_stored=len(vector_records),
+        )
+
+    def _apply_ocr_fallback(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        page_count: int,
+        parsed_chunks: list[ParsedChunk],
+    ) -> tuple[list[ParsedChunk], dict[str, Any]]:
+        if not settings.ocr_fallback_enabled:
+            return parsed_chunks, {"enabled": False, "used": False, "reason": "disabled"}
+
+        ocr_chunks, ocr_metadata, ocr_pages = build_ocr_fallback_chunks(
+            filename=filename,
+            content=content,
+            parsed_chunks=parsed_chunks,
+            page_count=page_count,
+            min_chars_per_page=settings.ocr_fallback_min_chars_per_page,
+            min_total_chars=settings.ocr_fallback_min_total_chars,
+            render_dpi=settings.ocr_fallback_render_dpi,
+            languages=settings.ocr_fallback_languages,
+            page_segmentation_mode=settings.ocr_fallback_page_segmentation_mode,
+        )
+        if not ocr_pages:
+            return parsed_chunks, ocr_metadata
+
+        filtered_chunks = [
+            chunk
+            for chunk in parsed_chunks
+            if not self._should_replace_docling_chunk_with_ocr(chunk, ocr_pages)
+        ]
+        filtered_chunks.extend(ocr_chunks)
+        filtered_chunks.sort(key=lambda chunk: (chunk.page_number or 0, chunk.ordinal))
+        return filtered_chunks, ocr_metadata
+
+    def _should_replace_docling_chunk_with_ocr(
+        self,
+        chunk: ParsedChunk,
+        ocr_pages: set[int],
+    ) -> bool:
+        return (
+            chunk.source == "docling"
+            and chunk.page_number in ocr_pages
+            and chunk.chunk_type == "clause"
+            and len((chunk.text or "").strip())
+            < settings.ocr_fallback_min_chars_per_page
         )
 
     def _persist_upload_metadata(
@@ -133,6 +188,9 @@ class DocumentIngestionService:
         content: bytes,
         content_type: str | None,
         docling_doc: dict[str, Any],
+        hierarchy: dict[str, Any],
+        ocr_metadata: dict[str, Any],
+        chunks_stored: int,
     ) -> None:
         """Persist the original file and metadata under the upload root."""
         target_dir = self.upload_root / document_id
@@ -141,24 +199,31 @@ class DocumentIngestionService:
         stored_file = target_dir / filename
         stored_file.write_bytes(content)
 
-        doclingFilename = (
-            f"{filename}_{datetime.now(UTC).isoformat().replace('+00:00', 'Z')}.json"
-        )
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        docling_filename = f"{filename}_{timestamp}.docling.json"
 
         metadata = {
             "id": document_id,
             "name": filename,
             "version": "1.0",
-            "upload_date": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "upload_date": timestamp,
             "size_bytes": len(content),
             "category": (content_type or "upload").split("/")[0],
             "stored_filename": filename,
+            "chunks_stored": chunks_stored,
+            "document_stable_id": hierarchy.get("documentStableId"),
+            "document_family": hierarchy.get("documentFamily"),
+            "ocr": ocr_metadata,
         }
         (target_dir / "metadata.json").write_text(
             json.dumps(metadata, indent=2),
             encoding="utf-8",
         )
-        (target_dir / doclingFilename).write_text(
+        (target_dir / docling_filename).write_text(
             json.dumps(docling_doc, indent=2),
+            encoding="utf-8",
+        )
+        (target_dir / "hierarchy.json").write_text(
+            json.dumps(hierarchy, indent=2),
             encoding="utf-8",
         )

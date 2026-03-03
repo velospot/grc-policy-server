@@ -9,6 +9,8 @@ from docling_core.transforms.chunker.hierarchical_chunker import (
 )
 from docling_core.types.doc.labels import DocItemLabel
 
+from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,20 +18,69 @@ def chunk_document(dl_doc, *, merge_list_items: bool) -> list[Any]:
     chunker = HierarchicalChunker(
         merge_list_items=merge_list_items, always_emit_headings=True
     )
-    chunksList = list(chunker.chunk(dl_doc))
+    chunks_list = list(chunker.chunk(dl_doc))
+    return chunks_list
 
-    return chunksList
+
+def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]:
+    parsed_chunks: list[ParsedChunk] = []
+    for idx, raw_chunk in enumerate(raw_chunks):
+        doc_chunk = DocChunk.model_validate(raw_chunk)
+        fields = extract_basic_chunk_fields(raw_chunk)
+        text = (fields.get("text") or "").strip()
+        labels = tuple(_item_label_name(item.label) for item in doc_chunk.meta.doc_items)
+        captions = _extract_captions(doc_chunk.meta.doc_items, dl_doc)
+        source_refs = tuple(item.self_ref for item in doc_chunk.meta.doc_items)
+        title = None
+        chunk_type: str = "clause"
+
+        if any(item.label == DocItemLabel.TABLE for item in doc_chunk.meta.doc_items):
+            chunk_type = "table"
+            title = captions[0] if captions else None
+        elif any(item.label == DocItemLabel.PICTURE for item in doc_chunk.meta.doc_items):
+            chunk_type = "figure"
+            title = captions[0] if captions else None
+        elif _is_heading_only(doc_chunk, text):
+            chunk_type = "heading"
+            heading_path = fields.get("section_path") or []
+            title = heading_path[-1] if heading_path else None
+        elif not text and captions:
+            chunk_type = "figure"
+            title = captions[0]
+            text = captions[0]
+
+        metadata: dict[str, Any] = {
+            "captions": captions,
+            "doc_items_refs": list(source_refs),
+        }
+        if fields.get("docling_path"):
+            metadata["docling_path"] = fields["docling_path"]
+
+        parsed_chunks.append(
+            ParsedChunk(
+                chunk_type=chunk_type,  # type: ignore[arg-type]
+                text=text,
+                section_path=tuple(fields.get("section_path") or ()),
+                page_number=fields.get("page_number"),
+                ordinal=idx,
+                title=title,
+                docling_path=fields.get("docling_path"),
+                source_refs=source_refs,
+                labels=labels,
+                metadata=metadata,
+                source="docling",
+            )
+        )
+
+    return parsed_chunks
 
 
 def _section_path_from_chunk(doc_chunk: DocChunk) -> list[str]:
-    # Docling chunk metadata can include headings/captions depending on version/config.
-
     headings = []
     meta = getattr(doc_chunk, "meta", None)
     if meta is None:
         return headings
 
-    # Common patterns across versions:
     for attr in ("headings", "heading", "section_headers"):
         val = getattr(meta, attr, None)
         if not val:
@@ -38,23 +89,18 @@ def _section_path_from_chunk(doc_chunk: DocChunk) -> list[str]:
             headings.append(val)
         elif isinstance(val, list):
             headings.extend([str(x) for x in val if x])
-    # De-dup while preserving order
+
     out = []
-    for h in headings:
-        if h not in out:
-            out.append(h)
+    for heading in headings:
+        if heading not in out:
+            out.append(heading)
     return out
 
 
 def extract_table_and_image_info(
     chunk: Any,
 ) -> tuple[dict | None, dict | None, list[str]]:
-    """
-    Returns: (tableInfo_dict, imageInfo_dict, doc_items_refs)
-    """
-    doc_chunk = DocChunk.model_validate(
-        chunk
-    )  # shown in Docling examples :contentReference[oaicite:8]{index=8}
+    doc_chunk = DocChunk.model_validate(chunk)
     doc_items_refs = [it.self_ref for it in doc_chunk.meta.doc_items]
 
     has_table = any(it.label == DocItemLabel.TABLE for it in doc_chunk.meta.doc_items)
@@ -65,8 +111,6 @@ def extract_table_and_image_info(
     table_info = None
     image_info = None
 
-    # The chunk text may already include table serialization depending on serializers.
-    # We store it as "markdown" when a table is present.
     if has_table:
         table_info = {
             "caption": getattr(doc_chunk.meta, "caption", None),
@@ -75,7 +119,6 @@ def extract_table_and_image_info(
         }
 
     if has_picture:
-        # Some pipelines provide picture description/caption in contextualized chunk text.
         image_info = {
             "caption": getattr(doc_chunk.meta, "caption", None),
             "description": None,
@@ -87,57 +130,41 @@ def extract_table_and_image_info(
 
 def extract_basic_chunk_fields(chunk: Any) -> dict[str, Any]:
     doc_chunk = DocChunk.model_validate(chunk)
-    # doc_items_refs = [it.self_ref for it in doc_chunk.meta.doc_items]
-    # has_provInfo = any(it. == DocItemLabel.TABLE for it in doc_items_refs)
     page = extract_page_number(doc_chunk.meta)
 
     return {
         "text": getattr(chunk, "text", "") or "",
         "docling_path": getattr(chunk, "path", None),
-        "page_number": page if isinstance(page, int) else None,
+        "page_number": page if isinstance(page, int) and page >= 0 else None,
         "section_path": _section_path_from_chunk(doc_chunk),
     }
 
 
 def meta_to_dict(meta: Any) -> Dict[str, Any]:
-    """
-    Convert Docling metadata objects (e.g., DocMeta) into a plain dict.
-
-    Supports common patterns:
-    - pydantic v2: model_dump()
-    - pydantic v1: dict()
-    - dataclasses / attrs: __dict__
-    - already a dict
-    Fallback: best-effort via vars()
-    """
     if meta is None:
         return {}
 
     if isinstance(meta, dict):
         return meta
 
-    # pydantic v2
     if hasattr(meta, "model_dump") and callable(getattr(meta, "model_dump")):
         try:
             return meta.model_dump()
         except Exception:
             pass
 
-    # pydantic v1
     if hasattr(meta, "dict") and callable(getattr(meta, "dict")):
         try:
             return meta.dict()
         except Exception:
             pass
 
-    # generic python object -> __dict__
     if hasattr(meta, "__dict__"):
         try:
             return dict(meta.__dict__)
         except Exception:
             pass
 
-    # last resort
     try:
         return dict(vars(meta))
     except Exception:
@@ -145,20 +172,17 @@ def meta_to_dict(meta: Any) -> Dict[str, Any]:
 
 
 def iter_dicts(v: Any) -> Iterable[Dict[str, Any]]:
-    """
-    Yield dicts from: dict | list[dict] | object that can be normalized to dict.
-    """
     if v is None:
         return
     if isinstance(v, dict):
         yield v
         return
     if isinstance(v, list):
-        for it in v:
-            if isinstance(it, dict):
-                yield it
+        for item in v:
+            if isinstance(item, dict):
+                yield item
             else:
-                d = meta_to_dict(it)
+                d = meta_to_dict(item)
                 if d:
                     yield d
         return
@@ -178,15 +202,6 @@ def safe_int(x: Any) -> Optional[int]:
 
 
 def extract_page_number(meta_any: Any) -> int:
-    """
-    Best-effort page extraction. Accepts dict OR DocMeta-like object.
-
-    Priority:
-      1) direct keys: page_number/page/page_no/pageNo/page_idx
-      2) meta.doc_items[*].prov[*].page_no   (doc_items/prov can be list[dict] or list[obj])
-      3) meta.prov[*].page_no                (prov can be list[dict] or list[obj])
-      else -1
-    """
     meta = meta_to_dict(meta_any)
 
     for key in ("page_number", "page", "page_no", "pageNo", "page_idx"):
@@ -206,3 +221,30 @@ def extract_page_number(meta_any: Any) -> int:
             return n
 
     return -1
+
+
+def _extract_captions(doc_items: Iterable[Any], dl_doc: Any) -> list[str]:
+    captions: list[str] = []
+    for item in doc_items:
+        if hasattr(item, "caption_text") and callable(getattr(item, "caption_text")):
+            try:
+                caption = item.caption_text(dl_doc).strip()
+            except Exception:
+                caption = ""
+            if caption and caption not in captions:
+                captions.append(caption)
+    return captions
+
+
+def _is_heading_only(doc_chunk: DocChunk, text: str) -> bool:
+    if text:
+        return False
+    return any(
+        item.label in {DocItemLabel.TITLE, DocItemLabel.SECTION_HEADER}
+        for item in doc_chunk.meta.doc_items
+    )
+
+
+def _item_label_name(label: Any) -> str:
+    value = getattr(label, "value", label)
+    return str(value)

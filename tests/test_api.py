@@ -182,6 +182,24 @@ class StubWeaviateDeleteClient:
         return self.deleted_chunks.get(document_id, 0)
 
 
+class StubNeo4jDeleteClient:
+    def __init__(
+        self,
+        *,
+        deleted_nodes: dict[str, int] | None = None,
+        failing_document_ids: set[str] | None = None,
+    ):
+        self.deleted_nodes = deleted_nodes or {}
+        self.failing_document_ids = failing_document_ids or set()
+        self.deleted_document_ids: list[str] = []
+
+    def delete_document_subgraph(self, document_id: str) -> int:
+        self.deleted_document_ids.append(document_id)
+        if document_id in self.failing_document_ids:
+            raise RuntimeError("neo4j deletion failure")
+        return self.deleted_nodes.get(document_id, 0)
+
+
 class StubWeaviateHybridSearchClient:
     def __init__(
         self,
@@ -390,6 +408,7 @@ def test_delete_documents():
             "doc-local-only": True,
             "doc-local-and-vectors": True,
             "doc-vectors-only": False,
+            "doc-graph-only": False,
             "doc-missing": False,
         }
     )
@@ -398,11 +417,22 @@ def test_delete_documents():
             "doc-local-only": 0,
             "doc-local-and-vectors": 4,
             "doc-vectors-only": 2,
+            "doc-graph-only": 0,
+            "doc-missing": 0,
+        }
+    )
+    neo4j = StubNeo4jDeleteClient(
+        deleted_nodes={
+            "doc-local-only": 1,
+            "doc-local-and-vectors": 5,
+            "doc-vectors-only": 2,
+            "doc-graph-only": 3,
             "doc-missing": 0,
         }
     )
     app.dependency_overrides[get_document_repository] = lambda: repository
     app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
         "/documents/delete",
@@ -411,6 +441,7 @@ def test_delete_documents():
                 "doc-local-only",
                 "doc-local-and-vectors",
                 "doc-vectors-only",
+                "doc-graph-only",
                 "doc-missing",
             ]
         },
@@ -418,7 +449,7 @@ def test_delete_documents():
     )
     assert response.status_code == 200
     assert response.json() == {
-        "deletedCount": 3,
+        "deletedCount": 4,
         "failedCount": 1,
         "results": [
             {
@@ -440,6 +471,12 @@ def test_delete_documents():
                 "error": None,
             },
             {
+                "documentId": "doc-graph-only",
+                "deleted": True,
+                "deletedChunks": 0,
+                "error": None,
+            },
+            {
                 "documentId": "doc-missing",
                 "deleted": False,
                 "deletedChunks": 0,
@@ -452,8 +489,10 @@ def test_delete_documents():
 def test_delete_documents_rejects_duplicate_and_blank_ids():
     repository = StubDeleteDocumentRepository(delete_results={"doc-1": True})
     weaviate = StubWeaviateDeleteClient(deleted_chunks={"doc-1": 3})
+    neo4j = StubNeo4jDeleteClient(deleted_nodes={"doc-1": 2})
     app.dependency_overrides[get_document_repository] = lambda: repository
     app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
         "/documents/delete",
@@ -490,8 +529,10 @@ def test_delete_documents_rejects_duplicate_and_blank_ids():
 def test_delete_documents_returns_error_on_weaviate_failure():
     repository = StubDeleteDocumentRepository(delete_results={"doc-1": True})
     weaviate = StubWeaviateDeleteClient(failing_document_ids={"doc-1"})
+    neo4j = StubNeo4jDeleteClient(deleted_nodes={"doc-1": 4})
     app.dependency_overrides[get_document_repository] = lambda: repository
     app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
         "/documents/delete",
@@ -508,6 +549,36 @@ def test_delete_documents_returns_error_on_weaviate_failure():
                 "deleted": False,
                 "deletedChunks": None,
                 "error": "Failed to delete document records from Weaviate",
+            }
+        ],
+    }
+    assert repository.deleted_document_ids == []
+    assert neo4j.deleted_document_ids == []
+
+
+def test_delete_documents_returns_error_on_neo4j_failure():
+    repository = StubDeleteDocumentRepository(delete_results={"doc-1": True})
+    weaviate = StubWeaviateDeleteClient(deleted_chunks={"doc-1": 3})
+    neo4j = StubNeo4jDeleteClient(failing_document_ids={"doc-1"})
+    app.dependency_overrides[get_document_repository] = lambda: repository
+    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_neo4j_client] = lambda: neo4j
+
+    response = client.post(
+        "/documents/delete",
+        json={"documentIds": ["doc-1"]},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "deletedCount": 0,
+        "failedCount": 1,
+        "results": [
+            {
+                "documentId": "doc-1",
+                "deleted": False,
+                "deletedChunks": 3,
+                "error": "Failed to delete document records from Neo4j",
             }
         ],
     }

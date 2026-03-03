@@ -5,14 +5,16 @@ from io import BytesIO
 from typing import Optional
 
 from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import OcrOptions, PdfPipelineOptions
+from docling.datamodel.pipeline_options import (
+    OcrAutoOptions,
+    PdfPipelineOptions,
+    TesseractCliOcrOptions,
+)
 from docling.document_converter import (
     DocumentConverter,
     PdfFormatOption,
     WordFormatOption,
 )
-
-# Updated Import Paths
 from docling_core.types.io import DocumentStream
 
 logger = logging.getLogger(__name__)
@@ -20,8 +22,6 @@ logger = logging.getLogger(__name__)
 
 class DoclingAdapter:
     def __init__(self) -> None:
-        # Initialize as None if you want lazy loading,
-        # but usually, you'd store the converter instance here.
         self._converter: Optional[DocumentConverter] = None
 
     def _build_converter(
@@ -35,12 +35,12 @@ class DoclingAdapter:
         pdf_options.do_ocr = auto_ocr
         pdf_options.do_table_structure = do_table_structure
         pdf_options.images_scale = 0.5
-        # pdf_options.do_formula_enrichment = True
+        pdf_options.ocr_options = OcrAutoOptions(force_full_page_ocr=False)
 
         if force_full_page_ocr:
-            # In latest versions, use OcrOptions for configuration
-            pdf_options.ocr_options = OcrOptions(
-                force_full_page_ocr=True, lang=["en", "de", "fr", "es"]
+            pdf_options.ocr_options = TesseractCliOcrOptions(
+                force_full_page_ocr=True,
+                lang=["eng", "deu", "fra", "spa"],
             )
 
         format_options = {
@@ -66,8 +66,6 @@ class DoclingAdapter:
 
         stream = BytesIO(content)
         source = DocumentStream(name=filename, stream=stream)
-
-        # converter.convert() handles a single DocumentStream or path directly
         result = converter.convert(source)
 
         if not result.document:

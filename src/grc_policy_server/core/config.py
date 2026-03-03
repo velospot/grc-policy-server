@@ -52,12 +52,10 @@ class NullishFilteringSource(PydanticBaseSettingsSource):
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment variables and `.env`."""
 
-    # App
     app_name: str = "grc_policy_server"
     environment: str = "production"
     log_level: str = "INFO"
 
-    # Server
     host: str = "0.0.0.0"
     port: int = 8000
     api_bearer_token: str = "dummy-token"
@@ -66,26 +64,25 @@ class Settings(BaseSettings):
     cors_allow_headers: str = "*"
     cors_allow_credentials: bool = False
 
-    # Feature flags / runtime behavior
     debug: bool = False
 
-    # MongoDB
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_database: str = "grc_policy_server"
     mongodb_collection: str = "documents"
 
-    # Neo4j
     neo4j_uri: str = "bolt://neo4j:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
     neo4j_database: str = "neo4j"
 
-    # Weaviate
     weaviate_url: str = "http://weaviate:8080"
     weaviate_collection: str = "PolicyChunk"
     weaviate_embedded: bool = False
+    weaviate_api_key: str | None = None
+    weaviate_grpc_host: str | None = None
+    weaviate_grpc_port: int | None = None
+    weaviate_grpc_secure: bool | None = None
 
-    # Ollama
     ollama_url: str = "http://localhost:11434"
     ollama_chat_model: str = Field(
         default="granite3.3:8b",
@@ -97,7 +94,6 @@ class Settings(BaseSettings):
     )
     ollama_timeout_sec: float = 180.0
 
-    # Backward-compatible accessors for older internal names.
     @property
     def ollama_generation_model(self) -> str:
         return self.ollama_chat_model
@@ -106,11 +102,16 @@ class Settings(BaseSettings):
     def ollama_embedding_model(self) -> str:
         return self.ollama_embed_model
 
-    # Ingestion / retrieval
     embed_batch_size: int = 32
     download_timeout_seconds: float = 30.0
     max_download_mb: int = 50
     upload_root: str = ""
+    ocr_fallback_enabled: bool = True
+    ocr_fallback_min_chars_per_page: int = 80
+    ocr_fallback_min_total_chars: int = 250
+    ocr_fallback_render_dpi: int = 180
+    ocr_fallback_languages: str = "eng+deu+fra+spa"
+    ocr_fallback_page_segmentation_mode: int = 6
 
     def as_env_items(self) -> Mapping[str, Any]:
         values = self.model_dump()
