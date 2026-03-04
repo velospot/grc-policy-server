@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Dict, List
 
 from grc_policy_server.models.schemas import KeyDifference
 
@@ -11,6 +11,18 @@ class BaseLLM(ABC):
     @abstractmethod
     def embed(self, text: str) -> list[float]:
         """Return embedding vector for text."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def extract_policy_meanings(
+        self,
+        *,
+        texts: List[str],
+    ) -> List[Dict[str, str]]:
+        """
+        Extract normalized clause meaning for policy statements in any language.
+        The returned list must preserve input order.
+        """
         raise NotImplementedError
 
     @abstractmethod

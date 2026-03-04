@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,9 +16,13 @@ from grc_policy_server.services.ingestion.docling_chunker import (
     chunk_document,
     parse_docling_chunks,
 )
+from grc_policy_server.services.comparision.policy_semantics import meaning_to_metadata
 from grc_policy_server.services.ingestion.hierarchy_builder import build_document_hierarchy
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 from grc_policy_server.services.ingestion.ocr_fallback import build_ocr_fallback_chunks
+from grc_policy_server.services.ingestion.policy_preprocessor import (
+    preprocess_parsed_chunks,
+)
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 from grc_policy_server.utils.hashing import sha256_hex
@@ -78,6 +83,8 @@ class DocumentIngestionService:
             page_count=len(getattr(dl_doc, "pages", {}) or {}),
             parsed_chunks=parsed_chunks,
         )
+        parsed_chunks = preprocess_parsed_chunks(parsed_chunks)
+        parsed_chunks = await self._enrich_clause_semantics(parsed_chunks)
 
         hierarchy = build_document_hierarchy(
             document_id=document_id,
@@ -132,6 +139,36 @@ class DocumentIngestionService:
             document_id=document_id,
             chunks_stored=len(vector_records),
         )
+
+    async def _enrich_clause_semantics(
+        self,
+        parsed_chunks: list[ParsedChunk],
+    ) -> list[ParsedChunk]:
+        clause_indexes: list[int] = []
+        clause_texts: list[str] = []
+
+        for index, chunk in enumerate(parsed_chunks):
+            if chunk.chunk_type != "clause":
+                continue
+            text = (chunk.text or "").strip()
+            if not text:
+                continue
+            clause_indexes.append(index)
+            clause_texts.append(text)
+
+        if not clause_texts:
+            return parsed_chunks
+
+        extracted = await self.llm.extract_policy_meanings(texts=clause_texts)
+        enriched = list(parsed_chunks)
+        for chunk_index, meaning in zip(clause_indexes, extracted, strict=False):
+            chunk = enriched[chunk_index]
+            metadata = dict(chunk.metadata)
+            metadata.update(meaning_to_metadata(chunk.text))
+            metadata.update({key: str(value or "") for key, value in meaning.items()})
+            metadata["semantic_source"] = "ollama"
+            enriched[chunk_index] = replace(chunk, metadata=metadata)
+        return enriched
 
     def _apply_ocr_fallback(
         self,

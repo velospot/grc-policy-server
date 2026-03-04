@@ -50,6 +50,7 @@ class HierarchyNode:
         return self.node_id
 
     def to_vector_record(self) -> dict[str, Any]:
+        clean_text = str(self.metadata.get("clean_text") or "")
         return {
             "chunk_id": self.node_id,
             "document_id": self.document_id,
@@ -61,6 +62,7 @@ class HierarchyNode:
             "title": self.title or "",
             "section_path": self.section_path or "Unknown Section",
             "text": self.text,
+            "clean_text": clean_text,
             "chunk_index": self.ordinal,
             "page_number": self.page_number,
             "indexable": self.indexable,
@@ -69,6 +71,11 @@ class HierarchyNode:
             "lineage": self.lineage,
             "lineage_ids": self.lineage_ids,
             "source": self.source,
+            "obligation": str(self.metadata.get("obligation") or ""),
+            "subject": str(self.metadata.get("subject") or ""),
+            "action": str(self.metadata.get("action") or ""),
+            "object": str(self.metadata.get("object") or ""),
+            "condition": str(self.metadata.get("condition") or ""),
         }
 
     def to_graph_record(self) -> dict[str, Any]:

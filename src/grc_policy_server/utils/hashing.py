@@ -4,7 +4,6 @@ import hashlib
 import re
 from uuid import NAMESPACE_URL, uuid5
 
-
 _WHITESPACE_RE = re.compile(r"\s+")
 _NON_WORD_RE = re.compile(r"[^a-z0-9]+")
 
@@ -24,3 +23,13 @@ def slugify_text(value: str) -> str:
 
 def stable_uuid(value: str) -> str:
     return str(uuid5(NAMESPACE_URL, value))
+
+
+def sort_by_page(list):
+    return list["page_number"]
+
+
+def normalize_whitespace(s: str) -> str:
+    s = s.replace("\u00a0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s

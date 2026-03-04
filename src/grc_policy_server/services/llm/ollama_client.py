@@ -6,11 +6,15 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import httpx
-from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import KeyDifference
 from grc_policy_server.services.llm.base import BaseLLM
+from grc_policy_server.services.comparision.policy_semantics import (
+    ClauseMeaning,
+    extract_clause_meaning,
+)
+from grc_policy_server.utils.hashing import normalize_whitespace
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,7 @@ class OllamaSettings:
     base_url: str = "http://localhost:11434"
     chat_model: str = "granite3.3:8b"
     embed_model: str = "qwen3-embedding"
+    timeout_sec: float = 180.0
 
 
 class OllamaClient(BaseLLM):
@@ -35,15 +40,58 @@ class OllamaClient(BaseLLM):
 
     def __init__(self, settings: Optional[OllamaSettings] = None):
         self.settings = settings or OllamaSettings()
+        self._meaning_cache: dict[str, dict[str, str]] = {}
 
     def embed(self, text: str) -> list[float]:
+        payload = {
+            "model": self.settings.embed_model,
+            "input": text,
+        }
+        response = self._post_json_sync("/api/embed", payload)
+        embeddings = response.get("embeddings")
+        if isinstance(embeddings, list) and embeddings:
+            first = embeddings[0]
+            if isinstance(first, list):
+                return [float(value) for value in first]
 
-        llm = OllamaEmbeddings(
-            model=self.settings.embed_model, base_url=self.settings.base_url
-        )
-        emb = llm.embed_query(text)
+        embedding = response.get("embedding")
+        if isinstance(embedding, list):
+            return [float(value) for value in embedding]
 
-        return emb
+        raise RuntimeError(f"Unexpected Ollama embedding response: {response}")
+
+    async def extract_policy_meanings(
+        self,
+        *,
+        texts: List[str],
+    ) -> List[Dict[str, str]]:
+        normalized_texts = [normalize_whitespace(text or "") for text in texts]
+        results: list[dict[str, str] | None] = [None] * len(normalized_texts)
+        uncached: list[tuple[int, str]] = []
+
+        for index, text in enumerate(normalized_texts):
+            if not text:
+                results[index] = self._meaning_dict(ClauseMeaning("", "", "", "", ""))
+                continue
+            cached = self._meaning_cache.get(text)
+            if cached is not None:
+                results[index] = dict(cached)
+                continue
+            uncached.append((index, text))
+
+        for start in range(0, len(uncached), 8):
+            batch = uncached[start : start + 8]
+            batch_texts = [text for _, text in batch]
+            extracted = await self._extract_policy_meanings_batch(batch_texts)
+            for (index, text), meaning in zip(batch, extracted, strict=False):
+                payload = self._normalize_meaning_dict(meaning)
+                self._meaning_cache[text] = payload
+                results[index] = dict(payload)
+
+        return [
+            result or self._meaning_dict(extract_clause_meaning(text))
+            for result, text in zip(results, normalized_texts, strict=False)
+        ]
 
     async def summarize_diff(
         self,
@@ -55,14 +103,7 @@ class OllamaClient(BaseLLM):
         prompt = self._prompt_summarize_diff(
             old_text=old_text, new_text=new_text, section=section
         )
-
-        llm = ChatOllama(
-            model=self.settings.chat_model,
-            base_url=self.settings.base_url,
-            # other params...
-        )
-        ai_msg = await llm.ainvoke(prompt)
-        return str(ai_msg.content)
+        return await self._generate_text(prompt)
 
     async def summarize_changes(
         self,
@@ -75,13 +116,7 @@ class OllamaClient(BaseLLM):
         prompt = self._prompt_summarize_changes(
             doc1_name=doc1_name, doc2_name=doc2_name, diffs=compact
         )
-
-        llm = ChatOllama(
-            model=self.settings.chat_model,
-            base_url=self.settings.base_url,
-        )
-        ai_msg = await llm.ainvoke(prompt)
-        return str(ai_msg.content)
+        return await self._generate_text(prompt)
 
     async def generate_followups(
         self,
@@ -98,28 +133,39 @@ class OllamaClient(BaseLLM):
             diffs=compact,
             max_questions=max_questions,
         )
-
-        llm = ChatOllama(
-            model=self.settings.chat_model,
-            base_url=self.settings.base_url,
-        )
-        ai_msg = await llm.ainvoke(prompt)
-        text = str(ai_msg.content)
+        text = await self._generate_text(prompt)
         return self._parse_numbered_questions(text, max_questions=max_questions)
+
+    def close(self) -> None:
+        return None
 
     # -------------------------
     # HTTP helpers
     # -------------------------
 
+    def _post_json_sync(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        url = f"{self.settings.base_url}{path}"
+        with httpx.Client(timeout=self.settings_timeout) as client:
+            response = client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict):
+                raise RuntimeError(f"Ollama response is not JSON object: {data}")
+            return data
+
     async def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.settings.base_url}{path}"
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.settings_timeout) as client:
             r = await client.post(url, json=payload)
             r.raise_for_status()
             data = r.json()
             if not isinstance(data, dict):
                 raise RuntimeError(f"Ollama response is not JSON object: {data}")
             return data
+
+    @property
+    def settings_timeout(self) -> float:
+        return self.settings.timeout_sec
 
     # -------------------------
     # Prompt builders
@@ -252,3 +298,123 @@ Return as a numbered list (1., 2., 3., ...). Keep questions specific and actiona
         if not qs and text.strip():
             qs = [text.strip()[:300]]
         return qs
+
+    async def _extract_policy_meanings_batch(
+        self,
+        texts: List[str],
+    ) -> List[Dict[str, str]]:
+        if not texts:
+            return []
+
+        prompt = self._prompt_extract_policy_meanings(texts)
+
+        try:
+            response_text = await self._generate_text(prompt)
+            payload = self._parse_meaning_payload(response_text, expected=len(texts))
+            if payload is not None:
+                return payload
+        except Exception:
+            logger.exception("failed to extract policy meanings with ollama")
+
+        return [self._meaning_dict(extract_clause_meaning(text)) for text in texts]
+
+    def _prompt_extract_policy_meanings(self, texts: List[str]) -> str:
+        items = [{"index": index, "text": text} for index, text in enumerate(texts)]
+        return f"""
+You extract structured policy meaning for auditor-grade document comparison.
+
+The input policy text may be in any language. Understand the original language, but normalize the output fields into concise English.
+
+Return STRICT JSON only as an array with exactly {len(texts)} objects in the same order as the input.
+Each object must have these string fields:
+- obligation: one of "", "may", "should", "recommended", "required", "must", "shall"
+- subject
+- action
+- object
+- condition
+
+Rules:
+- Preserve the policy meaning, not surface wording.
+- If no explicit obligation word exists, set obligation to "".
+- Keep phrases short.
+- Put conditional phrases under condition.
+- Do not add commentary, markdown, or extra keys.
+
+Input JSON:
+{json.dumps(items, ensure_ascii=False)}
+""".strip()
+
+    def _parse_meaning_payload(
+        self,
+        payload_text: str,
+        *,
+        expected: int,
+    ) -> List[Dict[str, str]] | None:
+        payload = payload_text.strip()
+        parsed = None
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            start = payload.find("[")
+            end = payload.rfind("]")
+            if start >= 0 and end > start:
+                try:
+                    parsed = json.loads(payload[start : end + 1])
+                except json.JSONDecodeError:
+                    return None
+        if not isinstance(parsed, list) or len(parsed) != expected:
+            return None
+        return [self._normalize_meaning_dict(item) for item in parsed]
+
+    def _normalize_meaning_dict(self, value: Any) -> Dict[str, str]:
+        if not isinstance(value, dict):
+            return self._meaning_dict(ClauseMeaning("", "", "", "", ""))
+
+        obligation = str(value.get("obligation") or "").strip().lower()
+        if obligation not in {"", "may", "should", "recommended", "required", "must", "shall"}:
+            obligation = self._map_obligation_value(obligation)
+
+        return {
+            "obligation": obligation,
+            "subject": normalize_whitespace(str(value.get("subject") or "")).lower(),
+            "action": normalize_whitespace(str(value.get("action") or "")).lower(),
+            "object": normalize_whitespace(str(value.get("object") or "")).lower(),
+            "condition": normalize_whitespace(str(value.get("condition") or "")).lower(),
+        }
+
+    def _map_obligation_value(self, value: str) -> str:
+        lowered = value.lower()
+        if "shall" in lowered:
+            return "shall"
+        if "must" in lowered:
+            return "must"
+        if "require" in lowered or "mandatory" in lowered or "obligat" in lowered:
+            return "required"
+        if "recommend" in lowered:
+            return "recommended"
+        if "should" in lowered:
+            return "should"
+        if "may" in lowered or "optional" in lowered:
+            return "may"
+        return ""
+
+    def _meaning_dict(self, meaning: ClauseMeaning) -> Dict[str, str]:
+        return {
+            "obligation": meaning.obligation,
+            "subject": meaning.subject,
+            "action": meaning.action,
+            "object": meaning.object,
+            "condition": meaning.condition,
+        }
+
+    async def _generate_text(self, prompt: str) -> str:
+        response = await self._post_json(
+            "/api/generate",
+            {
+                "model": self.settings.chat_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0},
+            },
+        )
+        return str(response.get("response") or "").strip()

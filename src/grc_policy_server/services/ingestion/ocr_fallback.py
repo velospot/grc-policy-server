@@ -5,6 +5,7 @@ from importlib import import_module
 from io import BytesIO
 import logging
 import re
+import shutil
 from typing import Any, Iterable
 
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
@@ -61,6 +62,18 @@ def build_ocr_fallback_chunks(
                 "enabled": True,
                 "used": False,
                 "reason": "missing_pytesseract",
+                "page_lengths": dict(text_by_page),
+            },
+            set(),
+        )
+    if shutil.which("tesseract") is None:
+        logger.info("tesseract binary not installed; OCR fallback disabled")
+        return (
+            [],
+            {
+                "enabled": True,
+                "used": False,
+                "reason": "missing_tesseract_binary",
                 "page_lengths": dict(text_by_page),
             },
             set(),

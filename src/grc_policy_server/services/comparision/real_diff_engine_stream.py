@@ -13,13 +13,28 @@ from grc_policy_server.services.comparision.clause_matcher import (
     ClauseMatcher,
     MatchThresholds,
 )
+from grc_policy_server.services.comparision.policy_semantics import (
+    ClauseMeaning,
+    clean_policy_text,
+    compare_clause_meaning,
+    extract_clause_meaning,
+)
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 
-def impact_from(change_type: str, distance: Optional[float]) -> str:
+def impact_from(
+    change_type: str,
+    distance: Optional[float],
+    *,
+    obligation_change: str = "unchanged",
+) -> str:
     if change_type in ("ADDED", "REMOVED"):
+        return "High"
+    if obligation_change == "weakened":
+        return "Critical"
+    if obligation_change == "strengthened":
         return "High"
     if distance is None:
         return "High"
@@ -47,6 +62,8 @@ class RealDiffEngineStream:
 
         left_nodes = self.weaviate.fetch_chunks_by_document(doc1.id)
         right_nodes = self.weaviate.fetch_chunks_by_document(doc2.id)
+        left_nodes = await self._enrich_nodes_with_semantics(left_nodes)
+        right_nodes = await self._enrich_nodes_with_semantics(right_nodes)
 
         yield {
             "type": "progress",
@@ -71,9 +88,18 @@ class RealDiffEngineStream:
 
         streamed_diffs: List[KeyDifference] = []
         for match in matching.matches:
-            if match.distance <= self.thresholds.unchanged_distance:
+            obligation_change = self._meaning_change(match.left, match.right)
+            if (
+                match.distance <= self.thresholds.unchanged_distance
+                and obligation_change == "unchanged"
+            ):
                 continue
-            diff = await self._make_modified(match.left, match.right, match.distance)
+            diff = await self._make_modified(
+                match.left,
+                match.right,
+                match.distance,
+                obligation_change=obligation_change,
+            )
             streamed_diffs.append(diff)
             yield {"type": "diff", "item": diff.model_dump()}
 
@@ -105,7 +131,14 @@ class RealDiffEngineStream:
             "followUpQuestions": followups,
         }
 
-    async def _make_modified(self, left: dict, right: dict, dist: float) -> KeyDifference:
+    async def _make_modified(
+        self,
+        left: dict,
+        right: dict,
+        dist: float,
+        *,
+        obligation_change: str,
+    ) -> KeyDifference:
         left_ref = self._citation_from_neo4j_or_fallback(left.get("chunk_id"), left)
         right_ref = self._citation_from_neo4j_or_fallback(right.get("chunk_id"), right)
         return KeyDifference(
@@ -115,7 +148,11 @@ class RealDiffEngineStream:
             ),
             doc1Content=self._short(str(left.get("text") or "")),
             doc2Content=self._short(str(right.get("text") or "")),
-            impact=impact_from("MODIFIED", dist),
+            impact=impact_from(
+                "MODIFIED",
+                dist,
+                obligation_change=obligation_change,
+            ),
             doc1Reference=left_ref,
             doc2Reference=right_ref,
         )
@@ -163,6 +200,49 @@ class RealDiffEngineStream:
             lineEnd=fallback.get("line_end"),
             sourceText=fallback.get("text", "") or "",
         )
+
+    def _meaning_change(self, left: dict, right: dict) -> str:
+        return compare_clause_meaning(
+            self._node_meaning(left),
+            self._node_meaning(right),
+        ).obligation_change
+
+    async def _enrich_nodes_with_semantics(self, nodes: list[dict]) -> list[dict]:
+        enriched = [dict(node) for node in nodes]
+        indexes: list[int] = []
+        texts: list[str] = []
+
+        for index, node in enumerate(enriched):
+            if not node.get("clean_text"):
+                node["clean_text"] = clean_policy_text(str(node.get("text") or ""))
+            if node.get("node_type") != "clause":
+                continue
+            if any(node.get(field) for field in ("obligation", "subject", "action", "object", "condition")):
+                continue
+            text = str(node.get("text") or "").strip()
+            if not text:
+                continue
+            indexes.append(index)
+            texts.append(text)
+
+        if not texts:
+            return enriched
+
+        for index, meaning in zip(indexes, await self.llm.extract_policy_meanings(texts=texts), strict=False):
+            for field, value in meaning.items():
+                enriched[index][field] = str(value or "")
+
+        return enriched
+
+    def _node_meaning(self, node: dict) -> ClauseMeaning:
+        obligation = str(node.get("obligation") or "")
+        subject = str(node.get("subject") or "")
+        action = str(node.get("action") or "")
+        obj = str(node.get("object") or "")
+        condition = str(node.get("condition") or "")
+        if obligation or subject or action or obj or condition:
+            return ClauseMeaning(obligation, subject, action, obj, condition)
+        return extract_clause_meaning(str(node.get("text") or ""))
 
     def _short(self, text: str, n: int = 90) -> str:
         t = " ".join((text or "").split())

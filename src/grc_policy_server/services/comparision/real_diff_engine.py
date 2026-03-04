@@ -15,6 +15,12 @@ from grc_policy_server.services.comparision.clause_matcher import (
     ClauseMatcher,
     MatchThresholds,
 )
+from grc_policy_server.services.comparision.policy_semantics import (
+    ClauseMeaning,
+    clean_policy_text,
+    compare_clause_meaning,
+    extract_clause_meaning,
+)
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
@@ -22,10 +28,19 @@ from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 logger = logging.getLogger(__name__)
 
 
-def impact_from_distance(distance: Optional[float], change_type: str) -> str:
+def impact_from_distance(
+    distance: Optional[float],
+    change_type: str,
+    *,
+    obligation_change: str = "unchanged",
+) -> str:
     if change_type == "ADDED":
         return "High"
     if change_type == "REMOVED":
+        return "High"
+    if obligation_change == "weakened":
+        return "Critical"
+    if obligation_change == "strengthened":
         return "High"
     if distance is None:
         return "High"
@@ -50,6 +65,8 @@ class RealDiffEngine:
     async def compare(self, doc1: Document, doc2: Document) -> ComparisonResult:
         left_nodes = self.weaviate.fetch_chunks_by_document(doc1.id)
         right_nodes = self.weaviate.fetch_chunks_by_document(doc2.id)
+        left_nodes = await self._enrich_nodes_with_semantics(left_nodes)
+        right_nodes = await self._enrich_nodes_with_semantics(right_nodes)
         logger.info("compare left_nodes=%s right_nodes=%s", len(left_nodes), len(right_nodes))
 
         matcher = ClauseMatcher(
@@ -66,7 +83,11 @@ class RealDiffEngine:
         diffs: List[KeyDifference] = []
 
         for match in matching.matches:
-            if match.distance <= self.thresholds.unchanged_distance:
+            meaning_change = self._meaning_change(match.left, match.right)
+            if (
+                match.distance <= self.thresholds.unchanged_distance
+                and meaning_change == "unchanged"
+            ):
                 continue
             left_ref = self._citation_from_neo4j_or_fallback(match.left)
             right_ref = self._citation_from_neo4j_or_fallback(match.right)
@@ -80,7 +101,11 @@ class RealDiffEngine:
                     ),
                     doc1Content=self._short(str(match.left.get("text") or "")),
                     doc2Content=self._short(str(match.right.get("text") or "")),
-                    impact=impact_from_distance(match.distance, "MODIFIED"),
+                    impact=impact_from_distance(
+                        match.distance,
+                        "MODIFIED",
+                        obligation_change=meaning_change,
+                    ),
                     doc1Reference=left_ref,
                     doc2Reference=right_ref,
                 )
@@ -143,6 +168,49 @@ class RealDiffEngine:
             actionPlan=self._action_plan(diffs),
             followUpQuestions=self._follow_ups(diffs),
         )
+
+    def _meaning_change(self, left: dict, right: dict) -> str:
+        return compare_clause_meaning(
+            self._node_meaning(left),
+            self._node_meaning(right),
+        ).obligation_change
+
+    async def _enrich_nodes_with_semantics(self, nodes: list[dict]) -> list[dict]:
+        enriched = [dict(node) for node in nodes]
+        indexes: list[int] = []
+        texts: list[str] = []
+
+        for index, node in enumerate(enriched):
+            if not node.get("clean_text"):
+                node["clean_text"] = clean_policy_text(str(node.get("text") or ""))
+            if node.get("node_type") != "clause":
+                continue
+            if any(node.get(field) for field in ("obligation", "subject", "action", "object", "condition")):
+                continue
+            text = str(node.get("text") or "").strip()
+            if not text:
+                continue
+            indexes.append(index)
+            texts.append(text)
+
+        if not texts:
+            return enriched
+
+        for index, meaning in zip(indexes, await self.llm.extract_policy_meanings(texts=texts), strict=False):
+            for field, value in meaning.items():
+                enriched[index][field] = str(value or "")
+
+        return enriched
+
+    def _node_meaning(self, node: dict) -> ClauseMeaning:
+        obligation = str(node.get("obligation") or "")
+        subject = str(node.get("subject") or "")
+        action = str(node.get("action") or "")
+        obj = str(node.get("object") or "")
+        condition = str(node.get("condition") or "")
+        if obligation or subject or action or obj or condition:
+            return ClauseMeaning(obligation, subject, action, obj, condition)
+        return extract_clause_meaning(str(node.get("text") or ""))
 
     def _citation_from_neo4j_or_fallback(self, chunk: dict) -> DocumentReference:
         chunk_id = chunk.get("chunk_id")

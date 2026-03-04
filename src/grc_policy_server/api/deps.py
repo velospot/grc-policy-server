@@ -83,14 +83,22 @@ def get_neo4j_client() -> Generator[Neo4jClient, None, None]:
             logger.exception("failed to close Neo4j client")
 
 
-def get_ollama_client() -> OllamaClient:
-    return OllamaClient(
+def get_ollama_client() -> Generator[OllamaClient, None, None]:
+    client = OllamaClient(
         OllamaSettings(
             base_url=settings.ollama_url,
             chat_model=settings.ollama_chat_model,
             embed_model=settings.ollama_embed_model,
+            timeout_sec=settings.ollama_timeout_sec,
         )
     )
+    try:
+        yield client
+    finally:
+        try:
+            client.close()
+        except Exception:
+            logger.exception("failed to close Ollama client")
 
 
 def get_docling_adapter() -> DoclingAdapter:

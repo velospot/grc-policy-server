@@ -174,7 +174,8 @@ def build_document_hierarchy(
 
         section_leaf_ordinals[section_titles] += 1
         anchor_text = _anchor_text(chunk)
-        normalized_text = normalize_text(chunk.text)
+        clean_text = str(chunk.metadata.get("clean_text") or normalize_text(chunk.text))
+        normalized_text = normalize_text(clean_text or chunk.text)
         content_digest = sha256_hex(normalized_text.encode("utf-8")) if normalized_text else ""
         stable_id = stable_uuid(
             f"{chunk.chunk_type}::{doc_family}::{section_path}::{anchor_text}"
@@ -226,6 +227,7 @@ def build_document_hierarchy(
             lineage_ids=section_lineage_ids,
             metadata={
                 **chunk.metadata,
+                "clean_text": clean_text,
                 "anchor_text": anchor_text,
                 "docling_path": chunk.docling_path,
                 "source_labels": list(chunk.labels),
@@ -236,7 +238,7 @@ def build_document_hierarchy(
 
         if node.node_type in {"clause", "table"} and not node.excluded_from_index and node.text:
             for depth in range(1, len(section_titles) + 1):
-                section_buffers[section_titles[:depth]].append(node.text)
+                section_buffers[section_titles[:depth]].append(clean_text or node.text)
 
     for path, section_node in section_nodes.items():
         aggregated_text = _aggregate_section_text(section_buffers.get(path, []))
@@ -248,6 +250,7 @@ def build_document_hierarchy(
         )
         section_node.indexable = bool(aggregated_text) and not section_node.excluded_from_index
         section_node.metadata["descendant_text_fragments"] = len(section_buffers.get(path, []))
+        section_node.metadata["clean_text"] = aggregated_text
 
     indexable_nodes = [
         node
