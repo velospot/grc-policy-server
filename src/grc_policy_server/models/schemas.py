@@ -1,6 +1,6 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Document(BaseModel):
@@ -21,12 +21,13 @@ class DocumentReference(BaseModel):
 
 
 class KeyDifference(BaseModel):
+    changeType: Literal["ADDED", "REMOVED", "MODIFIED"]
     section: str
-    doc1Content: str
-    doc2Content: str
+    doc1Content: str | None
+    doc2Content: str | None
     impact: str
-    doc1Reference: DocumentReference
-    doc2Reference: DocumentReference
+    doc1Reference: DocumentReference | None
+    doc2Reference: DocumentReference | None
 
 
 class ActionItem(BaseModel):
@@ -55,3 +56,65 @@ class DiffChunk(BaseModel):
 
 class CompareResponse(BaseModel):
     diffs: List[DiffChunk]
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
+
+
+class UploadDocumentResponse(BaseModel):
+    filename: str
+    contentType: str | None = None
+    accepted: bool
+    documentId: str | None = None
+    chunksStored: int | None = None
+    error: str | None = None
+
+
+class UploadDocumentsResponse(BaseModel):
+    acceptedCount: int
+    rejectedCount: int
+    results: List[UploadDocumentResponse]
+
+
+class DeleteDocumentsRequest(BaseModel):
+    documentIds: List[str]
+
+
+class DeleteDocumentResult(BaseModel):
+    documentId: str
+    deleted: bool
+    deletedChunks: int | None = None
+    error: str | None = None
+
+
+class DeleteDocumentsResponse(BaseModel):
+    deletedCount: int
+    failedCount: int
+    results: List[DeleteDocumentResult]
+
+
+class HybridSearchRequest(BaseModel):
+    documentId1: str
+    documentId2: str
+    query: str
+    limit: int = Field(default=3, ge=1, le=50)
+
+
+class HybridSearchChunk(BaseModel):
+    chunkId: str
+    documentId: str
+    sectionPath: str
+    text: str
+    chunkIndex: int | None = None
+    score: float | None = None
+
+
+class HybridSearchDocumentResult(BaseModel):
+    documentId: str
+    chunks: List[HybridSearchChunk]
+
+
+class HybridSearchResponse(BaseModel):
+    query: str
+    results: List[HybridSearchDocumentResult]

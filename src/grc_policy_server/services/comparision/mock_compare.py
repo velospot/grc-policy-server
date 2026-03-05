@@ -15,6 +15,7 @@ def generate_mock_comparison(doc1, doc2) -> ComparisonResult:
         ),
         keyDifferences=[
             KeyDifference(
+                changeType="ADDED",
                 section="Risk Assessment Framework",
                 doc1Content="Manual risk scoring with quarterly reviews",
                 doc2Content="AI-assisted continuous risk monitoring with real-time alerts",
@@ -43,6 +44,7 @@ def generate_mock_comparison(doc1, doc2) -> ComparisonResult:
                 ),
             ),
             KeyDifference(
+                changeType="REMOVED",
                 section="Data Privacy Requirements",
                 doc1Content="GDPR compliance baseline",
                 doc2Content="GDPR + AI Act compliance with enhanced data governance",
@@ -65,6 +67,7 @@ def generate_mock_comparison(doc1, doc2) -> ComparisonResult:
                 ),
             ),
             KeyDifference(
+                changeType="MODIFIED",
                 section="Audit Trail Requirements",
                 doc1Content="12-month retention period",
                 doc2Content="24-month retention with immutable logging",

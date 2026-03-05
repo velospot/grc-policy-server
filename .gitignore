@@ -5,7 +5,11 @@ build/
 dist/
 wheels/
 *.egg-info
+# local storage docs
+.env
 neo4j*
+weaviate_data/*
+data/uploads
 
 # Virtual environments
 .venv
@@ -18,3 +22,4 @@ neo4j*
 !pyproject.toml
 !README.md
 !uv.lock
+!*.py
