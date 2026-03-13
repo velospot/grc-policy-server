@@ -22,6 +22,7 @@ from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     DocumentIngestionService,
 )
+from grc_policy_server.services.ingestion.upload_v2_dispatcher import UploadV2Dispatcher
 from grc_policy_server.services.llm.ollama_client import OllamaClient, OllamaSettings
 from grc_policy_server.services.vector.weaviate_client import (
     WeaviateClient,
@@ -164,3 +165,7 @@ def get_document_ingestion_service_factory(
         )
 
     return _factory
+
+
+def get_upload_v2_dispatcher() -> UploadV2Dispatcher:
+    return UploadV2Dispatcher()

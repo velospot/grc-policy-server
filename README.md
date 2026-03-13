@@ -5,6 +5,7 @@ FastAPI service for GRC policy ingestion and policy comparison.
 ## Features
 
 - Upload one or many policy documents in one request (`POST /documents/upload`).
+- Upload via Celery workers (`POST /documents/upload/v2`) with production-oriented queue settings.
 - Delete one or many documents and their Weaviate chunks (`POST /documents/delete`).
 - Hybrid-search two documents for matching chunks (`POST /documents/search/hybrid`).
 - Serialize API request handling with an app-level lock for deterministic processing.
@@ -23,11 +24,11 @@ Entry point: `src/grc_policy_server/main.py`
 2. `FastAPI(...)` app is created with OpenAPI metadata.
 3. Routers are registered:
    - `health.router` (`/health`)
-   - `documents.router` (`/documents`, `/documents/upload`, `/documents/delete`, `/documents/search/hybrid`)
+   - `documents.router` (`/documents`, `/documents/upload`, `/documents/upload/v2`, `/documents/upload/v2/{job_id}`, `/documents/delete`, `/documents/search/hybrid`)
    - `compare.router` (`/compare`)
    - `with_summary.router` (`/compare/with-summary`)
 4. `run()` starts Uvicorn with configured `host`, `port`, `log_level`, and `debug` reload mode.
-5. HTTP middleware acquires a process-local request lock and always releases it in `finally`.
+5. HTTP middleware acquires a global mutex lock (lock-file based) and rejects concurrent requests with `423 Locked`.
 
 The dependency graph for routes is wired in `src/grc_policy_server/api/deps.py`.
 
@@ -47,6 +48,18 @@ In Swagger (`/docs`), use the `Authorize` button and paste the token value (with
   - Use multipart form-data and repeat the `file` field for batch upload.
   - Returns per-file ingestion status.
 
+- `POST /documents/upload/v2`
+  - Same multipart request contract as `POST /documents/upload`.
+  - Queues a Celery job and returns a `jobId`.
+  - Fails with `503` if no active Celery worker is available.
+  - Optional worker preflight ping is controlled by `CELERY_ENFORCE_WORKER_PING` (default `false`).
+  - Platform-aware worker pool defaults: macOS -> `solo`, Linux -> `prefork`.
+
+- `GET /documents/upload/v2/{job_id}`
+  - Polls upload job status.
+  - Returns `queued`, `running`, `finished`, or `failed`.
+  - Includes final upload result when status is `finished`.
+
 - `POST /documents/delete`
   - Deletes one or more documents by `documentIds`.
   - Removes local document artifacts and matching Weaviate chunk records.
@@ -64,7 +77,7 @@ In Swagger (`/docs`), use the `Authorize` button and paste the token value (with
 
 ## Upload API contract
 
-`POST /documents/upload` request (multipart):
+`POST /documents/upload` and `POST /documents/upload/v2` request (multipart):
 
 - `file`: one or more files (repeat field for multiple uploads)
 
@@ -92,6 +105,31 @@ Response shape:
       "error": "Uploaded file is empty"
     }
   ]
+}
+```
+
+`POST /documents/upload/v2` response shape:
+
+```json
+{
+  "jobId": "upload-job-123",
+  "status": "queued"
+}
+```
+
+`GET /documents/upload/v2/{job_id}` response shape:
+
+```json
+{
+  "jobId": "upload-job-123",
+  "status": "finished",
+  "done": true,
+  "result": {
+    "acceptedCount": 1,
+    "rejectedCount": 0,
+    "results": []
+  },
+  "error": null
 }
 ```
 
@@ -136,7 +174,14 @@ Key runtime variables (all available in `.env.example`):
 - `HOST`, `PORT`, `DEBUG`
 - `API_BEARER_TOKEN`
 - `CORS_ALLOW_ORIGINS`, `CORS_ALLOW_METHODS`, `CORS_ALLOW_HEADERS`, `CORS_ALLOW_CREDENTIALS`
-- `UPLOAD_ROOT`
+- `UPLOAD_ROOT`, `REQUEST_MUTEX_LOCK_FILE`
+- `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `CELERY_DEFAULT_QUEUE`
+- `CELERY_TASK_TIMEOUT_SEC`, `CELERY_TASK_SOFT_TIME_LIMIT_SEC`, `CELERY_TASK_HARD_TIME_LIMIT_SEC`
+- `CELERY_WORKER_PING_TIMEOUT_SEC`, `CELERY_ENFORCE_WORKER_PING`, `CELERY_WORKER_CONCURRENCY`, `CELERY_WORKER_POOL`
+- `CELERY_WORKER_PREFETCH_MULTIPLIER`, `CELERY_WORKER_MAX_TASKS_PER_CHILD`, `CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB`
+- `CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP`, `CELERY_BROKER_POOL_LIMIT`, `CELERY_RESULT_EXPIRES_SEC`
+- `CELERY_TASK_TRACK_STARTED`, `CELERY_TASK_REJECT_ON_WORKER_LOST`, `CELERY_WORKER_DISABLE_RATE_LIMITS`
+- `DOCLING_ACCELERATOR_DEVICE`, `DOCLING_ACCELERATOR_THREADS`, `DOCLING_CUDA_USE_FLASH_ATTENTION2`
 - `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
 - `WEAVIATE_URL`, `WEAVIATE_COLLECTION`, `WEAVIATE_EMBEDDED`
 - `OLLAMA_URL`, `OLLAMA_CHAT_MODEL`, `OLLAMA_EMBED_MODEL`, `OLLAMA_TIMEOUT_SEC`
@@ -195,6 +240,16 @@ or
 ```bash
 ./scripts/dev.sh
 ```
+This starts both `uvicorn` and the Celery worker with platform-aware defaults and GPU-aware Docling accelerator selection (`cuda`/`mps`/`auto`).
+When `CELERY_WORKER_POOL` / `CELERY_WORKER_CONCURRENCY` are unset (or `null`), defaults are selected automatically per platform.
+
+To run only Celery worker:
+
+```bash
+POOL="${CELERY_WORKER_POOL:-$( [ "$(uname -s)" = "Darwin" ] && echo solo || echo prefork )}"
+uv run celery -A grc_policy_server.worker:celery_app worker --loglevel=INFO --concurrency="${CELERY_WORKER_CONCURRENCY:-1}" --pool="${POOL}"
+```
+
 Swagger UI:
 
 - [http://localhost:8000/docs](http://localhost:8000/docs)
@@ -210,6 +265,7 @@ make lint
 
 `docker-compose.yml` includes:
 
+- `redis`
 - `neo4j`
 - `weaviate`
 

@@ -77,6 +77,19 @@ class UploadDocumentsResponse(BaseModel):
     results: List[UploadDocumentResponse]
 
 
+class UploadV2JobCreateResponse(BaseModel):
+    jobId: str
+    status: Literal["queued"] = "queued"
+
+
+class UploadV2JobStatusResponse(BaseModel):
+    jobId: str
+    status: Literal["queued", "running", "finished", "failed"]
+    done: bool
+    result: UploadDocumentsResponse | None = None
+    error: str | None = None
+
+
 class DeleteDocumentsRequest(BaseModel):
     documentIds: List[str]
 

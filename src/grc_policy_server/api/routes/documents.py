@@ -1,4 +1,5 @@
 import logging
+import base64
 from collections.abc import Callable
 from typing import Any
 
@@ -8,6 +9,7 @@ from grc_policy_server.api.deps import (
     get_document_ingestion_service_factory,
     get_document_repository,
     get_neo4j_client,
+    get_upload_v2_dispatcher,
     get_weaviate_client,
     require_api_bearer_token,
 )
@@ -22,6 +24,8 @@ from grc_policy_server.models.schemas import (
     HybridSearchResponse,
     UploadDocumentResponse,
     UploadDocumentsResponse,
+    UploadV2JobCreateResponse,
+    UploadV2JobStatusResponse,
 )
 from grc_policy_server.respositories.documents import DocumentRepository
 from grc_policy_server.services.documents.mapper import to_document_response
@@ -29,6 +33,13 @@ from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     DocumentIngestionService,
 )
+from grc_policy_server.services.ingestion.upload_v2_dispatcher import (
+    CeleryNotAvailableError,
+    CeleryTaskFailureError,
+    CeleryWorkerUnavailableError,
+    UploadV2Dispatcher,
+)
+from grc_policy_server.services.ingestion.upload_v2_models import UploadTaskFilePayload
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
@@ -161,6 +172,88 @@ async def upload(
         rejectedCount=len(results) - accepted_count,
         results=results,
     )
+
+
+@router.post(
+    "/upload/v2",
+    response_model=UploadV2JobCreateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Queue upload ingestion job (Celery worker)",
+)
+async def upload_v2(
+    files: list[UploadFile] = File(
+        ...,
+        alias="file",
+        description="Repeat the `file` field to upload multiple documents.",
+    ),
+    dispatcher: UploadV2Dispatcher = Depends(get_upload_v2_dispatcher),
+):
+    """Queue one upload-ingestion job and return a job id for polling."""
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No files were uploaded",
+        )
+
+    payload_files: list[UploadTaskFilePayload] = []
+    for upload_file in files:
+        content = await upload_file.read()
+        payload_files.append(
+            UploadTaskFilePayload(
+                filename=upload_file.filename or "",
+                content_type=upload_file.content_type,
+                content_base64=base64.b64encode(content).decode("ascii"),
+            )
+        )
+
+    try:
+        job_id = dispatcher.enqueue_uploads(payload_files)
+        return UploadV2JobCreateResponse(jobId=job_id)
+    except CeleryNotAvailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except CeleryWorkerUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except CeleryTaskFailureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/upload/v2/{job_id}",
+    response_model=UploadV2JobStatusResponse,
+    summary="Poll upload v2 job status",
+)
+def upload_v2_status(
+    job_id: str,
+    dispatcher: UploadV2Dispatcher = Depends(get_upload_v2_dispatcher),
+):
+    """Return current status for an upload v2 job id."""
+    if not job_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="job_id must not be empty",
+        )
+
+    try:
+        return dispatcher.get_upload_status(job_id=job_id.strip())
+    except CeleryNotAvailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except CeleryTaskFailureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get(

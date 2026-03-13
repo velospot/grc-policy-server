@@ -1,6 +1,13 @@
 #version: "3.9"
 
 services:
+  redis:
+    container_name: grc_redis
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: always
+
   neo4j:
     container_name: rag_neo4j
     image: neo4j:community-trixie
