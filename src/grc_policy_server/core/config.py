@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -30,6 +33,45 @@ def _canonical_env_name(field_name: str, field_info: Any) -> str:
         return field_info.alias
 
     return field_name.upper()
+
+
+def _default_celery_worker_pool() -> str:
+    # On macOS, prefork workers can crash with Objective-C/CoreFoundation usage.
+    return "solo" if sys.platform == "darwin" else "prefork"
+
+
+def _default_celery_worker_concurrency() -> int:
+    if _default_celery_worker_pool() == "solo":
+        return 1
+    cpu_count = os.cpu_count() or 1
+    # Keep defaults conservative for memory-heavy document pipelines.
+    return max(1, min(4, cpu_count))
+
+
+def _has_nvidia_gpu() -> bool:
+    try:
+        subprocess.run(
+            ["nvidia-smi", "-L"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _default_docling_accelerator_device() -> str:
+    # Prefer explicit CUDA on Linux when an NVIDIA GPU is available.
+    if _has_nvidia_gpu():
+        return "cuda"
+    # Keep automatic selection elsewhere (including Apple Silicon / MPS).
+    return "auto"
+
+
+def _default_docling_accelerator_threads() -> int:
+    cpu_count = os.cpu_count() or 4
+    return max(2, min(8, cpu_count))
 
 
 class NullishFilteringSource(PydanticBaseSettingsSource):
@@ -107,6 +149,29 @@ class Settings(BaseSettings):
     download_timeout_seconds: float = 30.0
     max_download_mb: int = 50
     upload_root: str = ""
+    request_mutex_lock_file: str = "/tmp/grc_policy_server.request.lock"
+    celery_broker_url: str = "redis://localhost:6379/0"
+    celery_result_backend: str = "redis://localhost:6379/1"
+    celery_default_queue: str = "grc_policy_server.upload"
+    celery_task_timeout_sec: float = 900.0
+    celery_task_soft_time_limit_sec: float = 1200.0
+    celery_task_hard_time_limit_sec: float = 1500.0
+    celery_worker_ping_timeout_sec: float = 1.0
+    celery_enforce_worker_ping: bool = False
+    celery_worker_concurrency: int = _default_celery_worker_concurrency()
+    celery_worker_pool: str = _default_celery_worker_pool()
+    celery_worker_prefetch_multiplier: int = 1
+    celery_worker_max_tasks_per_child: int = 200
+    celery_worker_max_memory_per_child_kb: int = 0
+    celery_broker_connection_retry_on_startup: bool = True
+    celery_broker_pool_limit: int = 10
+    celery_result_expires_sec: int = 86400
+    celery_task_track_started: bool = True
+    celery_task_reject_on_worker_lost: bool = True
+    celery_worker_disable_rate_limits: bool = True
+    docling_accelerator_device: str = _default_docling_accelerator_device()
+    docling_accelerator_threads: int = _default_docling_accelerator_threads()
+    docling_cuda_use_flash_attention2: bool = False
     ocr_fallback_enabled: bool = True
     ocr_fallback_min_chars_per_page: int = 80
     ocr_fallback_min_total_chars: int = 250

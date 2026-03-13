@@ -17,6 +17,8 @@ from docling.document_converter import (
 )
 from docling_core.types.io import DocumentStream
 
+from grc_policy_server.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +37,13 @@ class DoclingAdapter:
         pdf_options.do_ocr = auto_ocr
         pdf_options.do_table_structure = do_table_structure
         pdf_options.images_scale = 0.5
+        pdf_options.accelerator_options.device = settings.docling_accelerator_device
+        pdf_options.accelerator_options.num_threads = (
+            settings.docling_accelerator_threads
+        )
+        pdf_options.accelerator_options.cuda_use_flash_attention2 = (
+            settings.docling_cuda_use_flash_attention2
+        )
         pdf_options.ocr_options = OcrAutoOptions(force_full_page_ocr=False)
 
         if force_full_page_ocr:
@@ -47,6 +56,11 @@ class DoclingAdapter:
             InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),
             InputFormat.DOCX: WordFormatOption(),
         }
+        logger.info(
+            "docling accelerator configured device=%s threads=%s",
+            settings.docling_accelerator_device,
+            settings.docling_accelerator_threads,
+        )
         return DocumentConverter(format_options=format_options)
 
     def convert_bytes(

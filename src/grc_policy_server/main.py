@@ -1,13 +1,14 @@
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from grc_policy_server.api.routes import compare, documents, health, with_summary
 from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import log_runtime_environment, setup_logging
+from grc_policy_server.core.request_mutex import RequestMutex
 
 setup_logging(
     level=settings.log_level,
@@ -51,12 +52,17 @@ app.add_middleware(
     allow_headers=_parse_cors_items(settings.cors_allow_headers),
 )
 
-request_lock = asyncio.Lock()
+request_lock = RequestMutex(lock_file=settings.request_mutex_lock_file)
 
 
 @app.middleware("http")
 async def with_request_lock(request: Request, call_next):
-    await request_lock.acquire()
+    if not request_lock.acquire_nowait():
+        return JSONResponse(
+            status_code=423,
+            content={"detail": "Another request is currently being processed"},
+        )
+
     try:
         response = await call_next(request)
         return response

@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime
 
 import pytest
@@ -7,8 +8,9 @@ from grc_policy_server.api.deps import (
     get_diff_engine,
     get_diff_engine_stream,
     get_document_ingestion_service_factory,
-    get_neo4j_client,
     get_document_repository,
+    get_neo4j_client,
+    get_upload_v2_dispatcher,
     get_weaviate_client,
 )
 from grc_policy_server.core.config import settings
@@ -22,6 +24,9 @@ from grc_policy_server.models.schemas import (
 )
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     UploadIngestionResult,
+)
+from grc_policy_server.services.ingestion.upload_v2_dispatcher import (
+    CeleryWorkerUnavailableError,
 )
 
 client = TestClient(app)
@@ -154,6 +159,41 @@ class StubDocumentIngestionService:
         raise AssertionError(f"Unexpected filename: {filename}")
 
 
+class StubUploadV2Dispatcher:
+    def __init__(
+        self,
+        *,
+        job_id: str = "job-1",
+        status_payload: dict | None = None,
+        enqueue_error: Exception | None = None,
+        status_error: Exception | None = None,
+    ):
+        self.job_id = job_id
+        self.status_payload = status_payload or {
+            "jobId": job_id,
+            "status": "queued",
+            "done": False,
+            "result": None,
+            "error": None,
+        }
+        self.enqueue_error = enqueue_error
+        self.status_error = status_error
+        self.enqueue_calls = []
+        self.status_calls = []
+
+    def enqueue_uploads(self, payload_files):
+        self.enqueue_calls.append(payload_files)
+        if self.enqueue_error is not None:
+            raise self.enqueue_error
+        return self.job_id
+
+    def get_upload_status(self, job_id: str):
+        self.status_calls.append(job_id)
+        if self.status_error is not None:
+            raise self.status_error
+        return self.status_payload
+
+
 class StubDeleteDocumentRepository:
     def __init__(self, *, delete_results: dict[str, bool] | None = None):
         self.delete_results = delete_results or {}
@@ -249,6 +289,17 @@ def test_request_lock_is_released_after_request():
     assert request_lock.locked() is False
 
 
+def test_request_lock_rejects_when_another_request_is_processing():
+    acquired = request_lock.acquire_nowait()
+    assert acquired is True
+    try:
+        response = client.get("/health")
+    finally:
+        request_lock.release()
+    assert response.status_code == 423
+    assert response.json() == {"detail": "Another request is currently being processed"}
+
+
 def test_openapi_includes_core_routes():
     response = client.get("/openapi.json")
     assert response.status_code == 200
@@ -260,6 +311,8 @@ def test_openapi_includes_core_routes():
     assert "/documents/delete" in paths
     assert "/documents/search/hybrid" in paths
     assert "/documents/upload" in paths
+    assert "/documents/upload/v2" in paths
+    assert "/documents/upload/v2/{job_id}" in paths
     assert "/compare" in paths
     assert "/compare/with-summary" in paths
 
@@ -400,6 +453,99 @@ def test_upload_document_rejects_empty_file_in_results():
             }
         ],
     }
+
+
+def test_upload_document_v2():
+    dispatcher = StubUploadV2Dispatcher(job_id="upload-job-123")
+    app.dependency_overrides[get_upload_v2_dispatcher] = lambda: dispatcher
+
+    response = client.post(
+        "/documents/upload/v2",
+        files={"file": ("policy.pdf", b"policy content", "application/pdf")},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 202
+    assert response.json() == {
+        "jobId": "upload-job-123",
+        "status": "queued",
+    }
+    assert len(dispatcher.enqueue_calls) == 1
+    payload_file = dispatcher.enqueue_calls[0][0]
+    assert payload_file.filename == "policy.pdf"
+    assert payload_file.content_type == "application/pdf"
+    assert (
+        base64.b64decode(payload_file.content_base64.encode("ascii")) == b"policy content"
+    )
+
+
+def test_upload_document_v2_returns_503_when_worker_unavailable():
+    dispatcher = StubUploadV2Dispatcher(
+        enqueue_error=CeleryWorkerUnavailableError(
+            "No active Celery workers detected for upload v2 endpoint"
+        )
+    )
+    app.dependency_overrides[get_upload_v2_dispatcher] = lambda: dispatcher
+
+    response = client.post(
+        "/documents/upload/v2",
+        files={"file": ("policy.pdf", b"policy content", "application/pdf")},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "No active Celery workers detected for upload v2 endpoint"
+    }
+
+
+def test_upload_document_v2_status_finished():
+    dispatcher = StubUploadV2Dispatcher(
+        job_id="upload-job-456",
+        status_payload={
+            "jobId": "upload-job-456",
+            "status": "finished",
+            "done": True,
+            "result": {
+                "acceptedCount": 1,
+                "rejectedCount": 0,
+                "results": [
+                    {
+                        "filename": "policy.pdf",
+                        "contentType": "application/pdf",
+                        "accepted": True,
+                        "documentId": "doc-upload-v2-1",
+                        "chunksStored": 3,
+                        "error": None,
+                    }
+                ],
+            },
+            "error": None,
+        },
+    )
+    app.dependency_overrides[get_upload_v2_dispatcher] = lambda: dispatcher
+
+    response = client.get("/documents/upload/v2/upload-job-456", headers=auth_headers())
+    assert response.status_code == 200
+    assert response.json() == {
+        "jobId": "upload-job-456",
+        "status": "finished",
+        "done": True,
+        "result": {
+            "acceptedCount": 1,
+            "rejectedCount": 0,
+            "results": [
+                {
+                    "filename": "policy.pdf",
+                    "contentType": "application/pdf",
+                    "accepted": True,
+                    "documentId": "doc-upload-v2-1",
+                    "chunksStored": 3,
+                    "error": None,
+                }
+            ],
+        },
+        "error": None,
+    }
+    assert dispatcher.status_calls == ["upload-job-456"]
 
 
 def test_delete_documents():
