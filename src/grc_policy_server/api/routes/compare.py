@@ -20,4 +20,8 @@ async def compare_documents(
     payload: CompareRequest,
     service: RealDiffEngine = Depends(get_diff_engine),
 ):
-    return await service.compare(payload.doc1, payload.doc2)
+    return await service.compare(
+        payload.doc1,
+        payload.doc2,
+        force_re_extract=payload.forceReExtract,
+    )

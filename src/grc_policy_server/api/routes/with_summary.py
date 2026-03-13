@@ -35,7 +35,11 @@ async def compare_with_summary(
     action_plan: list[ActionItem] = []
     follow_up_questions: list[str] = []
 
-    async for event in service.compare_stream(payload.doc1, payload.doc2):
+    async for event in service.compare_stream(
+        payload.doc1,
+        payload.doc2,
+        force_re_extract=payload.forceReExtract,
+    ):
         event_type = event.get("type")
 
         if event_type == "diff" and "item" in event:

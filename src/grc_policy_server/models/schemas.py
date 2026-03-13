@@ -47,6 +47,7 @@ class ComparisonResult(BaseModel):
 class CompareRequest(BaseModel):
     doc1: Document
     doc2: Document
+    forceReExtract: bool = False
 
 
 class DiffChunk(BaseModel):

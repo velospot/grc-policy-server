@@ -364,11 +364,11 @@ class ClauseMatcher:
         )
 
         score = (
-            0.30 * text_score
-            + 0.25 * lexical_score
-            + 0.15 * length_score
-            + 0.20 * meaning_score
-            + 0.10 * signature_score
+            0.35 * text_score
+            + 0.10 * lexical_score
+            + 0.05 * length_score
+            + 0.35 * meaning_score
+            + 0.15 * signature_score
         )
         if left.get("node_type") != right.get("node_type"):
             score *= 0.8

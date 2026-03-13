@@ -103,6 +103,7 @@ class Settings(BaseSettings):
         return self.ollama_embed_model
 
     embed_batch_size: int = 32
+    semantic_extraction_batch_size: int = 8
     download_timeout_seconds: float = 30.0
     max_download_mb: int = 50
     upload_root: str = ""

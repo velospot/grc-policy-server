@@ -56,14 +56,21 @@ class RealDiffEngineStream:
     topk: int = 5
 
     async def compare_stream(
-        self, doc1: Document, doc2: Document
+        self,
+        doc1: Document,
+        doc2: Document,
+        force_re_extract: bool = False,
     ) -> AsyncIterator[Dict]:
         yield {"type": "progress", "stage": "load_chunks"}
 
         left_nodes = self.weaviate.fetch_chunks_by_document(doc1.id)
         right_nodes = self.weaviate.fetch_chunks_by_document(doc2.id)
-        left_nodes = await self._enrich_nodes_with_semantics(left_nodes)
-        right_nodes = await self._enrich_nodes_with_semantics(right_nodes)
+        left_nodes = await self._enrich_nodes_with_semantics(
+            left_nodes, force_re_extract=force_re_extract
+        )
+        right_nodes = await self._enrich_nodes_with_semantics(
+            right_nodes, force_re_extract=force_re_extract
+        )
 
         yield {
             "type": "progress",
@@ -207,7 +214,11 @@ class RealDiffEngineStream:
             self._node_meaning(right),
         ).obligation_change
 
-    async def _enrich_nodes_with_semantics(self, nodes: list[dict]) -> list[dict]:
+    async def _enrich_nodes_with_semantics(
+        self,
+        nodes: list[dict],
+        force_re_extract: bool = False,
+    ) -> list[dict]:
         enriched = [dict(node) for node in nodes]
         indexes: list[int] = []
         texts: list[str] = []
@@ -217,7 +228,10 @@ class RealDiffEngineStream:
                 node["clean_text"] = clean_policy_text(str(node.get("text") or ""))
             if node.get("node_type") != "clause":
                 continue
-            if any(node.get(field) for field in ("obligation", "subject", "action", "object", "condition")):
+            # Skip if already has semantics, unless force_re_extract is True
+            if not force_re_extract and any(
+                node.get(field) for field in ("obligation", "subject", "action", "object", "condition")
+            ):
                 continue
             text = str(node.get("text") or "").strip()
             if not text:

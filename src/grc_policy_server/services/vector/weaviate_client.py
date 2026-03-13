@@ -111,7 +111,7 @@ class WeaviateClient:
                 name=name,
                 properties=self._schema_properties(),
                 vector_config=Configure.Vectors.text2vec_ollama(
-                    api_endpoint=settings.ollama_url,
+                    api_endpoint="http://host.docker.internal:11434",
                     model=settings.ollama_embed_model,
                     source_properties=["clean_text", "text", "section_path", "title"],
                 ),

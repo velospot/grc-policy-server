@@ -13,6 +13,9 @@ OBLIGATION_STRENGTH = {
     "required": 3,
     "must": 4,
     "shall": 5,
+    # Negations: treated as strong obligations (prohibitions)
+    "must_not": 4,
+    "shall_not": 5,
 }
 
 _CONDITION_RE = re.compile(
@@ -62,11 +65,8 @@ _STOPWORDS = {
     "from",
     "in",
     "is",
-    "must",
     "of",
     "or",
-    "shall",
-    "should",
     "that",
     "the",
     "their",
@@ -75,6 +75,7 @@ _STOPWORDS = {
     "using",
     "with",
 }
+# Note: "must", "shall", "should" intentionally excluded - critical for policy comparison
 _CANONICAL_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r"\bmulti[-\s]?factor authentication\b", re.IGNORECASE),
@@ -214,8 +215,17 @@ def obligation_rank(obligation: str) -> int:
 
 
 def describe_obligation_change(left: str, right: str) -> str:
+    left_lower = (left or "").lower()
+    right_lower = (right or "").lower()
     left_rank = obligation_rank(left)
     right_rank = obligation_rank(right)
+
+    # Check for negation inversion (e.g., "shall" <-> "shall_not")
+    left_is_negation = left_lower.endswith("_not")
+    right_is_negation = right_lower.endswith("_not")
+    if left_is_negation != right_is_negation and left_rank >= 0 and right_rank >= 0:
+        return "inverted"
+
     if left_rank == right_rank:
         return "unchanged"
     if left_rank < 0 and right_rank >= 0:
