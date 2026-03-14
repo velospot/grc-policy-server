@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Iterable, Optional
 
 from docling_core.transforms.chunker.doc_chunk import DocChunk
@@ -13,6 +14,17 @@ from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 
 logger = logging.getLogger(__name__)
 
+_HEADER_FOOTER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^page\\s+\\d+(\\s+of\\s+\\d+)?$", re.IGNORECASE),
+    re.compile(r"^\\d+\\s*/\\s*\\d+$"),
+    re.compile(r"^\\d{1,2}[/.-]\\d{1,2}[/.-]\\d{2,4}$"),
+    re.compile(
+        r"^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\s+\\d{1,2},?\\s+\\d{2,4}$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^(document\\s+id|doc\\s*id|record\\s*id)[:#]?\\s*[-A-Za-z0-9_.]+$", re.IGNORECASE),
+    re.compile(r"^[A-Z]{2,5}-\\d{2,}$"),
+)
 
 def chunk_document(dl_doc, *, merge_list_items: bool) -> list[Any]:
     chunker = HierarchicalChunker(
@@ -27,7 +39,7 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
     for idx, raw_chunk in enumerate(raw_chunks):
         doc_chunk = DocChunk.model_validate(raw_chunk)
         fields = extract_basic_chunk_fields(raw_chunk)
-        text = (fields.get("text") or "").strip()
+        text = " ".join((fields.get("text") or "").split())
         labels = tuple(_item_label_name(item.label) for item in doc_chunk.meta.doc_items)
         captions = _extract_captions(doc_chunk.meta.doc_items, dl_doc)
         source_refs = tuple(item.self_ref for item in doc_chunk.meta.doc_items)
@@ -55,6 +67,9 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
         }
         if fields.get("docling_path"):
             metadata["docling_path"] = fields["docling_path"]
+
+        if _is_header_footer_text(text):
+            continue
 
         parsed_chunks.append(
             ParsedChunk(
@@ -234,6 +249,22 @@ def _extract_captions(doc_items: Iterable[Any], dl_doc: Any) -> list[str]:
             if caption and caption not in captions:
                 captions.append(caption)
     return captions
+
+
+def _is_header_footer_text(text: str) -> bool:
+    normalized = " ".join((text or "").split()).strip()
+    if not normalized:
+        return False
+
+    for pattern in _HEADER_FOOTER_PATTERNS:
+        if pattern.match(normalized):
+            return True
+
+    digits = sum(ch.isdigit() for ch in normalized)
+    if len(normalized) <= 12 and digits >= 0.6 * len(normalized):
+        return True
+
+    return False
 
 
 def _is_heading_only(doc_chunk: DocChunk, text: str) -> bool:

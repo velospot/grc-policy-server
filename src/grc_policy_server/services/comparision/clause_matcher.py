@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Callable
 
+from grc_policy_server.utils.hashing import normalize_whitespace
+
 from grc_policy_server.services.comparision.policy_semantics import (
     ClauseMeaning,
     clean_policy_text,
@@ -17,8 +19,8 @@ from grc_policy_server.services.comparision.policy_semantics import (
 
 @dataclass(frozen=True)
 class MatchThresholds:
-    max_match_distance: float = 0.50
-    unchanged_distance: float = 0.15
+    max_match_distance: float = 0.35
+    unchanged_distance: float = 0.20
     modified_distance: float = 0.25
     min_section_score: float = 0.55
     min_clause_score: float = 0.50
@@ -354,7 +356,10 @@ class ClauseMatcher:
         if not left_text or not right_text:
             return 0.0
 
-        text_score = SequenceMatcher(None, left_text, right_text).ratio()
+        normalized_left = normalize_whitespace(left_text)
+        normalized_right = normalize_whitespace(right_text)
+
+        text_score = SequenceMatcher(None, normalized_left, normalized_right).ratio()
         lexical_score = token_overlap(left_text, right_text)
         length_score = self._length_similarity(left_text, right_text)
         meaning_score = self._meaning_score(left, right)
@@ -364,10 +369,10 @@ class ClauseMatcher:
         )
 
         score = (
-            0.35 * text_score
-            + 0.10 * lexical_score
+            0.25 * text_score
+            + 0.15 * lexical_score
             + 0.05 * length_score
-            + 0.35 * meaning_score
+            + 0.40 * meaning_score
             + 0.15 * signature_score
         )
         if left.get("node_type") != right.get("node_type"):

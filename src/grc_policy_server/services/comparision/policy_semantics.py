@@ -76,6 +76,15 @@ _STOPWORDS = {
     "with",
 }
 # Note: "must", "shall", "should" intentionally excluded - critical for policy comparison
+_UNICODE_PUNCT_TRANSLATION = {
+    ord("“"): '"',
+    ord("”"): '"',
+    ord("‘"): "'",
+    ord("’"): "'",
+    ord("–"): "-",
+    ord("—"): "-",
+    ord("…"): "...",
+}
 _CANONICAL_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r"\bmulti[-\s]?factor authentication\b", re.IGNORECASE),
@@ -90,6 +99,20 @@ _CANONICAL_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bprivileged account\b", re.IGNORECASE), "privileged access"),
     (re.compile(r"\badmins\b", re.IGNORECASE), "administrators"),
     (re.compile(r"\badmin\b", re.IGNORECASE), "administrator"),
+    (re.compile(r"\bend[-\s]?users?\b", re.IGNORECASE), "users"),
+    (re.compile(r"\bpersonnel\b", re.IGNORECASE), "staff"),
+    (re.compile(r"\bstaff\b", re.IGNORECASE), "staff"),
+    (re.compile(r"\bthird[-\s]?parties\b", re.IGNORECASE), "third-party"),
+    (re.compile(r"\bthird[-\s]?party\b", re.IGNORECASE), "third-party"),
+    (re.compile(r"\bvendors?\b", re.IGNORECASE), "third-party"),
+    (re.compile(r"\bservice providers?\b", re.IGNORECASE), "third-party"),
+    (
+        re.compile(r"\bpersonally identifiable information\b", re.IGNORECASE),
+        "pii",
+    ),
+    (re.compile(r"\bpii\b", re.IGNORECASE), "pii"),
+    (re.compile(r"\bsocial security numbers?\b", re.IGNORECASE), "ssn"),
+    (re.compile(r"\bssn\b", re.IGNORECASE), "ssn"),
 )
 
 
@@ -113,6 +136,7 @@ def clean_policy_text(value: str) -> str:
     text = normalize_whitespace(value or "")
     if not text:
         return ""
+    text = text.translate(_UNICODE_PUNCT_TRANSLATION)
     text = _CITATION_RE.sub(" ", text)
     text = _PAREN_MARKER_RE.sub(" ", text)
     text = _ENUMERATION_PREFIX_RE.sub("", text)
