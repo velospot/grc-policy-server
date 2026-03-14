@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from grc_policy_server.core.config import settings as app_settings
 from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import KeyDifference
 from grc_policy_server.services.llm.base import BaseLLM
@@ -80,9 +79,8 @@ class OllamaClient(BaseLLM):
                 continue
             uncached.append((index, text))
 
-        batch_size = app_settings.semantic_extraction_batch_size
-        for start in range(0, len(uncached), batch_size):
-            batch = uncached[start : start + batch_size]
+        for start in range(0, len(uncached), 8):
+            batch = uncached[start : start + 8]
             batch_texts = [text for _, text in batch]
             extracted = await self._extract_policy_meanings_batch(batch_texts)
             for (index, text), meaning in zip(batch, extracted, strict=False):
@@ -201,30 +199,16 @@ Write a concise change summary and (if clear) the likely compliance impact.
         self, *, doc1_name: str, doc2_name: str, diffs: List[Dict[str, Any]]
     ) -> str:
         return f"""
-You are a GRC compliance analyst creating an executive summary of document changes.
+You are a compliance analyst. Summarize changes between two document versions.
 
-Documents being compared:
-- Document A (baseline): {doc1_name}
-- Document B (updated): {doc2_name}
+Document A: {doc1_name}
+Document B: {doc2_name}
 
-The documents may be in any language. Provide the summary in English.
-
-Write a 3-6 sentence executive summary following this structure:
-1. Overall scope: How many changes and which areas are affected
-2. Critical changes: Highlight any obligation changes (shall/must strengthened, weakened, or inverted to prohibitions)
-3. Compliance impact: What actions may be required due to these changes
-
-Priority guidance:
-- Obligation inversions (e.g., "shall" changed to "shall not") are CRITICAL
-- Obligation strengthening (e.g., "should" to "must") is HIGH priority
-- Obligation weakening (e.g., "must" to "may") is HIGH priority
-- New requirements (ADDED) need attention
-- Removed requirements may indicate relaxed controls
-
-Rules:
-- Use ONLY information from the provided differences JSON
-- Do NOT invent changes, sections, or impacts not present in the data
-- Use clear, auditor-friendly language suitable for compliance reporting
+You MUST follow these rules:
+- Use ONLY the provided differences JSON.
+- Do NOT invent changes, sections, or impacts not present.
+- Prefer clear, auditor-friendly language.
+- Keep it to 3–6 sentences.
 
 Differences JSON:
 {json.dumps(diffs, ensure_ascii=False)}
@@ -241,35 +225,18 @@ Executive summary:
         max_questions: int,
     ) -> str:
         return f"""
-You are a GRC auditor reviewing policy changes between two document versions.
+You are a GRC auditor.
 
-Documents:
-- Baseline: {doc1_name}
-- Updated: {doc2_name}
+Generate up to {max_questions} follow-up questions based ONLY on the diff list.
+Do NOT invent sections not present.
 
-Generate up to {max_questions} follow-up questions that a compliance team should investigate.
+Document A: {doc1_name}
+Document B: {doc2_name}
 
-Focus on questions that address:
-- Implementation gaps: What processes need updating to meet new requirements?
-- Risk assessment: Are there new risks from weakened or removed controls?
-- Timeline concerns: Are there deadlines or effective dates to consider?
-- Evidence requirements: What documentation is needed to demonstrate compliance?
-- Stakeholder impact: Who needs to be informed of these changes?
-
-Example good questions:
-- "What is the implementation timeline for the new MFA requirement in Section 3.2?"
-- "Have existing controls been assessed against the strengthened data retention requirements?"
-- "Which teams are responsible for updating procedures to reflect the removed exception in Section 5.1?"
-
-Rules:
-- Base questions ONLY on the provided differences - do not invent sections or changes
-- Make questions specific and actionable
-- Prioritize questions about Critical and High impact changes
-
-Differences JSON:
+Diffs JSON:
 {json.dumps(diffs, ensure_ascii=False)}
 
-Return as a numbered list (1., 2., 3., ...):
+Return as a numbered list (1., 2., 3., ...). Keep questions specific and actionable.
 """.strip()
 
     # -------------------------
@@ -354,38 +321,51 @@ Return as a numbered list (1., 2., 3., ...):
     def _prompt_extract_policy_meanings(self, texts: List[str]) -> str:
         items = [{"index": index, "text": text} for index, text in enumerate(texts)]
         return f"""
-You extract structured policy meaning for auditor-grade document comparison.
+You extract a structured semantic fingerprint from document text to enable precise difference detection.
 
-The input policy text may be in any language. Understand the original language, but normalize the output fields into concise English.
+The input text may be in any language. Understand the original language, but normalize the output fields into concise English.
 
 Return STRICT JSON only as an array with exactly {len(texts)} objects in the same order as the input.
+Each object must have these string fields:
+- obligation: one of "", "may", "should", "recommended", "required", "must", "shall", "must_not", "shall_not"
+- subject
+- action
+- object
+- condition
 
 Field definitions:
-- obligation: The strength of requirement. Use one of: "", "may", "should", "recommended", "required", "must", "shall", "shall_not", "must_not"
-- subject: WHO must perform the action (e.g., "organization", "data controller", "employees")
-- action: WHAT must be done, as a verb phrase (e.g., "implement", "review", "document")
-- object: WHAT the action applies to (e.g., "access controls", "security policies", "personal data")
-- condition: WHEN or IF - any conditions, triggers, or exceptions (e.g., "when processing sensitive data", "unless approved by management")
+- obligation: The modality or strength of the statement (see values below)
+- subject: The actor, entity, or topic of the statement (who/what is responsible, discussed, or referenced)
+- action: The verb, operation, or relationship described (what is done, stated, defined, or asserted)
+- object: The target, value, or content the action applies to (include specific numbers, dates, names, quantities, or key terms)
+- condition: Any qualifiers, constraints, scope, context, exceptions, timeframes, or prerequisites
 
-Examples:
+Obligation/modality values (weakest to strongest):
+- "": Factual, descriptive, or definitional statement
+- "may": Permission, possibility, or optional
+- "should": Advisory, suggested, or expected
+- "recommended": Explicitly recommended
+- "required": Mandatory or necessary
+- "must": Strong requirement
+- "shall": Formal or contractual obligation
+- "must_not"/"shall_not": Prohibition or forbidden
 
-Input: "Organizations shall implement multi-factor authentication for all privileged accounts."
-Output: {{"obligation": "shall", "subject": "organizations", "action": "implement", "object": "multi-factor authentication for privileged accounts", "condition": ""}}
-
-Input: "Personal data must not be retained beyond the specified retention period."
-Output: {{"obligation": "must_not", "subject": "", "action": "retain", "object": "personal data", "condition": "beyond retention period"}}
-
-Input: "Where technically feasible, encryption should be applied to data at rest."
-Output: {{"obligation": "should", "subject": "", "action": "apply encryption", "object": "data at rest", "condition": "where technically feasible"}}
-
-Input: "Die Organisation muss alle Sicherheitsvorfälle dokumentieren."
-Output: {{"obligation": "must", "subject": "organization", "action": "document", "object": "security incidents", "condition": ""}}
+Extraction goals - capture differences of ANY type:
+- Factual: Numbers, dates, names, quantities, versions go in object field
+- Semantic: Core meaning via subject + action + object combination
+- Contextual: Scope, exceptions, timeframes, prerequisites go in condition field
+- Modality: Strength or nature of statement in obligation field
 
 Rules:
-- For negations like "shall not" or "must not", use "shall_not" or "must_not" as the obligation.
-- If no explicit obligation word exists, set obligation to "".
-- Keep all field values concise (under 10 words each).
-- Output ONLY the JSON array, no commentary or markdown.
+- Extract the complete semantic fingerprint so any change in meaning is detectable.
+- Preserve specific values (numbers, dates, names) exactly in object field.
+- If no modality exists, set obligation to "".
+- If subject is implicit, infer from context or use "entity".
+- Keep fields concise but include all semantically significant content.
+- Put all qualifiers, scope limits, and context in condition field.
+- Ignore punctuation, formatting, and stylistic variations - focus only on meaning.
+- Empty string for any field that cannot be determined.
+- Do not add commentary, markdown, or extra keys.
 
 Input JSON:
 {json.dumps(items, ensure_ascii=False)}
@@ -418,8 +398,7 @@ Input JSON:
             return self._meaning_dict(ClauseMeaning("", "", "", "", ""))
 
         obligation = str(value.get("obligation") or "").strip().lower()
-        valid_obligations = {"", "may", "should", "recommended", "required", "must", "shall", "shall_not", "must_not"}
-        if obligation not in valid_obligations:
+        if obligation not in {"", "may", "should", "recommended", "required", "must", "shall", "must_not", "shall_not"}:
             obligation = self._map_obligation_value(obligation)
 
         return {
@@ -432,12 +411,14 @@ Input JSON:
 
     def _map_obligation_value(self, value: str) -> str:
         lowered = value.lower()
-        # Check negations first
-        if "shall not" in lowered or "shall_not" in lowered:
+        # Check for negations/prohibitions first
+        if "shall" in lowered and ("not" in lowered or "never" in lowered or "prohibit" in lowered or "forbid" in lowered):
             return "shall_not"
-        if "must not" in lowered or "must_not" in lowered:
+        if "must" in lowered and ("not" in lowered or "never" in lowered or "prohibit" in lowered or "forbid" in lowered):
             return "must_not"
-        # Then positive obligations
+        if "prohibit" in lowered or "forbid" in lowered or "forbidden" in lowered:
+            return "must_not"
+        # Then check positive obligations
         if "shall" in lowered:
             return "shall"
         if "must" in lowered:
