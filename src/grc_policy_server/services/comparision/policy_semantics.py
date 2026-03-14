@@ -50,32 +50,43 @@ _CITATION_RE = re.compile(r"(?<!\w)\[\d+\](?!\w)")
 _PAREN_MARKER_RE = re.compile(r"(?<!\w)\((?:[a-z]|\d+|[ivxlcdm]+)\)(?!\w)", re.IGNORECASE)
 _NOISE_RE = re.compile(r"^[\d\W_]+$")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-_STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "any",
-    "all",
-    "are",
-    "as",
-    "at",
-    "be",
-    "by",
-    "for",
-    "from",
-    "in",
-    "is",
-    "of",
-    "or",
-    "that",
-    "the",
-    "their",
-    "to",
-    "use",
-    "using",
-    "with",
+_STOPWORDS_EN = {
+    "a", "an", "and", "any", "all", "are", "as", "at", "be", "by",
+    "for", "from", "in", "is", "of", "or", "that", "the", "their",
+    "to", "use", "using", "with", "this", "these", "those", "it",
+    "its", "been", "being", "have", "has", "had", "do", "does", "did",
+    "will", "would", "can", "could", "into", "on", "upon", "such",
 }
-# Note: "must", "shall", "should" intentionally excluded - critical for policy comparison
+_STOPWORDS_DE = {
+    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer",
+    "einem", "einen", "und", "oder", "aber", "als", "auch", "auf",
+    "aus", "bei", "bis", "durch", "fuer", "gegen", "im", "in", "ist",
+    "mit", "nach", "nicht", "noch", "nur", "ob", "ohne", "so", "sowie",
+    "ueber", "um", "und", "unter", "vom", "von", "vor", "wenn", "wie",
+    "wird", "zu", "zum", "zur", "sind", "sein", "seine", "seiner",
+    "war", "waren", "wurde", "wurden", "werden", "hat", "haben", "kann",
+}
+_STOPWORDS_FR = {
+    "le", "la", "les", "un", "une", "des", "du", "de", "et", "ou",
+    "mais", "donc", "car", "ni", "ce", "cette", "ces", "son", "sa",
+    "ses", "leur", "leurs", "au", "aux", "par", "pour", "sur", "sous",
+    "avec", "sans", "dans", "en", "est", "sont", "etre", "avoir",
+    "fait", "faire", "peut", "peuvent", "doit", "qui", "que", "quoi",
+    "dont", "nous", "vous", "ils", "elles", "se", "ne", "pas", "plus",
+    "tout", "tous", "toute", "toutes", "ete", "sera", "seront",
+}
+# Note: "must", "shall", "should", "muss", "soll", "doit" intentionally excluded - critical for policy comparison
+
+def get_stopwords(language: str = "") -> set[str]:
+    """Get stopwords for the specified language."""
+    if language == "de":
+        return _STOPWORDS_DE
+    if language == "fr":
+        return _STOPWORDS_FR
+    if language == "en":
+        return _STOPWORDS_EN
+    # For unknown language, combine all to be safe
+    return _STOPWORDS_EN | _STOPWORDS_DE | _STOPWORDS_FR
 _UNICODE_PUNCT_TRANSLATION = {
     ord("“"): '"',
     ord("”"): '"',
@@ -86,6 +97,7 @@ _UNICODE_PUNCT_TRANSLATION = {
     ord("…"): "...",
 }
 _CANONICAL_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # English MFA variants
     (
         re.compile(r"\bmulti[-\s]?factor authentication\b", re.IGNORECASE),
         "mfa",
@@ -95,24 +107,75 @@ _CANONICAL_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
         "mfa",
     ),
     (re.compile(r"\b2fa\b", re.IGNORECASE), "mfa"),
+    # German MFA variants
+    (re.compile(r"\bmehr[-\s]?faktor[-\s]?authentifizierung\b", re.IGNORECASE), "mfa"),
+    (re.compile(r"\bzwei[-\s]?faktor[-\s]?authentifizierung\b", re.IGNORECASE), "mfa"),
+    # French MFA variants
+    (re.compile(r"\bauthentification\s+(?:à\s+)?multi[-\s]?facteurs?\b", re.IGNORECASE), "mfa"),
+    (re.compile(r"\bauthentification\s+(?:à\s+)?deux\s+facteurs?\b", re.IGNORECASE), "mfa"),
+    # Privileged access
     (re.compile(r"\bprivileged accounts\b", re.IGNORECASE), "privileged access"),
     (re.compile(r"\bprivileged account\b", re.IGNORECASE), "privileged access"),
+    (re.compile(r"\bprivilegierte\s+zugriffe?\b", re.IGNORECASE), "privileged access"),  # German
+    (re.compile(r"\baccès\s+privilégiés?\b", re.IGNORECASE), "privileged access"),  # French
+    # Administrators
     (re.compile(r"\badmins\b", re.IGNORECASE), "administrators"),
     (re.compile(r"\badmin\b", re.IGNORECASE), "administrator"),
+    (re.compile(r"\badministratoren\b", re.IGNORECASE), "administrators"),  # German
+    (re.compile(r"\badministrateurs?\b", re.IGNORECASE), "administrator"),  # French
+    # Users
     (re.compile(r"\bend[-\s]?users?\b", re.IGNORECASE), "users"),
+    (re.compile(r"\bbenutzer\b", re.IGNORECASE), "users"),  # German
+    (re.compile(r"\butilisateurs?\b", re.IGNORECASE), "users"),  # French
+    # Staff/Personnel
     (re.compile(r"\bpersonnel\b", re.IGNORECASE), "staff"),
     (re.compile(r"\bstaff\b", re.IGNORECASE), "staff"),
+    (re.compile(r"\bmitarbeiter\b", re.IGNORECASE), "staff"),  # German
+    (re.compile(r"\bpersonnels?\b", re.IGNORECASE), "staff"),  # French
+    # Third-party
     (re.compile(r"\bthird[-\s]?parties\b", re.IGNORECASE), "third-party"),
     (re.compile(r"\bthird[-\s]?party\b", re.IGNORECASE), "third-party"),
     (re.compile(r"\bvendors?\b", re.IGNORECASE), "third-party"),
     (re.compile(r"\bservice providers?\b", re.IGNORECASE), "third-party"),
+    (re.compile(r"\bdrittanbieter\b", re.IGNORECASE), "third-party"),  # German
+    (re.compile(r"\bdienstleister\b", re.IGNORECASE), "third-party"),  # German
+    (re.compile(r"\btiers\b", re.IGNORECASE), "third-party"),  # French
+    (re.compile(r"\bprestataires?\b", re.IGNORECASE), "third-party"),  # French
+    (re.compile(r"\bfournisseurs?\b", re.IGNORECASE), "third-party"),  # French
+    # PII
     (
         re.compile(r"\bpersonally identifiable information\b", re.IGNORECASE),
         "pii",
     ),
     (re.compile(r"\bpii\b", re.IGNORECASE), "pii"),
+    (re.compile(r"\bpersonenbezogene\s+daten\b", re.IGNORECASE), "pii"),  # German
+    (re.compile(r"\bdonnées\s+personnelles\b", re.IGNORECASE), "pii"),  # French
+    (re.compile(r"\bdonnées\s+à\s+caractère\s+personnel\b", re.IGNORECASE), "pii"),  # French GDPR
+    # SSN
     (re.compile(r"\bsocial security numbers?\b", re.IGNORECASE), "ssn"),
     (re.compile(r"\bssn\b", re.IGNORECASE), "ssn"),
+    (re.compile(r"\bsozialversicherungsnummer\b", re.IGNORECASE), "ssn"),  # German
+    (re.compile(r"\bnuméro\s+de\s+sécurité\s+sociale\b", re.IGNORECASE), "ssn"),  # French
+    # Data protection / GDPR terms
+    (re.compile(r"\bdatenschutz\b", re.IGNORECASE), "data protection"),  # German
+    (re.compile(r"\bprotection\s+des\s+données\b", re.IGNORECASE), "data protection"),  # French
+    (re.compile(r"\bdsgvo\b", re.IGNORECASE), "gdpr"),  # German GDPR
+    (re.compile(r"\brgpd\b", re.IGNORECASE), "gdpr"),  # French GDPR
+    # Security / Compliance
+    (re.compile(r"\bsicherheit\b", re.IGNORECASE), "security"),  # German
+    (re.compile(r"\bsécurité\b", re.IGNORECASE), "security"),  # French
+    (re.compile(r"\bcompliance\b", re.IGNORECASE), "compliance"),
+    (re.compile(r"\bkonformität\b", re.IGNORECASE), "compliance"),  # German
+    (re.compile(r"\bconformité\b", re.IGNORECASE), "compliance"),  # French
+    # Risk
+    (re.compile(r"\brisikobewertung\b", re.IGNORECASE), "risk assessment"),  # German
+    (re.compile(r"\bévaluation\s+des\s+risques\b", re.IGNORECASE), "risk assessment"),  # French
+    # Audit
+    (re.compile(r"\bprüfung\b", re.IGNORECASE), "audit"),  # German
+    (re.compile(r"\baudit\b", re.IGNORECASE), "audit"),
+    # Access control
+    (re.compile(r"\bzugriffskontrolle\b", re.IGNORECASE), "access control"),  # German
+    (re.compile(r"\bcontrôle\s+d'accès\b", re.IGNORECASE), "access control"),  # French
 )
 
 
@@ -186,13 +249,13 @@ def extract_clause_meaning(value: str) -> ClauseMeaning:
     return ClauseMeaning(obligation, subject, action, obj, condition)
 
 
-def compare_clause_meaning(left: ClauseMeaning, right: ClauseMeaning) -> MeaningComparison:
-    subject_score = token_overlap(left.subject, right.subject)
+def compare_clause_meaning(left: ClauseMeaning, right: ClauseMeaning, language: str = "") -> MeaningComparison:
+    subject_score = token_overlap(left.subject, right.subject, language)
     action_score = 1.0 if left.action and left.action == right.action else token_overlap(
-        left.action, right.action
+        left.action, right.action, language
     )
-    object_score = token_overlap(left.object, right.object)
-    condition_score = token_overlap(left.condition, right.condition)
+    object_score = token_overlap(left.object, right.object, language)
+    condition_score = token_overlap(left.condition, right.condition, language)
 
     populated_scores = [
         score
@@ -213,9 +276,9 @@ def compare_clause_meaning(left: ClauseMeaning, right: ClauseMeaning) -> Meaning
     )
 
 
-def token_overlap(left: str, right: str) -> float:
-    left_tokens = set(tokenize_policy_text(left))
-    right_tokens = set(tokenize_policy_text(right))
+def token_overlap(left: str, right: str, language: str = "") -> float:
+    left_tokens = set(tokenize_policy_text(left, language))
+    right_tokens = set(tokenize_policy_text(right, language))
     if not left_tokens and not right_tokens:
         return 1.0
     if not left_tokens or not right_tokens:
@@ -225,11 +288,12 @@ def token_overlap(left: str, right: str) -> float:
     return intersection / union if union else 0.0
 
 
-def tokenize_policy_text(value: str) -> list[str]:
+def tokenize_policy_text(value: str, language: str = "") -> list[str]:
+    stopwords = get_stopwords(language)
     tokens = [
         token
         for token in _TOKEN_RE.findall(clean_policy_text(value))
-        if len(token) > 1 and token not in _STOPWORDS
+        if len(token) > 1 and token not in stopwords
     ]
     return tokens
 
@@ -279,10 +343,10 @@ def semantic_signature(value: str) -> str:
     return " | ".join(part for part in parts if part)
 
 
-def average_token_overlap(values: Iterable[str], other_values: Iterable[str]) -> float:
+def average_token_overlap(values: Iterable[str], other_values: Iterable[str], language: str = "") -> float:
     left = " ".join(value for value in values if value)
     right = " ".join(value for value in other_values if value)
-    return token_overlap(left, right)
+    return token_overlap(left, right, language)
 
 
 def _split_condition(text: str) -> tuple[str, str]:

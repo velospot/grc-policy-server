@@ -64,6 +64,7 @@ class OllamaClient(BaseLLM):
         self,
         *,
         texts: List[str],
+        language: str = "",
     ) -> List[Dict[str, str]]:
         normalized_texts = [normalize_whitespace(text or "") for text in texts]
         results: list[dict[str, str] | None] = [None] * len(normalized_texts)
@@ -82,7 +83,7 @@ class OllamaClient(BaseLLM):
         for start in range(0, len(uncached), 8):
             batch = uncached[start : start + 8]
             batch_texts = [text for _, text in batch]
-            extracted = await self._extract_policy_meanings_batch(batch_texts)
+            extracted = await self._extract_policy_meanings_batch(batch_texts, language=language)
             for (index, text), meaning in zip(batch, extracted, strict=False):
                 payload = self._normalize_meaning_dict(meaning)
                 self._meaning_cache[text] = payload
@@ -93,15 +94,66 @@ class OllamaClient(BaseLLM):
             for result, text in zip(results, normalized_texts, strict=False)
         ]
 
+    async def detect_language(self, text_sample: str) -> str:
+        """
+        Detect the language of a document from a text sample.
+        Returns language code: 'en', 'de', 'fr', or 'unknown'.
+        """
+        if not text_sample or not text_sample.strip():
+            return "unknown"
+
+        # Take first 500 characters to keep it efficient
+        sample = text_sample[:500].strip()
+        if not sample:
+            return "unknown"
+
+        prompt = f"""
+Identify the primary language of this text. Reply with ONLY one of these codes:
+- en (English)
+- de (German)
+- fr (French)
+- unknown (if unclear or other language)
+
+Text:
+{sample}
+
+Language code:"""
+
+        try:
+            response = await self._generate_text(prompt)
+            code = response.strip().lower()
+            # Check for German indicators
+            if code.startswith("de") or "german" in code or "deutsch" in code:
+                return "de"
+            # Check for French indicators
+            if code.startswith("fr") or "french" in code or "francais" in code or "français" in code:
+                return "fr"
+            # Check for English indicators
+            if code.startswith("en") or "english" in code:
+                return "en"
+            # Fallback: check if response contains just the code
+            first_word = code.split()[0] if code.split() else ""
+            if first_word in {"de", "german", "deutsch"}:
+                return "de"
+            if first_word in {"fr", "french", "francais", "français"}:
+                return "fr"
+            if first_word in {"en", "english"}:
+                return "en"
+            return "unknown"
+        except Exception:
+            logger.exception("failed to detect language")
+            return "unknown"
+
     async def summarize_diff(
         self,
         *,
         old_text: str,
         new_text: str,
         section: str,
+        language: str = "",
     ) -> str:
         prompt = self._prompt_summarize_diff(
-            old_text=old_text, new_text=new_text, section=section
+            old_text=old_text, new_text=new_text, section=section, language=language
         )
         return await self._generate_text(prompt)
 
@@ -111,10 +163,11 @@ class OllamaClient(BaseLLM):
         doc1_name: str,
         doc2_name: str,
         key_differences: List[KeyDifference],
+        language: str = "",
     ) -> str:
         compact = self._compact_diffs_for_summary(key_differences)
         prompt = self._prompt_summarize_changes(
-            doc1_name=doc1_name, doc2_name=doc2_name, diffs=compact
+            doc1_name=doc1_name, doc2_name=doc2_name, diffs=compact, language=language
         )
         return await self._generate_text(prompt)
 
@@ -125,6 +178,7 @@ class OllamaClient(BaseLLM):
         doc2_name: str,
         key_differences: List[KeyDifference],
         max_questions: int = 4,
+        language: str = "",
     ) -> List[str]:
         compact = self._compact_diffs_for_followups(key_differences)
         prompt = self._prompt_followups(
@@ -132,12 +186,22 @@ class OllamaClient(BaseLLM):
             doc2_name=doc2_name,
             diffs=compact,
             max_questions=max_questions,
+            language=language,
         )
         text = await self._generate_text(prompt)
         return self._parse_numbered_questions(text, max_questions=max_questions)
 
     def close(self) -> None:
         return None
+
+    def _language_hint(self, language: str) -> str:
+        """Generate a language hint for prompts based on detected language code."""
+        lang_map = {
+            "en": "The input text is in English. ",
+            "de": "The input text is in German (Deutsch). ",
+            "fr": "The input text is in French (Français). ",
+        }
+        return lang_map.get(language, "The input text may be in English, German, or French. ")
 
     # -------------------------
     # HTTP helpers
@@ -172,17 +236,21 @@ class OllamaClient(BaseLLM):
     # -------------------------
 
     def _prompt_summarize_diff(
-        self, *, old_text: str, new_text: str, section: str
+        self, *, old_text: str, new_text: str, section: str, language: str = ""
     ) -> str:
+        lang_hint = self._language_hint(language)
         return f"""
 You are a GRC compliance analyst.
 
-Task: Summarize the change in one paragraph, strictly grounded in the provided texts.
+{lang_hint}Understand the original language but write the summary in English.
+
+Task: Summarize the change in one sentence, strictly grounded in the provided texts.
 
 Rules:
 - Use ONLY the OLD and NEW text below.
 - Do NOT invent new requirements, dates, or sections.
 - If change is ambiguous, say so.
+- Be concise: one sentence describing what changed and its impact.
 
 Section: {section}
 
@@ -192,14 +260,17 @@ OLD:
 NEW:
 {new_text}
 
-Write a concise change summary and (if clear) the likely compliance impact.
+One-line summary:
 """.strip()
 
     def _prompt_summarize_changes(
-        self, *, doc1_name: str, doc2_name: str, diffs: List[Dict[str, Any]]
+        self, *, doc1_name: str, doc2_name: str, diffs: List[Dict[str, Any]], language: str = ""
     ) -> str:
+        lang_hint = self._language_hint(language)
         return f"""
-You are a compliance analyst. Summarize changes between two document versions.
+You are a GRC compliance analyst. Summarize changes between two document versions.
+
+{lang_hint}Understand the original language but write the summary in English.
 
 Document A: {doc1_name}
 Document B: {doc2_name}
@@ -207,13 +278,17 @@ Document B: {doc2_name}
 You MUST follow these rules:
 - Use ONLY the provided differences JSON.
 - Do NOT invent changes, sections, or impacts not present.
-- Prefer clear, auditor-friendly language.
-- Keep it to 3–6 sentences.
+
+Output format (follow exactly):
+1. First, write an executive summary describing the overall nature and impact of changes. Length should be proportional to the significance and volume of changes.
+2. Then write "Key Changes:" on a new line.
+3. Then list each change as a bullet point with format: "- Page X, Section Y: [brief description]"
+   (If page is unavailable, use "- Section Y: [description]")
 
 Differences JSON:
 {json.dumps(diffs, ensure_ascii=False)}
 
-Executive summary:
+Summary:
 """.strip()
 
     def _prompt_followups(
@@ -223,9 +298,13 @@ Executive summary:
         doc2_name: str,
         diffs: List[Dict[str, Any]],
         max_questions: int,
+        language: str = "",
     ) -> str:
+        lang_hint = self._language_hint(language)
         return f"""
 You are a GRC auditor.
+
+{lang_hint}Write questions in English.
 
 Generate up to {max_questions} follow-up questions based ONLY on the diff list.
 Do NOT invent sections not present.
@@ -252,6 +331,7 @@ Return as a numbered list (1., 2., 3., ...). Keep questions specific and actiona
                 {
                     "changeType": getattr(d, "changeType", None),
                     "section": d.section,
+                    "page": getattr(d, "page", None) or getattr(d, "pageNumber", None),
                     "impact": d.impact,
                     "doc1Content": d.doc1Content,
                     "doc2Content": d.doc2Content,
@@ -302,11 +382,12 @@ Return as a numbered list (1., 2., 3., ...). Keep questions specific and actiona
     async def _extract_policy_meanings_batch(
         self,
         texts: List[str],
+        language: str = "",
     ) -> List[Dict[str, str]]:
         if not texts:
             return []
 
-        prompt = self._prompt_extract_policy_meanings(texts)
+        prompt = self._prompt_extract_policy_meanings(texts, language=language)
 
         try:
             response_text = await self._generate_text(prompt)
@@ -318,12 +399,13 @@ Return as a numbered list (1., 2., 3., ...). Keep questions specific and actiona
 
         return [self._meaning_dict(extract_clause_meaning(text)) for text in texts]
 
-    def _prompt_extract_policy_meanings(self, texts: List[str]) -> str:
+    def _prompt_extract_policy_meanings(self, texts: List[str], language: str = "") -> str:
         items = [{"index": index, "text": text} for index, text in enumerate(texts)]
+        lang_hint = self._language_hint(language)
         return f"""
 You extract a structured semantic fingerprint from document text to enable precise difference detection.
 
-The input text may be in any language. Understand the original language, but normalize the output fields into concise English.
+{lang_hint}Understand the original language, but normalize the output fields into concise English.
 
 Return STRICT JSON only as an array with exactly {len(texts)} objects in the same order as the input.
 Each object must have these string fields:

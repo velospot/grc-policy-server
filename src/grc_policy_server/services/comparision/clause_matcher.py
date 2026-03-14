@@ -61,10 +61,12 @@ class ClauseMatcher:
         search_fn: SearchFn,
         thresholds: MatchThresholds,
         topk: int = 5,
+        language: str = "",
     ) -> None:
         self.search_fn = search_fn
         self.thresholds = thresholds
         self.topk = topk
+        self.language = language
 
     def match(
         self,
@@ -343,7 +345,7 @@ class ClauseMatcher:
             left.title.lower(),
             right.title.lower(),
         ).ratio()
-        text_score = token_overlap(left.clean_text, right.clean_text)
+        text_score = token_overlap(left.clean_text, right.clean_text, self.language)
         order_penalty = abs(left.order - right.order)
         order_score = 1.0 / (1 + order_penalty)
         return 0.45 * title_score + 0.40 * text_score + 0.15 * order_score
@@ -360,12 +362,13 @@ class ClauseMatcher:
         normalized_right = normalize_whitespace(right_text)
 
         text_score = SequenceMatcher(None, normalized_left, normalized_right).ratio()
-        lexical_score = token_overlap(left_text, right_text)
+        lexical_score = token_overlap(left_text, right_text, self.language)
         length_score = self._length_similarity(left_text, right_text)
         meaning_score = self._meaning_score(left, right)
         signature_score = token_overlap(
             self._semantic_signature_from_node(left),
             self._semantic_signature_from_node(right),
+            self.language,
         )
 
         score = (
@@ -383,6 +386,7 @@ class ClauseMatcher:
         comparison = compare_clause_meaning(
             self._node_meaning(left),
             self._node_meaning(right),
+            self.language,
         )
         score = comparison.score
         if comparison.obligation_change in {"strengthened", "weakened"} and score >= 0.35:

@@ -65,11 +65,15 @@ class RealDiffEngineStream:
 
         left_nodes = self.weaviate.fetch_chunks_by_document(doc1.id)
         right_nodes = self.weaviate.fetch_chunks_by_document(doc2.id)
+
+        # Detect language from first document's text for better LLM accuracy
+        language = await self._detect_document_language(left_nodes)
+
         left_nodes = await self._enrich_nodes_with_semantics(
-            left_nodes, force_re_extract=force_re_extract
+            left_nodes, force_re_extract=force_re_extract, language=language
         )
         right_nodes = await self._enrich_nodes_with_semantics(
-            right_nodes, force_re_extract=force_re_extract
+            right_nodes, force_re_extract=force_re_extract, language=language
         )
 
         yield {
@@ -84,6 +88,7 @@ class RealDiffEngineStream:
             search_fn=self.weaviate.search_section_in_document,
             thresholds=self.thresholds,
             topk=self.topk,
+            language=language,
         )
         matching = matcher.match(
             left_nodes=left_nodes,
@@ -95,7 +100,7 @@ class RealDiffEngineStream:
 
         streamed_diffs: List[KeyDifference] = []
         for match in matching.matches:
-            obligation_change = self._meaning_change(match.left, match.right)
+            obligation_change = self._meaning_change(match.left, match.right, language)
             if (
                 match.distance <= self.thresholds.unchanged_distance
                 and obligation_change == "unchanged"
@@ -126,6 +131,7 @@ class RealDiffEngineStream:
             doc1_name=doc1.name,
             doc2_name=doc2.name,
             key_differences=streamed_diffs,
+            language=language,
         )
 
         action_plan = self._action_plan(streamed_diffs)
@@ -208,16 +214,18 @@ class RealDiffEngineStream:
             sourceText=fallback.get("text", "") or "",
         )
 
-    def _meaning_change(self, left: dict, right: dict) -> str:
+    def _meaning_change(self, left: dict, right: dict, language: str = "") -> str:
         return compare_clause_meaning(
             self._node_meaning(left),
             self._node_meaning(right),
+            language,
         ).obligation_change
 
     async def _enrich_nodes_with_semantics(
         self,
         nodes: list[dict],
         force_re_extract: bool = False,
+        language: str = "",
     ) -> list[dict]:
         enriched = [dict(node) for node in nodes]
         indexes: list[int] = []
@@ -242,11 +250,25 @@ class RealDiffEngineStream:
         if not texts:
             return enriched
 
-        for index, meaning in zip(indexes, await self.llm.extract_policy_meanings(texts=texts), strict=False):
+        for index, meaning in zip(indexes, await self.llm.extract_policy_meanings(texts=texts, language=language), strict=False):
             for field, value in meaning.items():
                 enriched[index][field] = str(value or "")
 
         return enriched
+
+    async def _detect_document_language(self, nodes: list[dict]) -> str:
+        """Detect language from first few chunks of text."""
+        sample_texts = []
+        for node in nodes[:5]:
+            text = str(node.get("text") or "").strip()
+            if text:
+                sample_texts.append(text)
+            if len(" ".join(sample_texts)) > 500:
+                break
+        if not sample_texts:
+            return ""
+        sample = " ".join(sample_texts)[:500]
+        return await self.llm.detect_language(sample)
 
     def _node_meaning(self, node: dict) -> ClauseMeaning:
         obligation = str(node.get("obligation") or "")

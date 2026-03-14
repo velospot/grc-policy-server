@@ -159,7 +159,10 @@ class DocumentIngestionService:
         if not clause_texts:
             return parsed_chunks
 
-        extracted = await self.llm.extract_policy_meanings(texts=clause_texts)
+        # Detect language from first chunks for better LLM accuracy
+        language = await self._detect_language_from_chunks(parsed_chunks)
+
+        extracted = await self.llm.extract_policy_meanings(texts=clause_texts, language=language)
         enriched = list(parsed_chunks)
         for chunk_index, meaning in zip(clause_indexes, extracted, strict=False):
             chunk = enriched[chunk_index]
@@ -167,8 +170,23 @@ class DocumentIngestionService:
             metadata.update(meaning_to_metadata(chunk.text))
             metadata.update({key: str(value or "") for key, value in meaning.items()})
             metadata["semantic_source"] = "ollama"
+            metadata["detected_language"] = language
             enriched[chunk_index] = replace(chunk, metadata=metadata)
         return enriched
+
+    async def _detect_language_from_chunks(self, chunks: list[ParsedChunk]) -> str:
+        """Detect language from first few chunks of text."""
+        sample_texts = []
+        for chunk in chunks[:5]:
+            text = (chunk.text or "").strip()
+            if text:
+                sample_texts.append(text)
+            if len(" ".join(sample_texts)) > 500:
+                break
+        if not sample_texts:
+            return ""
+        sample = " ".join(sample_texts)[:500]
+        return await self.llm.detect_language(sample)
 
     def _apply_ocr_fallback(
         self,
