@@ -215,6 +215,7 @@ class WeaviateClient:
         for obj in resp.objects:
             item = dict(obj.properties)
             item["_distance"] = obj.metadata.distance
+            item["_score"] = getattr(obj.metadata, "score", None)
             out.append(item)
         return out
 
@@ -237,6 +238,7 @@ class WeaviateClient:
         for obj in resp.objects:
             item = dict(obj.properties)
             item["_distance"] = obj.metadata.distance
+            item["_score"] = obj.metadata.score
             out.append(item)
         return out
 
@@ -261,6 +263,7 @@ class WeaviateClient:
         for obj in resp.objects:
             item = dict(obj.properties)
             item["_distance"] = obj.metadata.distance
+            item["_score"] = obj.metadata.score
             out.append(item)
         return out
 

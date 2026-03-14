@@ -5,11 +5,14 @@ from typing import AsyncIterator, Dict, List, Optional
 
 from grc_policy_server.models.schemas import (
     ActionItem,
+    ComparisonAccuracyMetrics,
     Document,
     DocumentReference,
     KeyDifference,
+    SectionAccuracyMetrics,
 )
 from grc_policy_server.services.comparision.clause_matcher import (
+    ClauseMatch,
     ClauseMatcher,
     MatchThresholds,
 )
@@ -136,12 +139,14 @@ class RealDiffEngineStream:
 
         action_plan = self._action_plan(streamed_diffs)
         followups = self._followups(streamed_diffs)
+        accuracy_metrics = self._compute_accuracy_metrics(matching.matches)
 
         yield {
             "type": "done",
             "summary": summary,
             "actionPlan": [action.model_dump() for action in action_plan],
             "followUpQuestions": followups,
+            "accuracyMetrics": accuracy_metrics.model_dump(),
         }
 
     async def _make_modified(
@@ -310,3 +315,100 @@ class RealDiffEngineStream:
                 "Which sections require immediate policy updates?",
             ]
         return questions
+
+    def _section_accuracy_metrics(
+        self, matches: list[ClauseMatch]
+    ) -> list[SectionAccuracyMetrics]:
+        sections: dict[str, list[float]] = {}
+        for match in matches:
+            section = str(
+                match.right.get("section_path")
+                or match.left.get("section_path")
+                or "Unknown Section"
+            )
+            sections.setdefault(section, []).append(match.distance)
+
+        metrics: list[SectionAccuracyMetrics] = []
+        for section, distances in sections.items():
+            count = len(distances)
+            avg_distance = sum(distances) / count
+            avg_score = 1.0 - avg_distance
+            high = sum(1 for d in distances if d <= self.thresholds.unchanged_distance)
+            med = sum(
+                1
+                for d in distances
+                if self.thresholds.unchanged_distance < d <= self.thresholds.max_match_distance
+            )
+            low = count - high - med
+            confidence = (high * 1.0 + med * 0.7 + low * 0.3) / count
+
+            metrics.append(
+                SectionAccuracyMetrics(
+                    section=section,
+                    avg_match_distance=round(avg_distance, 4),
+                    avg_match_score=round(avg_score, 4),
+                    match_count=count,
+                    confidence=round(confidence, 4),
+                )
+            )
+
+        return sorted(metrics, key=lambda m: m.section)
+
+    def _compute_accuracy_metrics(
+        self, matches: list[ClauseMatch]
+    ) -> ComparisonAccuracyMetrics:
+        """Compute accuracy metrics from clause matching results.
+
+        Confidence levels based on match distance:
+        - High: distance <= 0.20 (very similar clauses)
+        - Medium: distance <= 0.35 (reasonably similar)
+        - Low: distance > 0.35 (weak match)
+        """
+        if not matches:
+            return ComparisonAccuracyMetrics(
+                avg_match_distance=0.0,
+                avg_match_score=None,
+                high_confidence_matches=0,
+                medium_confidence_matches=0,
+                low_confidence_matches=0,
+                total_matches=0,
+                overall_confidence=0.0,
+                confidence_breakdown={
+                    "stable_id": 0,
+                    "section_stable_id": 0,
+                    "section_alignment": 0,
+                    "vector_search": 0,
+                },
+                section_metrics=[],
+            )
+
+        distances = [m.distance for m in matches]
+        avg_distance = sum(distances) / len(distances)
+        avg_score = 1.0 - avg_distance
+
+        high_conf = sum(1 for d in distances if d <= self.thresholds.unchanged_distance)
+        medium_conf = sum(
+            1 for d in distances
+            if self.thresholds.unchanged_distance < d <= self.thresholds.max_match_distance
+        )
+        low_conf = sum(1 for d in distances if d > self.thresholds.max_match_distance)
+
+        breakdown: dict[str, int] = {}
+        for m in matches:
+            breakdown[m.matched_by] = breakdown.get(m.matched_by, 0) + 1
+
+        weighted_confidence = (
+            high_conf * 1.0 + medium_conf * 0.7 + low_conf * 0.3
+        ) / len(matches)
+
+        return ComparisonAccuracyMetrics(
+            avg_match_distance=round(avg_distance, 4),
+            avg_match_score=round(avg_score, 4),
+            high_confidence_matches=high_conf,
+            medium_confidence_matches=medium_conf,
+            low_confidence_matches=low_conf,
+            total_matches=len(matches),
+            overall_confidence=round(weighted_confidence, 4),
+            confidence_breakdown=breakdown,
+            section_metrics=self._section_accuracy_metrics(matches),
+        )

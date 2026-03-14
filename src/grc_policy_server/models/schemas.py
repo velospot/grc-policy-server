@@ -36,12 +36,32 @@ class ActionItem(BaseModel):
     timeline: str
     owner: str
 
+class SectionAccuracyMetrics(BaseModel):
+    section: str
+    avg_match_distance: float
+    avg_match_score: float
+    match_count: int
+    confidence: float
+
+
+class ComparisonAccuracyMetrics(BaseModel):
+    avg_match_distance: float
+    avg_match_score: Optional[float] = None
+    high_confidence_matches: int
+    medium_confidence_matches: int
+    low_confidence_matches: int
+    total_matches: int
+    overall_confidence: float
+    confidence_breakdown: dict[str, int]
+    section_metrics: List[SectionAccuracyMetrics]     
+
 
 class ComparisonResult(BaseModel):
     summary: str
     keyDifferences: List[KeyDifference]
     actionPlan: List[ActionItem]
     followUpQuestions: List[str]
+    accuracyMetrics: Optional[ComparisonAccuracyMetrics] = None
 
 
 class CompareRequest(BaseModel):
