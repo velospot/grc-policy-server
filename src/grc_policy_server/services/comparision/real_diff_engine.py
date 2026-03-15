@@ -27,6 +27,7 @@ from grc_policy_server.services.comparision.policy_semantics import (
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.utils.hashing import normalize_text, normalize_whitespace
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,9 @@ class RealDiffEngine:
         right_nodes = await self._enrich_nodes_with_semantics(
             right_nodes, force_re_extract=force_re_extract, language=language
         )
-        logger.info("compare left_nodes=%s right_nodes=%s", len(left_nodes), len(right_nodes))
+        logger.info(
+            "compare left_nodes=%s right_nodes=%s", len(left_nodes), len(right_nodes)
+        )
 
         matcher = ClauseMatcher(
             search_fn=self.weaviate.search_section_in_document,
@@ -194,21 +197,31 @@ class RealDiffEngine:
                 else 2
             )
         )
+
+        only_changed_diffs: List[KeyDifference] = []
+
+        for index, diff in enumerate(diffs):
+            if diff.doc1Reference and diff.doc2Reference is not None:
+                if normalize_whitespace(
+                    diff.doc1Reference.sourceText
+                ) != normalize_whitespace(diff.doc2Reference.sourceText):
+                    only_changed_diffs.append(diff)
+
         diffs = diffs[: self.max_diffs]
 
         summary = await self.llm.summarize_changes(
             doc1_name=doc1.name,
             doc2_name=doc2.name,
-            key_differences=diffs,
+            key_differences=only_changed_diffs,
             language=language,
         )
         accuracy_metrics = self._compute_accuracy_metrics(matching.matches)
 
         return ComparisonResult(
             summary=summary,
-            keyDifferences=diffs,
-            actionPlan=self._action_plan(diffs),
-            followUpQuestions=self._follow_ups(diffs),
+            keyDifferences=only_changed_diffs,
+            actionPlan=self._action_plan(only_changed_diffs),
+            followUpQuestions=self._follow_ups(only_changed_diffs),
             accuracyMetrics=accuracy_metrics,
         )
 
@@ -237,7 +250,8 @@ class RealDiffEngine:
                 continue
             # Skip if already has semantics, unless force_re_extract is True
             if not force_re_extract and any(
-                node.get(field) for field in ("obligation", "subject", "action", "object", "condition")
+                node.get(field)
+                for field in ("obligation", "subject", "action", "object", "condition")
             ):
                 continue
             text = str(node.get("text") or "").strip()
@@ -358,7 +372,9 @@ class RealDiffEngine:
             med = sum(
                 1
                 for d in distances
-                if self.thresholds.unchanged_distance < d <= self.thresholds.max_match_distance
+                if self.thresholds.unchanged_distance
+                < d
+                <= self.thresholds.max_match_distance
             )
             low = count - high - med
             confidence = (high * 1.0 + med * 0.7 + low * 0.3) / count
@@ -407,8 +423,11 @@ class RealDiffEngine:
 
         high_conf = sum(1 for d in distances if d <= self.thresholds.unchanged_distance)
         medium_conf = sum(
-            1 for d in distances
-            if self.thresholds.unchanged_distance < d <= self.thresholds.max_match_distance
+            1
+            for d in distances
+            if self.thresholds.unchanged_distance
+            < d
+            <= self.thresholds.max_match_distance
         )
         low_conf = sum(1 for d in distances if d > self.thresholds.max_match_distance)
 

@@ -5,6 +5,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${PROJECT_ROOT}"
+mkdir -p "${PROJECT_ROOT}/data/uploads"
+
+DEFAULT_ENV_FILE="${PROJECT_ROOT}/.env"
+read -r -p "Path to .env file [${DEFAULT_ENV_FILE}]: " ENV_FILE_INPUT
+
+if [[ -z "${ENV_FILE_INPUT}" ]]; then
+  ENV_FILE="${DEFAULT_ENV_FILE}"
+else
+  if [[ "${ENV_FILE_INPUT}" == ~* ]]; then
+    ENV_FILE_INPUT="${ENV_FILE_INPUT/#\~/${HOME}}"
+  fi
+  if [[ "${ENV_FILE_INPUT}" == /* ]]; then
+    ENV_FILE="${ENV_FILE_INPUT}"
+  else
+    ENV_FILE="${PROJECT_ROOT}/${ENV_FILE_INPUT}"
+  fi
+fi
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  echo "Error: .env file not found at '${ENV_FILE}'"
+  exit 1
+fi
+
+UV_ENV_ARGS=(--env-file "${ENV_FILE}")
 
 uv sync
 
@@ -67,6 +91,7 @@ if [[ "${DOCLING_ACCELERATOR_DEVICE}" == "mps" ]]; then
 fi
 
 echo "Starting API + Celery"
+echo "Env file=${ENV_FILE}"
 echo "Celery pool=${CELERY_WORKER_POOL} concurrency=${CELERY_WORKER_CONCURRENCY}"
 echo "Docling accelerator=${DOCLING_ACCELERATOR_DEVICE}"
 
@@ -85,13 +110,13 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-uv run celery -A grc_policy_server.worker:celery_app worker \
+uv run "${UV_ENV_ARGS[@]}" celery -A grc_policy_server.worker:celery_app worker \
   --loglevel="${CELERY_LOG_LEVEL:-INFO}" \
   --concurrency="${CELERY_WORKER_CONCURRENCY}" \
   --pool="${CELERY_WORKER_POOL}" &
 CELERY_PID=$!
 
-uv run uvicorn grc_policy_server.main:app \
+uv run "${UV_ENV_ARGS[@]}" uvicorn grc_policy_server.main:app \
   --reload \
   --host "${HOST:-0.0.0.0}" \
   --port "${PORT:-8500}" \

@@ -1,28 +1,57 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Iterable
 
 from grc_policy_server.utils.hashing import normalize_text, normalize_whitespace
 
 OBLIGATION_STRENGTH = {
+    # English
     "may": 0,
     "should": 1,
     "recommended": 2,
     "required": 3,
     "must": 4,
     "shall": 5,
-    # Negations: treated as strong obligations (prohibitions)
     "must_not": 4,
     "shall_not": 5,
+    # German aliases
+    "kann": 0,  # kann = may
+    "darf": 0,  # darf = may (permission)
+    "sollte": 1,  # sollte = should
+    "soll": 5,  # soll = shall (strong in German policy)
+    "empfohlen": 2,  # empfohlen = recommended
+    "erforderlich": 3,  # erforderlich = required
+    "muss": 4,  # muss = must
+    "müssen": 4,  # müssen = must (plural)
+    "darf_nicht": 4,  # darf nicht = must not
+    # French aliases
+    "peut": 0,  # peut = may
+    "devrait": 1,  # devrait = should
+    "recommandé": 2,  # recommandé = recommended
+    "requis": 3,  # requis = required
+    "exigé": 3,  # exigé = required
+    "doit": 5,  # doit = shall/must
+    "doivent": 5,  # doivent = shall/must (plural)
+    "devra": 5,  # devra = shall (future)
+    "ne_doit_pas": 4,  # ne doit pas = must not
 }
 
 _CONDITION_RE = re.compile(
-    r"\b(if|when|unless|except when|provided that|subject to|where)\b",
+    r"\b("
+    # English
+    r"if|when|unless|except when|provided that|subject to|where|"
+    # German
+    r"wenn|falls|sofern|außer wenn|es sei denn|unter der Bedingung|vorausgesetzt|"
+    # French
+    r"si|lorsque|sauf si|à condition que|sous réserve|pourvu que"
+    r")\b",
     re.IGNORECASE,
 )
+
 _OBLIGATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # English
     ("shall", re.compile(r"\bshall\b", re.IGNORECASE)),
     ("must", re.compile(r"\bmust\b", re.IGNORECASE)),
     (
@@ -41,41 +70,217 @@ _OBLIGATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("should", re.compile(r"\bshould\b", re.IGNORECASE)),
     ("may", re.compile(r"\bmay\b", re.IGNORECASE)),
+    # German - Negations first (more specific)
+    ("must_not", re.compile(r"\bdarf\s+nicht\b|\bdürfen\s+nicht\b", re.IGNORECASE)),
+    ("shall", re.compile(r"\bmuss\b|\bmüssen\b", re.IGNORECASE)),  # muss = must/shall
+    (
+        "shall",
+        re.compile(r"\bsoll\b|\bsollen\b", re.IGNORECASE),
+    ),  # soll = shall/should (strong in German policy)
+    ("required", re.compile(r"\berforderlich\b|\bnotwendig\b", re.IGNORECASE)),
+    ("recommended", re.compile(r"\bempfohlen\b|\bempfiehlt\b", re.IGNORECASE)),
+    (
+        "may",
+        re.compile(r"\bdarf\b|\bdürfen\b", re.IGNORECASE),
+    ),  # darf = may (permission)
+    ("may", re.compile(r"\bkann\b|\bkönnen\b", re.IGNORECASE)),  # kann = can/may
+    # French - Negations first (more specific)
+    (
+        "must_not",
+        re.compile(r"\bne\s+doit\s+pas\b|\bne\s+doivent\s+pas\b", re.IGNORECASE),
+    ),
+    ("shall", re.compile(r"\bdoit\b|\bdoivent\b", re.IGNORECASE)),  # doit = must/shall
+    (
+        "shall",
+        re.compile(r"\bdevra\b|\bdevront\b", re.IGNORECASE),
+    ),  # devra = shall (future)
+    ("required", re.compile(r"\brequis\b|\bexigé\b|\bobligatoire\b", re.IGNORECASE)),
+    ("recommended", re.compile(r"\brecommandé\b|\bconseillé\b", re.IGNORECASE)),
+    ("may", re.compile(r"\bpeut\b|\bpeuvent\b", re.IGNORECASE)),  # peut = may/can
 )
+
 _ENUMERATION_PREFIX_RE = re.compile(
     r"^\s*(?:(?:section|clause|article|appendix|annex)\s+)?[a-z]?\d+(?:\.\d+)*[a-z]?(?:[.):]|\s)\s*",
     re.IGNORECASE,
 )
 _CITATION_RE = re.compile(r"(?<!\w)\[\d+\](?!\w)")
-_PAREN_MARKER_RE = re.compile(r"(?<!\w)\((?:[a-z]|\d+|[ivxlcdm]+)\)(?!\w)", re.IGNORECASE)
+_PAREN_MARKER_RE = re.compile(
+    r"(?<!\w)\((?:[a-z]|\d+|[ivxlcdm]+)\)(?!\w)", re.IGNORECASE
+)
 _NOISE_RE = re.compile(r"^[\d\W_]+$")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _STOPWORDS_EN = {
-    "a", "an", "and", "any", "all", "are", "as", "at", "be", "by",
-    "for", "from", "in", "is", "of", "or", "that", "the", "their",
-    "to", "use", "using", "with", "this", "these", "those", "it",
-    "its", "been", "being", "have", "has", "had", "do", "does", "did",
-    "will", "would", "can", "could", "into", "on", "upon", "such",
+    "a",
+    "an",
+    "and",
+    "any",
+    "all",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "is",
+    "of",
+    "or",
+    "that",
+    "the",
+    "their",
+    "to",
+    "use",
+    "using",
+    "with",
+    "this",
+    "these",
+    "those",
+    "it",
+    "its",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "can",
+    "could",
+    "into",
+    "on",
+    "upon",
+    "such",
 }
 _STOPWORDS_DE = {
-    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer",
-    "einem", "einen", "und", "oder", "aber", "als", "auch", "auf",
-    "aus", "bei", "bis", "durch", "fuer", "gegen", "im", "in", "ist",
-    "mit", "nach", "nicht", "noch", "nur", "ob", "ohne", "so", "sowie",
-    "ueber", "um", "und", "unter", "vom", "von", "vor", "wenn", "wie",
-    "wird", "zu", "zum", "zur", "sind", "sein", "seine", "seiner",
-    "war", "waren", "wurde", "wurden", "werden", "hat", "haben", "kann",
+    "der",
+    "die",
+    "das",
+    "den",
+    "dem",
+    "des",
+    "ein",
+    "eine",
+    "einer",
+    "einem",
+    "einen",
+    "und",
+    "oder",
+    "aber",
+    "als",
+    "auch",
+    "auf",
+    "aus",
+    "bei",
+    "bis",
+    "durch",
+    "fuer",
+    "gegen",
+    "im",
+    "in",
+    "ist",
+    "mit",
+    "nach",
+    "nicht",
+    "noch",
+    "nur",
+    "ob",
+    "ohne",
+    "so",
+    "sowie",
+    "ueber",
+    "um",
+    "und",
+    "unter",
+    "vom",
+    "von",
+    "vor",
+    "wenn",
+    "wie",
+    "wird",
+    "zu",
+    "zum",
+    "zur",
+    "sind",
+    "sein",
+    "seine",
+    "seiner",
+    "war",
+    "waren",
+    "wurde",
+    "wurden",
+    "werden",
+    "hat",
+    "haben",
+    "kann",
 }
 _STOPWORDS_FR = {
-    "le", "la", "les", "un", "une", "des", "du", "de", "et", "ou",
-    "mais", "donc", "car", "ni", "ce", "cette", "ces", "son", "sa",
-    "ses", "leur", "leurs", "au", "aux", "par", "pour", "sur", "sous",
-    "avec", "sans", "dans", "en", "est", "sont", "etre", "avoir",
-    "fait", "faire", "peut", "peuvent", "doit", "qui", "que", "quoi",
-    "dont", "nous", "vous", "ils", "elles", "se", "ne", "pas", "plus",
-    "tout", "tous", "toute", "toutes", "ete", "sera", "seront",
+    "le",
+    "la",
+    "les",
+    "un",
+    "une",
+    "des",
+    "du",
+    "de",
+    "et",
+    "ou",
+    "mais",
+    "donc",
+    "car",
+    "ni",
+    "ce",
+    "cette",
+    "ces",
+    "son",
+    "sa",
+    "ses",
+    "leur",
+    "leurs",
+    "au",
+    "aux",
+    "par",
+    "pour",
+    "sur",
+    "sous",
+    "avec",
+    "sans",
+    "dans",
+    "en",
+    "est",
+    "sont",
+    "etre",
+    "avoir",
+    "fait",
+    "faire",
+    "peut",
+    "peuvent",
+    "doit",
+    "qui",
+    "que",
+    "quoi",
+    "dont",
+    "nous",
+    "vous",
+    "ils",
+    "elles",
+    "se",
+    "ne",
+    "pas",
+    "plus",
+    "tout",
+    "tous",
+    "toute",
+    "toutes",
+    "ete",
+    "sera",
+    "seront",
 }
 # Note: "must", "shall", "should", "muss", "soll", "doit" intentionally excluded - critical for policy comparison
+
 
 def get_stopwords(language: str = "") -> set[str]:
     """Get stopwords for the specified language."""
@@ -87,6 +292,8 @@ def get_stopwords(language: str = "") -> set[str]:
         return _STOPWORDS_EN
     # For unknown language, combine all to be safe
     return _STOPWORDS_EN | _STOPWORDS_DE | _STOPWORDS_FR
+
+
 _UNICODE_PUNCT_TRANSLATION = {
     ord("“"): '"',
     ord("”"): '"',
@@ -111,13 +318,27 @@ _CANONICAL_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bmehr[-\s]?faktor[-\s]?authentifizierung\b", re.IGNORECASE), "mfa"),
     (re.compile(r"\bzwei[-\s]?faktor[-\s]?authentifizierung\b", re.IGNORECASE), "mfa"),
     # French MFA variants
-    (re.compile(r"\bauthentification\s+(?:à\s+)?multi[-\s]?facteurs?\b", re.IGNORECASE), "mfa"),
-    (re.compile(r"\bauthentification\s+(?:à\s+)?deux\s+facteurs?\b", re.IGNORECASE), "mfa"),
+    (
+        re.compile(
+            r"\bauthentification\s+(?:à\s+)?multi[-\s]?facteurs?\b", re.IGNORECASE
+        ),
+        "mfa",
+    ),
+    (
+        re.compile(r"\bauthentification\s+(?:à\s+)?deux\s+facteurs?\b", re.IGNORECASE),
+        "mfa",
+    ),
     # Privileged access
     (re.compile(r"\bprivileged accounts\b", re.IGNORECASE), "privileged access"),
     (re.compile(r"\bprivileged account\b", re.IGNORECASE), "privileged access"),
-    (re.compile(r"\bprivilegierte\s+zugriffe?\b", re.IGNORECASE), "privileged access"),  # German
-    (re.compile(r"\baccès\s+privilégiés?\b", re.IGNORECASE), "privileged access"),  # French
+    (
+        re.compile(r"\bprivilegierte\s+zugriffe?\b", re.IGNORECASE),
+        "privileged access",
+    ),  # German
+    (
+        re.compile(r"\baccès\s+privilégiés?\b", re.IGNORECASE),
+        "privileged access",
+    ),  # French
     # Administrators
     (re.compile(r"\badmins\b", re.IGNORECASE), "administrators"),
     (re.compile(r"\badmin\b", re.IGNORECASE), "administrator"),
@@ -150,15 +371,24 @@ _CANONICAL_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bpii\b", re.IGNORECASE), "pii"),
     (re.compile(r"\bpersonenbezogene\s+daten\b", re.IGNORECASE), "pii"),  # German
     (re.compile(r"\bdonnées\s+personnelles\b", re.IGNORECASE), "pii"),  # French
-    (re.compile(r"\bdonnées\s+à\s+caractère\s+personnel\b", re.IGNORECASE), "pii"),  # French GDPR
+    (
+        re.compile(r"\bdonnées\s+à\s+caractère\s+personnel\b", re.IGNORECASE),
+        "pii",
+    ),  # French GDPR
     # SSN
     (re.compile(r"\bsocial security numbers?\b", re.IGNORECASE), "ssn"),
     (re.compile(r"\bssn\b", re.IGNORECASE), "ssn"),
     (re.compile(r"\bsozialversicherungsnummer\b", re.IGNORECASE), "ssn"),  # German
-    (re.compile(r"\bnuméro\s+de\s+sécurité\s+sociale\b", re.IGNORECASE), "ssn"),  # French
+    (
+        re.compile(r"\bnuméro\s+de\s+sécurité\s+sociale\b", re.IGNORECASE),
+        "ssn",
+    ),  # French
     # Data protection / GDPR terms
     (re.compile(r"\bdatenschutz\b", re.IGNORECASE), "data protection"),  # German
-    (re.compile(r"\bprotection\s+des\s+données\b", re.IGNORECASE), "data protection"),  # French
+    (
+        re.compile(r"\bprotection\s+des\s+données\b", re.IGNORECASE),
+        "data protection",
+    ),  # French
     (re.compile(r"\bdsgvo\b", re.IGNORECASE), "gdpr"),  # German GDPR
     (re.compile(r"\brgpd\b", re.IGNORECASE), "gdpr"),  # French GDPR
     # Security / Compliance
@@ -169,7 +399,10 @@ _CANONICAL_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bconformité\b", re.IGNORECASE), "compliance"),  # French
     # Risk
     (re.compile(r"\brisikobewertung\b", re.IGNORECASE), "risk assessment"),  # German
-    (re.compile(r"\bévaluation\s+des\s+risques\b", re.IGNORECASE), "risk assessment"),  # French
+    (
+        re.compile(r"\bévaluation\s+des\s+risques\b", re.IGNORECASE),
+        "risk assessment",
+    ),  # French
     # Audit
     (re.compile(r"\bprüfung\b", re.IGNORECASE), "audit"),  # German
     (re.compile(r"\baudit\b", re.IGNORECASE), "audit"),
@@ -249,10 +482,14 @@ def extract_clause_meaning(value: str) -> ClauseMeaning:
     return ClauseMeaning(obligation, subject, action, obj, condition)
 
 
-def compare_clause_meaning(left: ClauseMeaning, right: ClauseMeaning, language: str = "") -> MeaningComparison:
+def compare_clause_meaning(
+    left: ClauseMeaning, right: ClauseMeaning, language: str = ""
+) -> MeaningComparison:
     subject_score = token_overlap(left.subject, right.subject, language)
-    action_score = 1.0 if left.action and left.action == right.action else token_overlap(
-        left.action, right.action, language
+    action_score = (
+        1.0
+        if left.action and left.action == right.action
+        else token_overlap(left.action, right.action, language)
     )
     object_score = token_overlap(left.object, right.object, language)
     condition_score = token_overlap(left.condition, right.condition, language)
@@ -343,7 +580,9 @@ def semantic_signature(value: str) -> str:
     return " | ".join(part for part in parts if part)
 
 
-def average_token_overlap(values: Iterable[str], other_values: Iterable[str], language: str = "") -> float:
+def average_token_overlap(
+    values: Iterable[str], other_values: Iterable[str], language: str = ""
+) -> float:
     left = " ".join(value for value in values if value)
     right = " ".join(value for value in other_values if value)
     return token_overlap(left, right, language)
