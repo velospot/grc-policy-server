@@ -27,7 +27,7 @@ from grc_policy_server.services.comparision.policy_semantics import (
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
-from grc_policy_server.utils.hashing import normalize_text, normalize_whitespace
+from grc_policy_server.utils.hashing import normalize_whitespace
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def impact_from_distance(
 @dataclass
 class RealDiffEngine:
     weaviate: WeaviateClient
-    neo4j: Neo4jClient
+    neo4j: Neo4jClient | None
     llm: OllamaClient
     thresholds: MatchThresholds = MatchThresholds()
     topk: int = 5
@@ -305,7 +305,7 @@ class RealDiffEngine:
 
     def _citation_from_neo4j_or_fallback(self, chunk: dict) -> DocumentReference:
         chunk_id = chunk.get("chunk_id")
-        if chunk_id:
+        if chunk_id and self.neo4j is not None:
             citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
             if citation:
                 return DocumentReference(**citation)

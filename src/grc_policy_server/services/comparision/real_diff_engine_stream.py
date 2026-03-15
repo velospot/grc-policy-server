@@ -53,7 +53,7 @@ def impact_from(
 @dataclass
 class RealDiffEngineStream:
     weaviate: WeaviateClient
-    neo4j: Neo4jClient
+    neo4j: Neo4jClient | None
     llm: OllamaClient
     thresholds: MatchThresholds = MatchThresholds()
     topk: int = 5
@@ -206,7 +206,7 @@ class RealDiffEngineStream:
     def _citation_from_neo4j_or_fallback(
         self, chunk_id: Optional[str], fallback: dict
     ) -> Optional[DocumentReference]:
-        if chunk_id:
+        if chunk_id and self.neo4j is not None:
             citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
             if citation:
                 return DocumentReference(**citation)

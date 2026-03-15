@@ -8,20 +8,20 @@ services:
       - "6379:6379"
     restart: always
 
-  neo4j:
-    container_name: rag_neo4j
-    image: neo4j:community-trixie
-    volumes:
-      - ./neo4j/logs:/logs
-      - ./neo4j/config:/config
-      - ./neo4j/data:/data
-      - ./neo4j/plugins:/plugins
-    environment:
-      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
-    ports:
-      - "7474:7474"
-      - "7687:7687"
-    restart: always
+  # neo4j:
+  #   container_name: rag_neo4j
+  #   image: neo4j:community-trixie
+  #   volumes:
+  #     - ./neo4j/logs:/logs
+  #     - ./neo4j/config:/config
+  #     - ./neo4j/data:/data
+  #     - ./neo4j/plugins:/plugins
+  #   environment:
+  #     - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
+  #   ports:
+  #     - "7474:7474"
+  #     - "7687:7687"
+  #   restart: always
 
   weaviate:
     container_name: weaviate_chat_db

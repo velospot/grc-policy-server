@@ -903,6 +903,7 @@ def test_neo4j_dependency_closes_client(monkeypatch):
             closed["value"] = True
 
     monkeypatch.setattr("grc_policy_server.api.deps.Neo4jClient", StubNeo4jClient)
+    monkeypatch.setattr(settings, "neo4j_enabled", True)
 
     dep = get_neo4j_client()
     _ = next(dep)
@@ -910,3 +911,14 @@ def test_neo4j_dependency_closes_client(monkeypatch):
         next(dep)
 
     assert closed["value"] is True
+
+
+def test_neo4j_dependency_returns_none_when_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "neo4j_enabled", False)
+
+    dep = get_neo4j_client()
+    client = next(dep)
+    with pytest.raises(StopIteration):
+        next(dep)
+
+    assert client is None

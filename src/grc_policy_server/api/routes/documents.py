@@ -278,7 +278,7 @@ def delete_documents(
     payload: DeleteDocumentsRequest,
     repository: DocumentRepository = Depends(get_document_repository),
     weaviate: WeaviateClient = Depends(get_weaviate_client),
-    neo4j: Neo4jClient = Depends(get_neo4j_client),
+    neo4j: Neo4jClient | None = Depends(get_neo4j_client),
 ):
     """Delete local document artifacts and associated vector and graph records."""
     if not payload.documentIds:
@@ -328,19 +328,21 @@ def delete_documents(
             )
             continue
 
-        try:
-            deleted_graph_nodes = neo4j.delete_document_subgraph(document_id)
-        except Exception:
-            logger.exception("failed to delete graph records document_id=%s", document_id)
-            results.append(
-                DeleteDocumentResult(
-                    documentId=document_id,
-                    deleted=False,
-                    deletedChunks=deleted_chunks,
-                    error="Failed to delete document records from Neo4j",
+        deleted_graph_nodes = 0
+        if neo4j is not None:
+            try:
+                deleted_graph_nodes = neo4j.delete_document_subgraph(document_id)
+            except Exception:
+                logger.exception("failed to delete graph records document_id=%s", document_id)
+                results.append(
+                    DeleteDocumentResult(
+                        documentId=document_id,
+                        deleted=False,
+                        deletedChunks=deleted_chunks,
+                        error="Failed to delete document records from Neo4j",
+                    )
                 )
-            )
-            continue
+                continue
 
         try:
             deleted_local = repository.delete_document(document_id)

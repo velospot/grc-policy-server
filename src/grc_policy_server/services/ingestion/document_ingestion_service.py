@@ -46,7 +46,7 @@ class DocumentIngestionService:
         *,
         docling_adapter: DoclingAdapter,
         weaviate: WeaviateClient,
-        neo4j: Neo4jClient,
+        neo4j: Neo4jClient | None,
         llm: OllamaClient,
         upload_root: Path,
     ):
@@ -97,19 +97,20 @@ class DocumentIngestionService:
             raise ValueError("No indexable text nodes produced from uploaded document")
 
         self.weaviate.upsert_chunks(vector_records)
-        self.neo4j.upsert_document_hierarchy(
-            document_id=document_id,
-            filename=filename,
-            document_stable_id=hierarchy.document_stable_id,
-            document_family=hierarchy.document_family,
-            content_hash=content_hash,
-            nodes=[node.to_graph_record() for node in hierarchy.nodes],
-            metadata={
-                **hierarchy.metadata,
-                "ocr": ocr_metadata,
-                "content_type": content_type,
-            },
-        )
+        if self.neo4j is not None:
+            self.neo4j.upsert_document_hierarchy(
+                document_id=document_id,
+                filename=filename,
+                document_stable_id=hierarchy.document_stable_id,
+                document_family=hierarchy.document_family,
+                content_hash=content_hash,
+                nodes=[node.to_graph_record() for node in hierarchy.nodes],
+                metadata={
+                    **hierarchy.metadata,
+                    "ocr": ocr_metadata,
+                    "content_type": content_type,
+                },
+            )
         self._persist_upload_metadata(
             document_id=document_id,
             filename=filename,

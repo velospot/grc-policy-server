@@ -66,7 +66,12 @@ def get_weaviate_client() -> Generator[WeaviateClient, None, None]:
             logger.exception("failed to close Weaviate client")
 
 
-def get_neo4j_client() -> Generator[Neo4jClient, None, None]:
+def get_neo4j_client() -> Generator[Neo4jClient | None, None, None]:
+    # Neo4j is intentionally disabled by default and can be re-enabled later.
+    if not settings.neo4j_enabled:
+        yield None
+        return
+
     client = Neo4jClient(
         Neo4jSettings(
             uri=settings.neo4j_uri,
@@ -108,7 +113,7 @@ def get_docling_adapter() -> DoclingAdapter:
 
 def get_diff_engine(
     weaviate: WeaviateClient = Depends(get_weaviate_client),
-    neo4j: Neo4jClient = Depends(get_neo4j_client),
+    neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: OllamaClient = Depends(get_ollama_client),
 ) -> RealDiffEngine:
     return RealDiffEngine(
@@ -120,7 +125,7 @@ def get_diff_engine(
 
 def get_diff_engine_stream(
     weaviate: WeaviateClient = Depends(get_weaviate_client),
-    neo4j: Neo4jClient = Depends(get_neo4j_client),
+    neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: OllamaClient = Depends(get_ollama_client),
 ) -> RealDiffEngineStream:
     return RealDiffEngineStream(
@@ -137,7 +142,7 @@ def get_document_repository() -> DocumentRepository:
 def get_document_ingestion_service(
     docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
     weaviate: WeaviateClient = Depends(get_weaviate_client),
-    neo4j: Neo4jClient = Depends(get_neo4j_client),
+    neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: OllamaClient = Depends(get_ollama_client),
 ) -> DocumentIngestionService:
     return DocumentIngestionService(
@@ -152,7 +157,7 @@ def get_document_ingestion_service(
 def get_document_ingestion_service_factory(
     docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
     weaviate: WeaviateClient = Depends(get_weaviate_client),
-    neo4j: Neo4jClient = Depends(get_neo4j_client),
+    neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: OllamaClient = Depends(get_ollama_client),
 ) -> Callable[[], DocumentIngestionService]:
     def _factory() -> DocumentIngestionService:

@@ -6,8 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import AliasChoices, Field
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
-
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -15,7 +18,9 @@ NULLISH_ENV_VALUES = {"", "null", "none"}
 
 
 def _is_nullish_env_value(value: Any) -> bool:
-    return value is None or (isinstance(value, str) and value.strip().lower() in NULLISH_ENV_VALUES)
+    return value is None or (
+        isinstance(value, str) and value.strip().lower() in NULLISH_ENV_VALUES
+    )
 
 
 def _canonical_env_name(field_name: str, field_info: Any) -> str:
@@ -88,7 +93,11 @@ class NullishFilteringSource(PydanticBaseSettingsSource):
         self.source._set_current_state(self.current_state)
         self.source._set_settings_sources_data(self.settings_sources_data)
         values = self.source()
-        return {key: value for key, value in values.items() if not _is_nullish_env_value(value)}
+        return {
+            key: value
+            for key, value in values.items()
+            if not _is_nullish_env_value(value)
+        }
 
 
 class Settings(BaseSettings):
@@ -116,6 +125,7 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
     neo4j_database: str = "neo4j"
+    neo4j_enabled: bool = False
 
     weaviate_url: str = "http://weaviate:8080"
     weaviate_collection: str = "PolicyChunk"
@@ -126,6 +136,7 @@ class Settings(BaseSettings):
     weaviate_grpc_secure: bool | None = None
 
     ollama_url: str = "http://localhost:11434"
+    ollama_embedding_url: str = "http://localhost:11434"
     ollama_chat_model: str = Field(
         default="granite3.3:8b",
         validation_alias=AliasChoices("OLLAMA_CHAT_MODEL", "OLLAMA_GENERATION_MODEL"),

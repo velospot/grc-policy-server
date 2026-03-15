@@ -24,19 +24,21 @@ logger = logging.getLogger(__name__)
 def _build_ingestion_service() -> tuple[
     DocumentIngestionService,
     WeaviateClient,
-    Neo4jClient,
+    Neo4jClient | None,
     OllamaClient,
 ]:
     docling_adapter = DoclingAdapter()
     weaviate = WeaviateClient()
-    neo4j = Neo4jClient(
-        Neo4jSettings(
-            uri=settings.neo4j_uri,
-            user=settings.neo4j_user,
-            password=settings.neo4j_password,
-            database=settings.neo4j_database,
+    neo4j: Neo4jClient | None = None
+    if settings.neo4j_enabled:
+        neo4j = Neo4jClient(
+            Neo4jSettings(
+                uri=settings.neo4j_uri,
+                user=settings.neo4j_user,
+                password=settings.neo4j_password,
+                database=settings.neo4j_database,
+            )
         )
-    )
     llm = OllamaClient(
         OllamaSettings(
             base_url=settings.ollama_url,
@@ -164,7 +166,8 @@ def ingest_upload_v2(payload_files: list[dict[str, Any]]) -> dict[str, Any]:
         except Exception:
             logger.exception("failed to close Weaviate client in upload_v2 task")
         try:
-            neo4j.close()
+            if neo4j is not None:
+                neo4j.close()
         except Exception:
             logger.exception("failed to close Neo4j client in upload_v2 task")
         try:
