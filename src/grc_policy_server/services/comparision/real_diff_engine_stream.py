@@ -220,6 +220,10 @@ class RealDiffEngineStream:
         )
 
     def _meaning_change(self, left: dict, right: dict, language: str = "") -> str:
+        # Tables don't have clause semantics (obligation/subject/action)
+        if left.get("node_type") == "table" or right.get("node_type") == "table":
+            return "unchanged"  # Tables are compared structurally, not semantically
+
         return compare_clause_meaning(
             self._node_meaning(left),
             self._node_meaning(right),

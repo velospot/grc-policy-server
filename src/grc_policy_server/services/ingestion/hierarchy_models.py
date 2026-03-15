@@ -52,6 +52,8 @@ class HierarchyNode:
 
     def to_vector_record(self) -> dict[str, Any]:
         clean_text = str(self.metadata.get("clean_text") or "")
+        # For tables, include structure data for comparison
+        table_structure = self.metadata.get("table_structure")
         return {
             "chunk_id": self.node_id,
             "document_id": self.document_id,
@@ -78,6 +80,10 @@ class HierarchyNode:
             "object": str(self.metadata.get("object") or ""),
             "condition": str(self.metadata.get("condition") or ""),
             "markdown_text": str(self.metadata.get("markdown_text") or ""),
+            # Table structure for structural comparison
+            "table_num_rows": table_structure.get("num_rows", 0) if table_structure else 0,
+            "table_num_cols": table_structure.get("num_cols", 0) if table_structure else 0,
+            "table_cells": table_structure.get("cells", []) if table_structure else [],
         }
 
     def to_graph_record(self) -> dict[str, Any]:

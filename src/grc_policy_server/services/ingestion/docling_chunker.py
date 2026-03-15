@@ -14,6 +14,148 @@ from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 
 logger = logging.getLogger(__name__)
 
+
+def _extract_table_structure(doc_chunk: DocChunk, dl_doc: Any) -> dict[str, Any] | None:
+    """Extract row/column structure from docling table data."""
+    for item in doc_chunk.meta.doc_items:
+        if item.label != DocItemLabel.TABLE:
+            continue
+
+        ref = item.self_ref  # e.g., "#/tables/0"
+        if not ref:
+            continue
+
+        # Resolve reference to get table data
+        table_data = _resolve_table_ref(dl_doc, ref)
+        if not table_data:
+            continue
+
+        data = table_data.get("data", {})
+        if not data:
+            continue
+
+        cells = []
+        for cell in data.get("table_cells", []):
+            cells.append({
+                "row": cell.get("start_row_offset_idx", 0),
+                "col": cell.get("start_col_offset_idx", 0),
+                "row_span": cell.get("row_span", 1),
+                "col_span": cell.get("col_span", 1),
+                "text": cell.get("text", ""),
+                "is_header": cell.get("column_header", False) or cell.get("row_header", False),
+            })
+
+        return {
+            "num_rows": data.get("num_rows", 0),
+            "num_cols": data.get("num_cols", 0),
+            "cells": cells,
+            "grid": data.get("grid"),
+        }
+
+    return None
+
+
+def _resolve_table_ref(dl_doc: Any, ref: str) -> dict[str, Any] | None:
+    """Resolve a docling reference like '#/tables/0' to actual table data."""
+    if not ref or not ref.startswith("#/"):
+        return None
+
+    parts = ref[2:].split("/")  # Remove "#/" and split
+    if len(parts) < 2:
+        return None
+
+    collection_name = parts[0]  # e.g., "tables"
+    key = parts[1]  # e.g., "0" or some identifier
+
+    # Try to get from dl_doc
+    if hasattr(dl_doc, "export_to_dict"):
+        doc_dict = dl_doc.export_to_dict()
+    elif isinstance(dl_doc, dict):
+        doc_dict = dl_doc
+    else:
+        return None
+
+    collection = doc_dict.get(collection_name, {})
+    if isinstance(collection, dict):
+        # Try direct key lookup or ref-based lookup
+        return collection.get(key) or collection.get(ref)
+    elif isinstance(collection, list):
+        try:
+            idx = int(key)
+            if 0 <= idx < len(collection):
+                return collection[idx]
+        except (ValueError, IndexError):
+            pass
+
+    return None
+
+
+def _table_structure_to_markdown(struct: dict[str, Any], title: str | None = None) -> str:
+    """Convert table structure to proper markdown table format."""
+    if not struct or not struct.get("cells"):
+        return ""
+
+    num_rows = struct.get("num_rows", 0)
+    num_cols = struct.get("num_cols", 0)
+
+    if num_rows == 0 or num_cols == 0:
+        return ""
+
+    # Build grid from cells
+    grid = [["" for _ in range(num_cols)] for _ in range(num_rows)]
+
+    for cell in struct.get("cells", []):
+        row = cell.get("row", 0)
+        col = cell.get("col", 0)
+        text = str(cell.get("text", "")).strip()
+        # Replace pipe characters to avoid breaking markdown
+        text = text.replace("|", "\\|")
+        if 0 <= row < num_rows and 0 <= col < num_cols:
+            grid[row][col] = text
+
+    # Generate markdown
+    lines = []
+    if title:
+        lines.append(f"**{title}**")
+        lines.append("")
+
+    for i, row in enumerate(grid):
+        line = "| " + " | ".join(cell if cell else "" for cell in row) + " |"
+        lines.append(line)
+        if i == 0:  # Add header separator after first row
+            lines.append("|" + "|".join(["---"] * num_cols) + "|")
+
+    return "\n".join(lines)
+
+
+def _table_structure_to_clean_text(struct: dict[str, Any], title: str | None = None) -> str:
+    """Convert table structure to clean text for embedding/comparison."""
+    if not struct or not struct.get("cells"):
+        return ""
+
+    parts = []
+    if title:
+        parts.append(f"Table: {title}")
+
+    num_rows = struct.get("num_rows", 0)
+    num_cols = struct.get("num_cols", 0)
+    parts.append(f"Dimensions: {num_rows} rows x {num_cols} columns")
+
+    # Group cells by row for readable output
+    rows_data: dict[int, list[str]] = {}
+    for cell in struct.get("cells", []):
+        row_idx = cell.get("row", 0)
+        text = str(cell.get("text", "")).strip()
+        if text:
+            rows_data.setdefault(row_idx, []).append(text)
+
+    # Build clean text representation
+    for row_idx in sorted(rows_data.keys()):
+        row_text = " | ".join(rows_data[row_idx])
+        parts.append(row_text)
+
+    return "\n".join(parts)
+
 _HEADER_FOOTER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^page\\s+\\d+(\\s+of\\s+\\d+)?$", re.IGNORECASE),
     re.compile(r"^\\d+\\s*/\\s*\\d+$"),
@@ -51,6 +193,24 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
         if any(item.label == DocItemLabel.TABLE for item in doc_chunk.meta.doc_items):
             chunk_type = "table"
             title = captions[0] if captions else None
+
+            # Extract table structure from docling
+            table_struct = _extract_table_structure(doc_chunk, dl_doc)
+            if table_struct:
+                metadata["table_structure"] = {
+                    "num_rows": table_struct.get("num_rows", 0),
+                    "num_cols": table_struct.get("num_cols", 0),
+                    "cells": table_struct.get("cells", []),
+                }
+                # Generate proper markdown from structure
+                struct_markdown = _table_structure_to_markdown(table_struct, title)
+                if struct_markdown:
+                    markdown_text = struct_markdown
+                # Generate better clean_text for embeddings
+                struct_clean_text = _table_structure_to_clean_text(table_struct, title)
+                if struct_clean_text:
+                    metadata["table_clean_text"] = struct_clean_text
+
         elif any(item.label == DocItemLabel.PICTURE for item in doc_chunk.meta.doc_items):
             chunk_type = "figure"
             title = captions[0] if captions else None

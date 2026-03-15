@@ -351,6 +351,10 @@ class ClauseMatcher:
         return 0.45 * title_score + 0.40 * text_score + 0.15 * order_score
 
     def _clause_score(self, left: dict, right: dict) -> float:
+        # Use table-specific scoring for tables
+        if left.get("node_type") == "table" and right.get("node_type") == "table":
+            return self._table_score(left, right)
+
         left_text = self._node_clean_text(left)
         right_text = self._node_clean_text(right)
         if not left_text and not right_text:
@@ -381,6 +385,87 @@ class ClauseMatcher:
         if left.get("node_type") != right.get("node_type"):
             score *= 0.8
         return max(0.0, min(score, 1.0))
+
+    def _table_score(self, left: dict, right: dict) -> float:
+        """Compute similarity score specifically for tables using structural comparison."""
+        left_cells = left.get("table_cells") or []
+        right_cells = right.get("table_cells") or []
+        left_rows = left.get("table_num_rows", 0)
+        left_cols = left.get("table_num_cols", 0)
+        right_rows = right.get("table_num_rows", 0)
+        right_cols = right.get("table_num_cols", 0)
+
+        # If no structural data available, fall back to text comparison
+        if not left_cells or not right_cells:
+            return self._table_text_score(left, right)
+
+        # Dimension similarity (20% weight)
+        if left_rows == right_rows and left_cols == right_cols:
+            dim_score = 1.0
+        else:
+            row_sim = min(left_rows, right_rows) / max(left_rows, right_rows, 1)
+            col_sim = min(left_cols, right_cols) / max(left_cols, right_cols, 1)
+            dim_score = (row_sim + col_sim) / 2
+
+        # Cell content comparison (60% weight)
+        left_cell_map = {
+            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).lower().strip()
+            for c in left_cells
+        }
+        right_cell_map = {
+            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).lower().strip()
+            for c in right_cells
+        }
+
+        all_positions = set(left_cell_map.keys()) | set(right_cell_map.keys())
+        if not all_positions:
+            cell_score = dim_score
+        else:
+            exact_matches = sum(
+                1 for pos in all_positions
+                if left_cell_map.get(pos) == right_cell_map.get(pos)
+                and left_cell_map.get(pos)  # Non-empty match
+            )
+            # Partial matches - check for similar content
+            partial_matches = 0
+            for pos in all_positions:
+                left_val = left_cell_map.get(pos, "")
+                right_val = right_cell_map.get(pos, "")
+                if left_val and right_val and left_val != right_val:
+                    # Use token overlap for partial matching
+                    overlap = token_overlap(left_val, right_val, self.language)
+                    if overlap > 0.5:
+                        partial_matches += overlap
+
+            cell_score = (exact_matches + partial_matches) / len(all_positions)
+
+        # Text similarity as backup (20% weight)
+        text_score = self._table_text_score(left, right)
+
+        return 0.2 * dim_score + 0.6 * cell_score + 0.2 * text_score
+
+    def _table_text_score(self, left: dict, right: dict) -> float:
+        """Compute text-based similarity for tables (fallback when no structure)."""
+        # Prefer markdown_text for tables as it preserves structure
+        left_text = str(left.get("markdown_text") or left.get("clean_text") or left.get("text") or "")
+        right_text = str(right.get("markdown_text") or right.get("clean_text") or right.get("text") or "")
+
+        if not left_text and not right_text:
+            return 1.0
+        if not left_text or not right_text:
+            return 0.0
+
+        # Use SequenceMatcher for overall structure similarity
+        text_ratio = SequenceMatcher(
+            None,
+            normalize_whitespace(left_text),
+            normalize_whitespace(right_text)
+        ).ratio()
+
+        # Token overlap for content similarity
+        lexical_score = token_overlap(left_text, right_text, self.language)
+
+        return 0.5 * text_ratio + 0.5 * lexical_score
 
     def _meaning_score(self, left: dict, right: dict) -> float:
         comparison = compare_clause_meaning(

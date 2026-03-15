@@ -103,6 +103,10 @@ class WeaviateClient:
             Property(name="object", data_type=DataType.TEXT),
             Property(name="condition", data_type=DataType.TEXT),
             Property(name="markdown_text", data_type=DataType.TEXT),
+            # Table structure fields
+            Property(name="table_num_rows", data_type=DataType.INT),
+            Property(name="table_num_cols", data_type=DataType.INT),
+            Property(name="table_cells", data_type=DataType.OBJECT_ARRAY),
         ]
 
     def _ensure_schema(self) -> None:
@@ -190,6 +194,10 @@ class WeaviateClient:
                     "object": str(chunk.get("object") or ""),
                     "condition": str(chunk.get("condition") or ""),
                     "markdown_text": str(chunk.get("markdown_text") or ""),
+                    # Table structure fields
+                    "table_num_rows": int(chunk.get("table_num_rows") or 0),
+                    "table_num_cols": int(chunk.get("table_num_cols") or 0),
+                    "table_cells": list(chunk.get("table_cells") or []),
                 }
                 unique_id = str(uuid5(NAMESPACE_URL, chunk_id))
                 batch.add_object(
@@ -314,4 +322,8 @@ class WeaviateClient:
             "object",
             "condition",
             "markdown_text",
+            # Table structure fields
+            "table_num_rows",
+            "table_num_cols",
+            "table_cells",
         ]

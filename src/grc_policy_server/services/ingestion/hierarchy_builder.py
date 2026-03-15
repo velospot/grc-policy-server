@@ -174,7 +174,11 @@ def build_document_hierarchy(
 
         section_leaf_ordinals[section_titles] += 1
         anchor_text = _anchor_text(chunk)
-        clean_text = str(chunk.metadata.get("clean_text") or normalize_text(chunk.text))
+        # For tables, prefer structured clean_text if available
+        if chunk.chunk_type == "table" and chunk.metadata.get("table_clean_text"):
+            clean_text = str(chunk.metadata.get("table_clean_text"))
+        else:
+            clean_text = str(chunk.metadata.get("clean_text") or normalize_text(chunk.text))
         normalized_text = normalize_text(clean_text or chunk.text)
         content_digest = sha256_hex(normalized_text.encode("utf-8")) if normalized_text else ""
         stable_id = stable_uuid(
