@@ -124,6 +124,7 @@ def build_ocr_fallback_chunks(
                             page_number=page_number,
                             ordinal=next_ordinal,
                             title=None,
+                            markdown_text=None,  # OCR produces plain text, not markdown
                             docling_path=None,
                             source_refs=(),
                             labels=("OCR",),

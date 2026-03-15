@@ -31,6 +31,19 @@ from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 logger = logging.getLogger(__name__)
 
 
+def build_markdown_lookup(nodes: list[dict]) -> dict[str, str]:
+    """Build chunk_id -> markdown_text lookup from fetched nodes.
+
+    This hashmap is built at runtime from Weaviate data and used
+    for LLM prompts where markdown formatting improves accuracy.
+    """
+    return {
+        str(node.get("chunk_id") or ""): str(node.get("markdown_text") or "")
+        for node in nodes
+        if node.get("chunk_id") and node.get("markdown_text")
+    }
+
+
 def impact_from_distance(
     distance: Optional[float],
     change_type: str,
@@ -73,6 +86,15 @@ class RealDiffEngine:
     ) -> ComparisonResult:
         left_nodes = self.weaviate.fetch_chunks_by_document(doc1.id)
         right_nodes = self.weaviate.fetch_chunks_by_document(doc2.id)
+
+        # Build markdown lookup for LLM prompts (runtime hashmap)
+        left_markdown = build_markdown_lookup(left_nodes)
+        right_markdown = build_markdown_lookup(right_nodes)
+        logger.info(
+            "markdown lookup built: left=%d right=%d",
+            len(left_markdown),
+            len(right_markdown),
+        )
 
         # Detect language from first document's text for better LLM accuracy
         language = await self._detect_document_language(left_nodes)
@@ -206,6 +228,7 @@ class RealDiffEngine:
         enriched = [dict(node) for node in nodes]
         indexes: list[int] = []
         texts: list[str] = []
+        markdown_texts: list[str] = []
 
         for index, node in enumerate(enriched):
             if not node.get("clean_text"):
@@ -222,11 +245,21 @@ class RealDiffEngine:
                 continue
             indexes.append(index)
             texts.append(text)
+            # Use markdown if available, otherwise fall back to plain text
+            markdown_texts.append(str(node.get("markdown_text") or text))
 
         if not texts:
             return enriched
 
-        for index, meaning in zip(indexes, await self.llm.extract_policy_meanings(texts=texts, language=language), strict=False):
+        for index, meaning in zip(
+            indexes,
+            await self.llm.extract_policy_meanings(
+                texts=texts,
+                markdown_texts=markdown_texts,
+                language=language,
+            ),
+            strict=False,
+        ):
             for field, value in meaning.items():
                 enriched[index][field] = str(value or "")
 

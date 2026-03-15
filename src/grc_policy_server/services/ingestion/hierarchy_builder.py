@@ -228,6 +228,7 @@ def build_document_hierarchy(
             metadata={
                 **chunk.metadata,
                 "clean_text": clean_text,
+                "markdown_text": chunk.markdown_text,
                 "anchor_text": anchor_text,
                 "docling_path": chunk.docling_path,
                 "source_labels": list(chunk.labels),

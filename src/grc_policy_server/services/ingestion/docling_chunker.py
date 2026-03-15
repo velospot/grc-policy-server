@@ -39,6 +39,8 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
     for idx, raw_chunk in enumerate(raw_chunks):
         doc_chunk = DocChunk.model_validate(raw_chunk)
         fields = extract_basic_chunk_fields(raw_chunk)
+        # DocChunk.text is already markdown-formatted; preserve it before normalizing
+        markdown_text = getattr(raw_chunk, "text", None) or None
         text = " ".join((fields.get("text") or "").split())
         labels = tuple(_item_label_name(item.label) for item in doc_chunk.meta.doc_items)
         captions = _extract_captions(doc_chunk.meta.doc_items, dl_doc)
@@ -79,6 +81,7 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
                 page_number=fields.get("page_number"),
                 ordinal=idx,
                 title=title,
+                markdown_text=markdown_text,
                 docling_path=fields.get("docling_path"),
                 source_refs=source_refs,
                 labels=labels,

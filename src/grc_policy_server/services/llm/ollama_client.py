@@ -64,11 +64,14 @@ class OllamaClient(BaseLLM):
         self,
         *,
         texts: List[str],
+        markdown_texts: List[str] | None = None,
         language: str = "",
     ) -> List[Dict[str, str]]:
         normalized_texts = [normalize_whitespace(text or "") for text in texts]
+        # Use markdown_texts if provided, otherwise fall back to plain texts
+        effective_markdown = markdown_texts if markdown_texts else texts
         results: list[dict[str, str] | None] = [None] * len(normalized_texts)
-        uncached: list[tuple[int, str]] = []
+        uncached: list[tuple[int, str, str]] = []  # (index, text, markdown)
 
         for index, text in enumerate(normalized_texts):
             if not text:
@@ -78,13 +81,17 @@ class OllamaClient(BaseLLM):
             if cached is not None:
                 results[index] = dict(cached)
                 continue
-            uncached.append((index, text))
+            markdown = effective_markdown[index] if index < len(effective_markdown) else text
+            uncached.append((index, text, markdown))
 
         for start in range(0, len(uncached), 8):
             batch = uncached[start : start + 8]
-            batch_texts = [text for _, text in batch]
-            extracted = await self._extract_policy_meanings_batch(batch_texts, language=language)
-            for (index, text), meaning in zip(batch, extracted, strict=False):
+            batch_texts = [text for _, text, _ in batch]
+            batch_markdown = [markdown for _, _, markdown in batch]
+            extracted = await self._extract_policy_meanings_batch(
+                batch_texts, markdown_texts=batch_markdown, language=language
+            )
+            for (index, text, _), meaning in zip(batch, extracted, strict=False):
                 payload = self._normalize_meaning_dict(meaning)
                 self._meaning_cache[text] = payload
                 results[index] = dict(payload)
@@ -382,12 +389,15 @@ Return as a numbered list (1., 2., 3., ...). Keep questions specific and actiona
     async def _extract_policy_meanings_batch(
         self,
         texts: List[str],
+        markdown_texts: List[str] | None = None,
         language: str = "",
     ) -> List[Dict[str, str]]:
         if not texts:
             return []
 
-        prompt = self._prompt_extract_policy_meanings(texts, language=language)
+        prompt = self._prompt_extract_policy_meanings(
+            texts, markdown_texts=markdown_texts, language=language
+        )
 
         try:
             response_text = await self._generate_text(prompt)
@@ -399,8 +409,23 @@ Return as a numbered list (1., 2., 3., ...). Keep questions specific and actiona
 
         return [self._meaning_dict(extract_clause_meaning(text)) for text in texts]
 
-    def _prompt_extract_policy_meanings(self, texts: List[str], language: str = "") -> str:
-        items = [{"index": index, "text": text} for index, text in enumerate(texts)]
+    def _prompt_extract_policy_meanings(
+        self,
+        texts: List[str],
+        markdown_texts: List[str] | None = None,
+        language: str = "",
+    ) -> str:
+        # Build items with markdown for better LLM comprehension
+        items = []
+        for index, text in enumerate(texts):
+            item: dict[str, Any] = {"index": index, "text": text}
+            # Include markdown if available and different from plain text
+            if markdown_texts and index < len(markdown_texts):
+                md = markdown_texts[index]
+                if md and md != text:
+                    item["markdown"] = md
+            items.append(item)
+
         lang_hint = self._language_hint(language)
         return f"""
 You extract a structured semantic fingerprint from document text to enable precise difference detection.
@@ -439,6 +464,7 @@ Extraction goals - capture differences of ANY type:
 - Modality: Strength or nature of statement in obligation field
 
 Rules:
+- If "markdown" field is present, use it to understand the document structure (headers, lists, emphasis) but extract meaning from the "text" field.
 - Extract the complete semantic fingerprint so any change in meaning is detectable.
 - Preserve specific values (numbers, dates, names) exactly in object field.
 - If no modality exists, set obligation to "".

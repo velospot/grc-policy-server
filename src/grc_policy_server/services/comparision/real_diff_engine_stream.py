@@ -235,6 +235,7 @@ class RealDiffEngineStream:
         enriched = [dict(node) for node in nodes]
         indexes: list[int] = []
         texts: list[str] = []
+        markdown_texts: list[str] = []
 
         for index, node in enumerate(enriched):
             if not node.get("clean_text"):
@@ -251,11 +252,21 @@ class RealDiffEngineStream:
                 continue
             indexes.append(index)
             texts.append(text)
+            # Use markdown if available, otherwise fall back to plain text
+            markdown_texts.append(str(node.get("markdown_text") or text))
 
         if not texts:
             return enriched
 
-        for index, meaning in zip(indexes, await self.llm.extract_policy_meanings(texts=texts, language=language), strict=False):
+        for index, meaning in zip(
+            indexes,
+            await self.llm.extract_policy_meanings(
+                texts=texts,
+                markdown_texts=markdown_texts,
+                language=language,
+            ),
+            strict=False,
+        ):
             for field, value in meaning.items():
                 enriched[index][field] = str(value or "")
 

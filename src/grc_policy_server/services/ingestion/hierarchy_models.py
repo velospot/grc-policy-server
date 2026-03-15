@@ -15,6 +15,7 @@ class ParsedChunk:
     page_number: int | None
     ordinal: int
     title: str | None = None
+    markdown_text: str | None = None  # Markdown-formatted text for LLM prompts
     docling_path: str | None = None
     source_refs: tuple[str, ...] = ()
     labels: tuple[str, ...] = ()
@@ -76,6 +77,7 @@ class HierarchyNode:
             "action": str(self.metadata.get("action") or ""),
             "object": str(self.metadata.get("object") or ""),
             "condition": str(self.metadata.get("condition") or ""),
+            "markdown_text": str(self.metadata.get("markdown_text") or ""),
         }
 
     def to_graph_record(self) -> dict[str, Any]:

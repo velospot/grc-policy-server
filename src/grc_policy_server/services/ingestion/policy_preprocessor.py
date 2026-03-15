@@ -53,6 +53,15 @@ def _should_merge(previous: ParsedChunk, current: ParsedChunk) -> bool:
 
 def _merge_chunks(previous: ParsedChunk, current: ParsedChunk) -> ParsedChunk:
     merged_text = f"{previous.text.rstrip()} {current.text.lstrip()}".strip()
+    # Merge markdown_text if both exist, otherwise use whichever is available
+    merged_markdown: str | None = None
+    if previous.markdown_text and current.markdown_text:
+        merged_markdown = f"{previous.markdown_text.rstrip()}\n{current.markdown_text.lstrip()}".strip()
+    elif previous.markdown_text:
+        merged_markdown = previous.markdown_text
+    elif current.markdown_text:
+        merged_markdown = current.markdown_text
+
     merged_metadata = dict(previous.metadata)
     merged_metadata["clean_text"] = clean_policy_text(merged_text)
     merged_metadata["captions"] = _merge_unique(
@@ -71,6 +80,7 @@ def _merge_chunks(previous: ParsedChunk, current: ParsedChunk) -> ParsedChunk:
         page_number=previous.page_number,
         ordinal=previous.ordinal,
         title=previous.title,
+        markdown_text=merged_markdown,
         docling_path=previous.docling_path or current.docling_path,
         source_refs=tuple(_merge_unique(previous.source_refs, current.source_refs)),
         labels=tuple(_merge_unique(previous.labels, current.labels)),

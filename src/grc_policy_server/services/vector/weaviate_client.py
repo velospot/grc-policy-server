@@ -102,6 +102,7 @@ class WeaviateClient:
             Property(name="action", data_type=DataType.TEXT),
             Property(name="object", data_type=DataType.TEXT),
             Property(name="condition", data_type=DataType.TEXT),
+            Property(name="markdown_text", data_type=DataType.TEXT),
         ]
 
     def _ensure_schema(self) -> None:
@@ -188,6 +189,7 @@ class WeaviateClient:
                     "action": str(chunk.get("action") or ""),
                     "object": str(chunk.get("object") or ""),
                     "condition": str(chunk.get("condition") or ""),
+                    "markdown_text": str(chunk.get("markdown_text") or ""),
                 }
                 unique_id = str(uuid5(NAMESPACE_URL, chunk_id))
                 batch.add_object(
@@ -311,4 +313,5 @@ class WeaviateClient:
             "action",
             "object",
             "condition",
+            "markdown_text",
         ]
