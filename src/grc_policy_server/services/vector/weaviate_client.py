@@ -7,7 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import weaviate
 from weaviate.classes.config import Configure, DataType, Property
-from weaviate.classes.query import Filter, MetadataQuery, Sort
+from weaviate.classes.query import Filter, MetadataQuery, QueryNested, Sort
 from weaviate.connect.base import ConnectionParams
 
 from grc_policy_server.core.config import settings
@@ -77,6 +77,14 @@ class WeaviateClient:
             self._schema_ensured = True
 
     def _schema_properties(self) -> list[Property]:
+        table_cell_properties = [
+            Property(name="row", data_type=DataType.INT),
+            Property(name="col", data_type=DataType.INT),
+            Property(name="row_span", data_type=DataType.INT),
+            Property(name="col_span", data_type=DataType.INT),
+            Property(name="text", data_type=DataType.TEXT),
+            Property(name="is_header", data_type=DataType.BOOL),
+        ]
         return [
             Property(name="chunk_id", data_type=DataType.TEXT),
             Property(name="document_id", data_type=DataType.TEXT),
@@ -106,7 +114,11 @@ class WeaviateClient:
             # Table structure fields
             Property(name="table_num_rows", data_type=DataType.INT),
             Property(name="table_num_cols", data_type=DataType.INT),
-            Property(name="table_cells", data_type=DataType.OBJECT_ARRAY),
+            Property(
+                name="table_cells",
+                data_type=DataType.OBJECT_ARRAY,
+                nested_properties=table_cell_properties,
+            ),
         ]
 
     def _ensure_schema(self) -> None:
@@ -295,7 +307,7 @@ class WeaviateClient:
             )
         return Filter.all_of(filters)
 
-    def _return_properties(self) -> list[str]:
+    def _return_properties(self) -> list[str | QueryNested]:
         return [
             "chunk_id",
             "document_id",
@@ -325,5 +337,8 @@ class WeaviateClient:
             # Table structure fields
             "table_num_rows",
             "table_num_cols",
-            "table_cells",
+            QueryNested(
+                name="table_cells",
+                properties=["row", "col", "row_span", "col_span", "text", "is_header"],
+            ),
         ]
