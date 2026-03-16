@@ -375,11 +375,13 @@ class ClauseMatcher:
             self.language,
         )
 
+        # Weight text-based scores higher for robustness with numerical changes
+        # Text similarity is deterministic; semantic extraction can vary
         score = (
-            0.25 * text_score
-            + 0.15 * lexical_score
+            0.35 * text_score
+            + 0.20 * lexical_score
             + 0.05 * length_score
-            + 0.40 * meaning_score
+            + 0.25 * meaning_score
             + 0.15 * signature_score
         )
         if left.get("node_type") != right.get("node_type"):

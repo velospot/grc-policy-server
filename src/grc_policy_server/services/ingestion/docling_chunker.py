@@ -22,16 +22,20 @@ def _extract_table_structure(doc_chunk: DocChunk, dl_doc: Any) -> dict[str, Any]
             continue
 
         ref = item.self_ref  # e.g., "#/tables/0"
+        logger.debug("Found TABLE item with ref=%s", ref)
         if not ref:
+            logger.debug("No self_ref for table item")
             continue
 
         # Resolve reference to get table data
         table_data = _resolve_table_ref(dl_doc, ref)
         if not table_data:
+            logger.debug("Could not resolve table ref=%s, dl_doc type=%s", ref, type(dl_doc))
             continue
 
         data = table_data.get("data", {})
         if not data:
+            logger.debug("No 'data' key in table_data for ref=%s", ref)
             continue
 
         cells = []
@@ -44,6 +48,9 @@ def _extract_table_structure(doc_chunk: DocChunk, dl_doc: Any) -> dict[str, Any]
                 "text": cell.get("text", ""),
                 "is_header": cell.get("column_header", False) or cell.get("row_header", False),
             })
+
+        logger.info("Extracted table structure: %d rows x %d cols, %d cells",
+                   data.get("num_rows", 0), data.get("num_cols", 0), len(cells))
 
         return {
             "num_rows": data.get("num_rows", 0),
@@ -67,25 +74,45 @@ def _resolve_table_ref(dl_doc: Any, ref: str) -> dict[str, Any] | None:
     collection_name = parts[0]  # e.g., "tables"
     key = parts[1]  # e.g., "0" or some identifier
 
-    # Try to get from dl_doc
-    if hasattr(dl_doc, "export_to_dict"):
-        doc_dict = dl_doc.export_to_dict()
-    elif isinstance(dl_doc, dict):
+    # Try to get doc as dict
+    doc_dict = None
+    if hasattr(dl_doc, "export_to_dict") and callable(getattr(dl_doc, "export_to_dict")):
+        try:
+            doc_dict = dl_doc.export_to_dict()
+        except Exception as e:
+            logger.debug("export_to_dict failed: %s", e)
+
+    if doc_dict is None and hasattr(dl_doc, "model_dump") and callable(getattr(dl_doc, "model_dump")):
+        try:
+            doc_dict = dl_doc.model_dump()
+        except Exception as e:
+            logger.debug("model_dump failed: %s", e)
+
+    if doc_dict is None and isinstance(dl_doc, dict):
         doc_dict = dl_doc
-    else:
+
+    if doc_dict is None:
+        logger.debug("Could not convert dl_doc to dict, type=%s", type(dl_doc))
         return None
 
-    collection = doc_dict.get(collection_name, {})
-    if isinstance(collection, dict):
-        # Try direct key lookup or ref-based lookup
-        return collection.get(key) or collection.get(ref)
-    elif isinstance(collection, list):
+    collection = doc_dict.get(collection_name, [])
+
+    # Handle list (most common for tables)
+    if isinstance(collection, list):
         try:
             idx = int(key)
             if 0 <= idx < len(collection):
                 return collection[idx]
         except (ValueError, IndexError):
             pass
+        # Also try matching by self_ref
+        for item in collection:
+            if isinstance(item, dict) and item.get("self_ref") == ref:
+                return item
+
+    # Handle dict
+    elif isinstance(collection, dict):
+        return collection.get(key) or collection.get(ref)
 
     return None
 
@@ -190,12 +217,25 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
         title = None
         chunk_type: str = "clause"
 
+        # Initialize metadata first so we can add to it
+        metadata: dict[str, Any] = {
+            "captions": captions,
+            "doc_items_refs": list(source_refs),
+        }
+        if fields.get("docling_path"):
+            metadata["docling_path"] = fields["docling_path"]
+
         if any(item.label == DocItemLabel.TABLE for item in doc_chunk.meta.doc_items):
             chunk_type = "table"
             title = captions[0] if captions else None
 
+            # Log doc_items for debugging
+            for item in doc_chunk.meta.doc_items:
+                logger.info("Table chunk doc_item: label=%s, self_ref=%s", item.label, getattr(item, 'self_ref', None))
+
             # Extract table structure from docling
             table_struct = _extract_table_structure(doc_chunk, dl_doc)
+            logger.info("Table structure extraction result: %s", "SUCCESS" if table_struct else "FAILED")
             if table_struct:
                 metadata["table_structure"] = {
                     "num_rows": table_struct.get("num_rows", 0),
@@ -222,13 +262,6 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
             chunk_type = "figure"
             title = captions[0]
             text = captions[0]
-
-        metadata: dict[str, Any] = {
-            "captions": captions,
-            "doc_items_refs": list(source_refs),
-        }
-        if fields.get("docling_path"):
-            metadata["docling_path"] = fields["docling_path"]
 
         if _is_header_footer_text(text):
             continue

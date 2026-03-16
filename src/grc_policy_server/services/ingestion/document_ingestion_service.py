@@ -76,7 +76,8 @@ class DocumentIngestionService:
         content_hash = sha256_hex(content)
 
         raw_chunks = chunk_document(dl_doc, merge_list_items=True)
-        parsed_chunks = parse_docling_chunks(dl_doc, raw_chunks)
+        # Pass doc_json (dict) instead of dl_doc for better table extraction
+        parsed_chunks = parse_docling_chunks(doc_json, raw_chunks)
         parsed_chunks, ocr_metadata = self._apply_ocr_fallback(
             filename=filename,
             content=content,

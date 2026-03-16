@@ -20,6 +20,15 @@ class DocumentReference(BaseModel):
     sourceText: str
 
 
+class ChangeDetail(BaseModel):
+    """Specific change detail for UI highlighting."""
+    type: Literal["added", "removed", "modified"]
+    text: str
+    oldValue: str | None = None  # For modified items
+    newValue: str | None = None  # For modified items
+    location: str | None = None  # e.g., "Row 5" for tables, "Line 3" for text
+
+
 class KeyDifference(BaseModel):
     changeType: Literal["ADDED", "REMOVED", "MODIFIED"]
     section: str
@@ -28,6 +37,8 @@ class KeyDifference(BaseModel):
     impact: str
     doc1Reference: DocumentReference | None
     doc2Reference: DocumentReference | None
+    nodeType: str = "clause"  # "clause" or "table"
+    changes: List[ChangeDetail] = Field(default_factory=list)  # Specific changes for highlighting
 
 
 class ActionItem(BaseModel):

@@ -284,13 +284,24 @@ Document B: {doc2_name}
 
 You MUST follow these rules:
 - Use ONLY the provided differences JSON.
-- Do NOT invent changes, sections, or impacts not present.
+- Do NOT invent changes, sections, or content not present.
+- Focus on WHAT specifically changed - be precise and concrete.
+- Always mention the exact section name and table name (if applicable).
 
 Output format (follow exactly):
-1. First, write an executive summary describing the overall nature and impact of changes. Length should be proportional to the significance and volume of changes.
+1. First, write a brief executive summary describing what changed overall (2-3 sentences max).
 2. Then write "Key Changes:" on a new line.
-3. Then list each change as a bullet point with format: "- Page X, Section Y: [brief description]"
-   (If page is unavailable, use "- Section Y: [description]")
+3. Then list each change as a bullet point:
+   - For clauses: "- [Section Name]: [exact change - e.g., 'password length changed from 8 to 12 characters']"
+   - For tables: "- [Section Name] > [Table Name/Caption]: [specific changes - e.g., 'Row X column Y changed from A to B', 'New row added for Z']"
+
+Be SPECIFIC about what changed:
+- Quote exact values when possible (old value → new value)
+- Name specific rows, columns, or cells that changed
+- Describe additions/removals precisely
+
+Do NOT include impact levels (Critical/High/Medium/Low) in the summary.
+Do NOT use vague descriptions like "table updated" or "content modified".
 
 Differences JSON:
 {json.dumps(diffs, ensure_ascii=False)}
@@ -340,6 +351,7 @@ Return as a numbered list (1., 2., 3., ...). Keep questions specific and actiona
                     "section": d.section,
                     "page": getattr(d, "page", None) or getattr(d, "pageNumber", None),
                     "impact": d.impact,
+                    "nodeType": getattr(d, "nodeType", "clause"),
                     "doc1Content": d.doc1Content,
                     "doc2Content": d.doc2Content,
                 }
