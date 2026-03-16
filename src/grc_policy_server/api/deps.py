@@ -1,7 +1,7 @@
 # src/grc_policy_server/api/deps.py
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from pathlib import Path
 
 from fastapi import Depends, HTTPException, Security, status
@@ -10,6 +10,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import logging
 from grc_policy_server.respositories.documents import DocumentRepository
+from grc_policy_server.services.comparision.compare_v2_dispatcher import (
+    CompareV2Dispatcher,
+)
+from grc_policy_server.services.comparision.comparison_cache import ComparisonCacheStore
 from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
 from grc_policy_server.services.comparision.real_diff_engine_stream import (
     RealDiffEngineStream,
@@ -46,6 +50,7 @@ def require_api_bearer_token(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     if credentials.credentials != expected_token:
@@ -89,7 +94,7 @@ def get_neo4j_client() -> Generator[Neo4jClient | None, None, None]:
             logger.exception("failed to close Neo4j client")
 
 
-def get_ollama_client() -> Generator[OllamaClient, None, None]:
+async def get_ollama_client() -> AsyncGenerator[OllamaClient, None]:
     client = OllamaClient(
         OllamaSettings(
             base_url=settings.ollama_url,
@@ -102,7 +107,7 @@ def get_ollama_client() -> Generator[OllamaClient, None, None]:
         yield client
     finally:
         try:
-            client.close()
+            await client.aclose()
         except Exception:
             logger.exception("failed to close Ollama client")
 
@@ -174,3 +179,11 @@ def get_document_ingestion_service_factory(
 
 def get_upload_v2_dispatcher() -> UploadV2Dispatcher:
     return UploadV2Dispatcher()
+
+
+def get_comparison_cache_store() -> ComparisonCacheStore:
+    return ComparisonCacheStore(upload_root=Path(settings.upload_root))
+
+
+def get_compare_v2_dispatcher() -> CompareV2Dispatcher:
+    return CompareV2Dispatcher(upload_root=Path(settings.upload_root))

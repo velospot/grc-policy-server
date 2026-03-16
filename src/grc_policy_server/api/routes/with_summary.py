@@ -6,6 +6,7 @@ from grc_policy_server.api.deps import (
 )
 from grc_policy_server.models.schemas import (
     ActionItem,
+    ComparisonAccuracyMetrics,
     CompareRequest,
     ComparisonResult,
     KeyDifference,
@@ -34,12 +35,15 @@ async def compare_with_summary(
     summary: str | None = None
     action_plan: list[ActionItem] = []
     follow_up_questions: list[str] = []
+    accuracy_metrics: ComparisonAccuracyMetrics | None = None
 
-    async for event in service.compare_stream(
+    stream = service.compare_stream(
         payload.doc1,
         payload.doc2,
         force_re_extract=payload.forceReExtract,
-    ):
+    )
+
+    async for event in stream:
         event_type = event.get("type")
 
         if event_type == "diff" and "item" in event:
@@ -54,6 +58,9 @@ async def compare_with_summary(
             follow_up_questions = [
                 str(question) for question in event.get("followUpQuestions", [])
             ]
+            raw_accuracy = event.get("accuracyMetrics")
+            if raw_accuracy is not None:
+                accuracy_metrics = ComparisonAccuracyMetrics.model_validate(raw_accuracy)
 
     if summary is None:
         raise HTTPException(
@@ -66,4 +73,5 @@ async def compare_with_summary(
         keyDifferences=key_differences,
         actionPlan=action_plan,
         followUpQuestions=follow_up_questions,
+        accuracyMetrics=accuracy_metrics,
     )

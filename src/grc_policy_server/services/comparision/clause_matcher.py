@@ -19,11 +19,11 @@ from grc_policy_server.services.comparision.policy_semantics import (
 
 @dataclass(frozen=True)
 class MatchThresholds:
-    max_match_distance: float = 0.35
+    max_match_distance: float = 0.45
     unchanged_distance: float = 0.20
     modified_distance: float = 0.25
     min_section_score: float = 0.55
-    min_clause_score: float = 0.50
+    min_clause_score: float = 0.45
 
 
 @dataclass(frozen=True)

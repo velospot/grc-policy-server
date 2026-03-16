@@ -30,7 +30,10 @@ celery_app.conf.update(
     worker_disable_rate_limits=settings.celery_worker_disable_rate_limits,
     worker_max_tasks_per_child=settings.celery_worker_max_tasks_per_child,
     worker_max_memory_per_child=settings.celery_worker_max_memory_per_child_kb,
-    imports=("grc_policy_server.tasks.upload_v2",),
+    imports=(
+        "grc_policy_server.tasks.upload_v2",
+        "grc_policy_server.tasks.compare_v2",
+    ),
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],

@@ -1,3 +1,5 @@
+import pytest
+
 from grc_policy_server.models.schemas import DocumentReference, KeyDifference
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 
@@ -66,6 +68,57 @@ def test_prompt_summarize_changes_uses_detected_language():
         language="de",
     )
 
-    assert "Write the output in German (Deutsch)." in prompt
-    assert "write the summary in English" not in prompt
-    assert "Explain changes meaningfully (what changed), not impact/severity." in prompt
+    assert "Sie sind Compliance-Analyst." in prompt
+    assert "Dokument A: Dokument A" in prompt
+    assert "Dokument B: Dokument B" in prompt
+    assert "Zusammenfassung:" in prompt
+    assert "Summary:" not in prompt
+
+
+def test_prompt_summarize_changes_falls_back_to_english_for_unknown_language():
+    client = OllamaClient()
+    prompt = client._prompt_summarize_changes(
+        doc1_name="Policy V1",
+        doc2_name="Policy V2",
+        diffs=[],
+        language="unknown",
+    )
+
+    assert "You are a compliance analyst." in prompt
+    assert "Document A: Policy V1" in prompt
+    assert "Document B: Policy V2" in prompt
+    assert "Summary:" in prompt
+    assert "Zusammenfassung:" not in prompt
+    assert "Résumé :" not in prompt
+
+
+def test_prompt_summarize_changes_uses_canonical_diffs_json():
+    client = OllamaClient()
+    prompt = client._prompt_summarize_changes(
+        doc1_name="A",
+        doc2_name="B",
+        diffs=[{"b": 2, "a": 1}],
+        language="en",
+    )
+
+    assert 'Differences JSON:\n[{"a":1,"b":2}]' in prompt
+
+
+@pytest.mark.anyio
+async def test_detect_language_deterministic_german():
+    client = OllamaClient()
+    text = "Die Richtlinie legt fest, dass alle Benutzer MFA verwenden müssen."
+
+    detected = await client.detect_language(text)
+
+    assert detected == "de"
+
+
+@pytest.mark.anyio
+async def test_detect_language_deterministic_french():
+    client = OllamaClient()
+    text = "La politique exige que les utilisateurs doivent activer l'accès sécurisé."
+
+    detected = await client.detect_language(text)
+
+    assert detected == "fr"

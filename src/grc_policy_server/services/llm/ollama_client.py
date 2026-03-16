@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -9,14 +10,116 @@ import httpx
 
 from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import KeyDifference
-from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.comparision.policy_semantics import (
     ClauseMeaning,
     extract_clause_meaning,
 )
+from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.utils.hashing import normalize_whitespace
 
 logger = logging.getLogger(__name__)
+
+PROMPT_EN = """
+You are a compliance analyst. Summarize changes between two document versions.
+
+Document A: {doc1_name}
+Document B: {doc2_name}
+
+Rules:
+- Use ONLY the Differences JSON.
+- Do NOT invent or assume anything not explicitly stated.
+- Ignore duplicates and low-impact changes.
+- Output 3–6 items only.
+- Write in English.
+- No introduction or conclusion.
+
+For each item, use this EXACT Markdown format:
+
+- **[ADDED|REMOVED|MODIFIED] <Section or topic>**
+  - Change: <one concise sentence describing the change>
+  - Implication: <1–2 concise points explaining what this means in practice, based only on the JSON>
+
+Constraints:
+- One meaningful change per item.
+- Do not merge unrelated changes.
+- If implications are not explicit, infer only direct operational impact (e.g., scope, timing, obligation).
+- No numbering.
+
+Differences JSON:
+{json.dumps(diffs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+
+Summary:
+""".strip()
+
+PROMPT_DE = """
+Sie sind Compliance-Analyst. Fassen Sie die Änderungen zwischen zwei Dokumentversionen zusammen.
+
+Dokument A: {doc1_name}
+Dokument B: {doc2_name}
+
+Regeln:
+- Verwenden Sie AUSSCHLIESSLICH das Differences-JSON.
+- Nichts erfinden oder annehmen, was nicht ausdrücklich enthalten ist.
+- Duplikate und geringfügige Änderungen ignorieren.
+- Genau 3–6 Punkte ausgeben.
+- Schreiben Sie auf Deutsch.
+- Keine Einleitung und kein Schluss.
+
+Für jeden Punkt verwenden Sie GENAU dieses Markdown-Format:
+
+- **[ADDED|REMOVED|MODIFIED] <Abschnitt oder Thema>**
+  - Änderung: <ein kurzer Satz zur Beschreibung der Änderung>
+  - Auswirkung: <1–2 kurze Punkte, was dies praktisch bedeutet, nur basierend auf dem JSON>
+
+Vorgaben:
+- Pro Punkt nur eine wesentliche Änderung.
+- Keine Zusammenlegung nicht zusammengehöriger Änderungen.
+- Falls Auswirkungen nicht ausdrücklich genannt sind, nur direkte operative Folgen ableiten (z. B. Umfang, Fristen, Verpflichtungen).
+- Keine Nummerierung.
+
+Differences JSON:
+{json.dumps(diffs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+
+Zusammenfassung:
+""".strip()
+
+PROMPT_FR = """
+Vous êtes analyste conformité. Résumez les modifications entre deux versions d’un document.
+
+Document A : {doc1_name}
+Document B : {doc2_name}
+
+Règles :
+- Utiliser UNIQUEMENT le JSON des différences.
+- Ne rien inventer ni supposer au-delà des informations fournies.
+- Ignorer les doublons et changements mineurs.
+- Produire exactement 3 à 6 éléments.
+- Écrire en français.
+- Pas d’introduction ni de conclusion.
+
+Pour chaque élément, utiliser EXACTEMENT ce format Markdown :
+
+- **[ADDED|REMOVED|MODIFIED] <Section ou sujet>**
+  - Changement : <une phrase concise décrivant la modification>
+  - Implication : <1 à 2 points concis expliquant ce que cela implique en pratique, uniquement d’après le JSON>
+
+Contraintes :
+- Une seule modification significative par élément.
+- Ne pas fusionner des modifications non liées.
+- Si les implications ne sont pas explicites, déduire uniquement l’impact opérationnel direct (ex. portée, délais, obligations).
+- Pas de numérotation.
+
+Differences JSON :
+{json.dumps(diffs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+
+Résumé :
+""".strip()
+
+PROMPTS = {
+    "en": PROMPT_EN,
+    "de": PROMPT_DE,
+    "fr": PROMPT_FR,
+}
 
 
 @dataclass(frozen=True)
@@ -41,6 +144,10 @@ class OllamaClient(BaseLLM):
     def __init__(self, settings: Optional[OllamaSettings] = None):
         self.settings = settings or OllamaSettings()
         self._meaning_cache: dict[str, dict[str, str]] = {}
+        self._async_client = httpx.AsyncClient(
+            base_url=self.settings.base_url,
+            timeout=self.settings.timeout_sec,
+        )
 
     def embed(self, text: str) -> list[float]:
         payload = {
@@ -81,7 +188,9 @@ class OllamaClient(BaseLLM):
             if cached is not None:
                 results[index] = dict(cached)
                 continue
-            markdown = effective_markdown[index] if index < len(effective_markdown) else text
+            markdown = (
+                effective_markdown[index] if index < len(effective_markdown) else text
+            )
             uncached.append((index, text, markdown))
 
         for start in range(0, len(uncached), 8):
@@ -109,47 +218,84 @@ class OllamaClient(BaseLLM):
         if not text_sample or not text_sample.strip():
             return "unknown"
 
-        # Take first 500 characters to keep it efficient
-        sample = text_sample[:500].strip()
-        if not sample:
+        sample = text_sample[:1000].lower()
+        tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", sample)
+        if not tokens:
             return "unknown"
 
-        prompt = f"""
-Identify the primary language of this text. Reply with ONLY one of these codes:
-- en (English)
-- de (German)
-- fr (French)
-- unknown (if unclear or other language)
+        lexicons = {
+            "en": {
+                "the",
+                "and",
+                "shall",
+                "must",
+                "should",
+                "policy",
+                "document",
+                "requirements",
+                "control",
+                "controls",
+                "access",
+                "security",
+                "is",
+                "are",
+            },
+            "de": {
+                "der",
+                "die",
+                "das",
+                "und",
+                "nicht",
+                "mit",
+                "sind",
+                "muss",
+                "müssen",
+                "soll",
+                "sollen",
+                "richtlinie",
+                "dokument",
+                "anforderungen",
+                "zugriff",
+                "sicherheit",
+            },
+            "fr": {
+                "le",
+                "la",
+                "les",
+                "et",
+                "pas",
+                "avec",
+                "sont",
+                "doit",
+                "doivent",
+                "politique",
+                "document",
+                "exigences",
+                "accès",
+                "securite",
+                "sécurité",
+                "conformité",
+            },
+        }
+        scores = {code: 0 for code in lexicons}
+        for token in tokens:
+            for code, lexicon in lexicons.items():
+                if token in lexicon:
+                    scores[code] += 1
 
-Text:
-{sample}
+        if any(ch in sample for ch in "äöüß"):
+            scores["de"] += 2
+        if any(ch in sample for ch in "àâçéèêëîïôûùüÿœæ"):
+            scores["fr"] += 2
 
-Language code:"""
-
-        try:
-            response = await self._generate_text(prompt)
-            code = response.strip().lower()
-            # Check for German indicators
-            if code.startswith("de") or "german" in code or "deutsch" in code:
-                return "de"
-            # Check for French indicators
-            if code.startswith("fr") or "french" in code or "francais" in code or "français" in code:
-                return "fr"
-            # Check for English indicators
-            if code.startswith("en") or "english" in code:
-                return "en"
-            # Fallback: check if response contains just the code
-            first_word = code.split()[0] if code.split() else ""
-            if first_word in {"de", "german", "deutsch"}:
-                return "de"
-            if first_word in {"fr", "french", "francais", "français"}:
-                return "fr"
-            if first_word in {"en", "english"}:
-                return "en"
+        best = max(scores, key=scores.get)
+        best_score = scores[best]
+        if best_score == 0:
             return "unknown"
-        except Exception:
-            logger.exception("failed to detect language")
+        winners = [code for code, score in scores.items() if score == best_score]
+        if len(winners) != 1:
             return "unknown"
+        return best
 
     async def summarize_diff(
         self,
@@ -162,7 +308,7 @@ Language code:"""
         prompt = self._prompt_summarize_diff(
             old_text=old_text, new_text=new_text, section=section, language=language
         )
-        return await self._generate_text(prompt)
+        return await self._generate_text(prompt, temperature=0.3)
 
     async def summarize_changes(
         self,
@@ -176,7 +322,7 @@ Language code:"""
         prompt = self._prompt_summarize_changes(
             doc1_name=doc1_name, doc2_name=doc2_name, diffs=compact, language=language
         )
-        return await self._generate_text(prompt)
+        return await self._generate_text(prompt, temperature=0.5)
 
     async def generate_followups(
         self,
@@ -195,11 +341,22 @@ Language code:"""
             max_questions=max_questions,
             language=language,
         )
-        text = await self._generate_text(prompt)
+        text = await self._generate_text(prompt, temperature=0.5)
         return self._parse_numbered_questions(text, max_questions=max_questions)
 
     def close(self) -> None:
-        return None
+        """Sync best-effort close. Use aclose() in async contexts."""
+        import asyncio
+
+        try:
+            loop = asyncio.get_event_loop()
+            if not loop.is_running():
+                loop.run_until_complete(self._async_client.aclose())
+        except Exception:
+            pass
+
+    async def aclose(self) -> None:
+        await self._async_client.aclose()
 
     def _language_hint(self, language: str) -> str:
         """Generate a language hint for prompts based on detected language code."""
@@ -208,7 +365,9 @@ Language code:"""
             "de": "The input text is in German (Deutsch). ",
             "fr": "The input text is in French (Français). ",
         }
-        return lang_map.get(language, "The input text may be in English, German, or French. ")
+        return lang_map.get(
+            language, "The input text may be in English, German, or French. "
+        )
 
     # -------------------------
     # HTTP helpers
@@ -225,14 +384,12 @@ Language code:"""
             return data
 
     async def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.settings.base_url}{path}"
-        async with httpx.AsyncClient(timeout=self.settings_timeout) as client:
-            r = await client.post(url, json=payload)
-            r.raise_for_status()
-            data = r.json()
-            if not isinstance(data, dict):
-                raise RuntimeError(f"Ollama response is not JSON object: {data}")
-            return data
+        r = await self._async_client.post(path, json=payload)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Ollama response is not JSON object: {data}")
+        return data
 
     @property
     def settings_timeout(self) -> float:
@@ -271,32 +428,25 @@ One-line summary:
 """.strip()
 
     def _prompt_summarize_changes(
-        self, *, doc1_name: str, doc2_name: str, diffs: List[Dict[str, Any]], language: str = ""
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        diffs: List[Dict[str, Any]],
+        language: str = "",
     ) -> str:
-        lang_hint = self._language_hint(language)
-        return f"""
-You are a GRC compliance analyst. Summarize changes between two document versions.
-
-{lang_hint}Understand the original language but write the summary in English.
-
-Document A: {doc1_name}
-Document B: {doc2_name}
-
-You MUST follow these rules:
-- Use ONLY the provided differences JSON.
-- Do NOT invent changes, sections, or impacts not present.
-
-Output format (follow exactly):
-1. First, write an executive summary describing the overall nature and impact of changes. Length should be proportional to the significance and volume of changes.
-2. Then write "Key Changes:" on a new line.
-3. Then list each change as a bullet point with format: "- Page X, Section Y: [brief description]"
-   (If page is unavailable, use "- Section Y: [description]")
-
-Differences JSON:
-{json.dumps(diffs, ensure_ascii=False)}
-
-Summary:
-""".strip()
+        lang_code = language if language in PROMPTS else "en"
+        canonical_diffs = json.dumps(
+            diffs,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return PROMPTS[lang_code].format(
+            doc1_name=doc1_name,
+            doc2_name=doc2_name,
+            diffs=canonical_diffs,
+        )
 
     def _prompt_followups(
         self,
@@ -332,16 +482,28 @@ Return as a numbered list (1., 2., 3., ...). Keep questions specific and actiona
     def _compact_diffs_for_summary(
         self, diffs: List[KeyDifference]
     ) -> List[Dict[str, Any]]:
+        by_section: dict[str, dict[str, list[str]]] = {}
+        for d in diffs[:50]:
+            key = str(d.section or "Unknown Section")
+            section_entry = by_section.setdefault(key, {"doc1": [], "doc2": []})
+            if d.doc1Content:
+                section_entry["doc1"].append(d.doc1Content)
+            if d.doc2Content:
+                section_entry["doc2"].append(d.doc2Content)
+
         out: List[Dict[str, Any]] = []
         for d in diffs[:50]:
+            key = str(d.section or "Unknown Section")
+            section_entry = by_section.get(key, {"doc1": [], "doc2": []})
             out.append(
                 {
                     "changeType": getattr(d, "changeType", None),
-                    "section": d.section,
+                    "section": key,
                     "page": getattr(d, "page", None) or getattr(d, "pageNumber", None),
-                    "impact": d.impact,
                     "doc1Content": d.doc1Content,
                     "doc2Content": d.doc2Content,
+                    "doc1SectionContent": " ".join(section_entry["doc1"]).strip(),
+                    "doc2SectionContent": " ".join(section_entry["doc2"]).strip(),
                 }
             )
         return out
@@ -506,7 +668,17 @@ Input JSON:
             return self._meaning_dict(ClauseMeaning("", "", "", "", ""))
 
         obligation = str(value.get("obligation") or "").strip().lower()
-        if obligation not in {"", "may", "should", "recommended", "required", "must", "shall", "must_not", "shall_not"}:
+        if obligation not in {
+            "",
+            "may",
+            "should",
+            "recommended",
+            "required",
+            "must",
+            "shall",
+            "must_not",
+            "shall_not",
+        }:
             obligation = self._map_obligation_value(obligation)
 
         return {
@@ -514,15 +686,27 @@ Input JSON:
             "subject": normalize_whitespace(str(value.get("subject") or "")).lower(),
             "action": normalize_whitespace(str(value.get("action") or "")).lower(),
             "object": normalize_whitespace(str(value.get("object") or "")).lower(),
-            "condition": normalize_whitespace(str(value.get("condition") or "")).lower(),
+            "condition": normalize_whitespace(
+                str(value.get("condition") or "")
+            ).lower(),
         }
 
     def _map_obligation_value(self, value: str) -> str:
         lowered = value.lower()
         # Check for negations/prohibitions first
-        if "shall" in lowered and ("not" in lowered or "never" in lowered or "prohibit" in lowered or "forbid" in lowered):
+        if "shall" in lowered and (
+            "not" in lowered
+            or "never" in lowered
+            or "prohibit" in lowered
+            or "forbid" in lowered
+        ):
             return "shall_not"
-        if "must" in lowered and ("not" in lowered or "never" in lowered or "prohibit" in lowered or "forbid" in lowered):
+        if "must" in lowered and (
+            "not" in lowered
+            or "never" in lowered
+            or "prohibit" in lowered
+            or "forbid" in lowered
+        ):
             return "must_not"
         if "prohibit" in lowered or "forbid" in lowered or "forbidden" in lowered:
             return "must_not"
@@ -550,14 +734,20 @@ Input JSON:
             "condition": meaning.condition,
         }
 
-    async def _generate_text(self, prompt: str) -> str:
+    async def _generate_text(self, prompt: str, temperature=None) -> str:
+        temp = 0
+        if temperature is not None:
+            temp = temperature
         response = await self._post_json(
             "/api/generate",
             {
                 "model": self.settings.chat_model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": 0},
+                "options": {"temperature": temp},
             },
         )
-        return str(response.get("response") or "").strip()
+        text = str(response.get("response") or "").strip()
+        # Strip chain-of-thought tags emitted by granite/deepseek style models.
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        return text

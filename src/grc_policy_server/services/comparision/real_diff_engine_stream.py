@@ -278,8 +278,16 @@ class RealDiffEngineStream:
 
     async def _detect_document_language(self, nodes: list[dict]) -> str:
         """Detect language from first few chunks of text."""
+        ordered_nodes = sorted(
+            nodes,
+            key=lambda node: (
+                int(node.get("page_number") or node.get("page") or 0),
+                int(node.get("chunk_index") or node.get("ordinal") or 0),
+                str(node.get("chunk_id") or ""),
+            ),
+        )
         sample_texts = []
-        for node in nodes[:5]:
+        for node in ordered_nodes[:5]:
             text = str(node.get("text") or "").strip()
             if text:
                 sample_texts.append(text)

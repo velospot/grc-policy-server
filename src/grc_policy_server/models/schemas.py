@@ -25,7 +25,7 @@ class KeyDifference(BaseModel):
     section: str
     doc1Content: str | None
     doc2Content: str | None
-    impact: str
+    impact: Literal["Critical", "High", "Medium", "Low"]
     doc1Reference: DocumentReference | None
     doc2Reference: DocumentReference | None
 
@@ -35,6 +35,7 @@ class ActionItem(BaseModel):
     action: str
     timeline: str
     owner: str
+
 
 class SectionAccuracyMetrics(BaseModel):
     section: str
@@ -70,13 +71,20 @@ class CompareRequest(BaseModel):
     forceReExtract: bool = False
 
 
-class DiffChunk(BaseModel):
-    type: str
-    content: str
+class CompareV2JobCreateResponse(BaseModel):
+    jobId: str
+    status: Literal["queued", "finished"] = "queued"
+    cacheHit: bool = False
+    result: ComparisonResult | None = None
 
 
-class CompareResponse(BaseModel):
-    diffs: List[DiffChunk]
+class CompareV2JobStatusResponse(BaseModel):
+    jobId: str
+    status: Literal["queued", "running", "finished", "failed"]
+    done: bool
+    result: ComparisonResult | None = None
+    error: str | None = None
+    cacheHit: bool = False
 
 
 class HealthResponse(BaseModel):

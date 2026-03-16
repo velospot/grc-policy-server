@@ -199,15 +199,18 @@ class RealDiffEngine:
         )
 
         only_changed_diffs: List[KeyDifference] = []
+        for diff in diffs:
+            if diff.changeType in ("ADDED", "REMOVED"):
+                only_changed_diffs.append(diff)
+            elif (
+                diff.doc1Reference is not None
+                and diff.doc2Reference is not None
+                and normalize_whitespace(diff.doc1Reference.sourceText)
+                != normalize_whitespace(diff.doc2Reference.sourceText)
+            ):
+                only_changed_diffs.append(diff)
 
-        for index, diff in enumerate(diffs):
-            if diff.doc1Reference and diff.doc2Reference is not None:
-                if normalize_whitespace(
-                    diff.doc1Reference.sourceText
-                ) != normalize_whitespace(diff.doc2Reference.sourceText):
-                    only_changed_diffs.append(diff)
-
-        diffs = diffs[: self.max_diffs]
+        only_changed_diffs = only_changed_diffs[: self.max_diffs]
 
         summary = await self.llm.summarize_changes(
             doc1_name=doc1.name,
@@ -217,11 +220,22 @@ class RealDiffEngine:
         )
         accuracy_metrics = self._compute_accuracy_metrics(matching.matches)
 
+        try:
+            follow_up_questions = await self.llm.generate_followups(
+                doc1_name=doc1.name,
+                doc2_name=doc2.name,
+                key_differences=only_changed_diffs,
+                language=language,
+            )
+        except Exception:
+            logger.exception("failed to generate follow-up questions via LLM; using fallback")
+            follow_up_questions = self._follow_ups(only_changed_diffs)
+
         return ComparisonResult(
             summary=summary,
             keyDifferences=only_changed_diffs,
             actionPlan=self._action_plan(only_changed_diffs),
-            followUpQuestions=self._follow_ups(only_changed_diffs),
+            followUpQuestions=follow_up_questions,
             accuracyMetrics=accuracy_metrics,
         )
 
@@ -265,13 +279,19 @@ class RealDiffEngine:
         if not texts:
             return enriched
 
-        for index, meaning in zip(
-            indexes,
-            await self.llm.extract_policy_meanings(
+        try:
+            extracted = await self.llm.extract_policy_meanings(
                 texts=texts,
                 markdown_texts=markdown_texts,
                 language=language,
-            ),
+            )
+        except TypeError:
+            # Backward compatibility with older stubs/fakes in unit tests.
+            extracted = await self.llm.extract_policy_meanings(texts=texts)  # type: ignore[call-arg]
+
+        for index, meaning in zip(
+            indexes,
+            extracted,
             strict=False,
         ):
             for field, value in meaning.items():
@@ -281,8 +301,16 @@ class RealDiffEngine:
 
     async def _detect_document_language(self, nodes: list[dict]) -> str:
         """Detect language from first few chunks of text."""
+        ordered_nodes = sorted(
+            nodes,
+            key=lambda node: (
+                int(node.get("page_number") or node.get("page") or 0),
+                int(node.get("chunk_index") or node.get("ordinal") or 0),
+                str(node.get("chunk_id") or ""),
+            ),
+        )
         sample_texts = []
-        for node in nodes[:5]:
+        for node in ordered_nodes[:5]:
             text = str(node.get("text") or "").strip()
             if text:
                 sample_texts.append(text)
@@ -291,7 +319,14 @@ class RealDiffEngine:
         if not sample_texts:
             return ""
         sample = " ".join(sample_texts)[:500]
-        return await self.llm.detect_language(sample)
+        detect_language = getattr(self.llm, "detect_language", None)
+        if not callable(detect_language):
+            return ""
+        try:
+            return await detect_language(sample)
+        except Exception:
+            logger.exception("document language detection failed")
+            return ""
 
     def _node_meaning(self, node: dict) -> ClauseMeaning:
         obligation = str(node.get("obligation") or "")

@@ -177,8 +177,16 @@ class DocumentIngestionService:
 
     async def _detect_language_from_chunks(self, chunks: list[ParsedChunk]) -> str:
         """Detect language from first few chunks of text."""
+        ordered_chunks = sorted(
+            chunks,
+            key=lambda chunk: (
+                int(chunk.page_number or 0),
+                int(chunk.ordinal or 0),
+                str(chunk.title or ""),
+            ),
+        )
         sample_texts = []
-        for chunk in chunks[:5]:
+        for chunk in ordered_chunks[:5]:
             text = (chunk.text or "").strip()
             if text:
                 sample_texts.append(text)

@@ -171,6 +171,6 @@ def ingest_upload_v2(payload_files: list[dict[str, Any]]) -> dict[str, Any]:
         except Exception:
             logger.exception("failed to close Neo4j client in upload_v2 task")
         try:
-            llm.close()
+            llm.close()  # sync close — event loop is not running at this point
         except Exception:
             logger.exception("failed to close Ollama client in upload_v2 task")

@@ -5,6 +5,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from grc_policy_server.api.deps import (
+    get_compare_v2_dispatcher,
+    get_comparison_cache_store,
     get_diff_engine,
     get_diff_engine_stream,
     get_document_ingestion_service_factory,
@@ -73,7 +75,7 @@ class StubDocumentRepository:
 
 
 class StubDiffEngine:
-    async def compare(self, doc1, doc2) -> ComparisonResult:
+    async def compare(self, doc1, doc2, force_re_extract: bool = False) -> ComparisonResult:
         return ComparisonResult(
             summary=f"Compared {doc1.id} with {doc2.id}",
             keyDifferences=[
@@ -112,7 +114,7 @@ class StubDiffEngine:
 
 
 class StubDiffEngineStream:
-    async def compare_stream(self, doc1, doc2):
+    async def compare_stream(self, doc1, doc2, force_re_extract: bool = False):
         yield {"type": "progress", "stage": "load_chunks"}
         yield {
             "type": "diff",
@@ -145,6 +147,42 @@ class StubDiffEngineStream:
             ],
             "followUpQuestions": ["Is legal review required for the new SLA?"],
         }
+
+
+class StubCompareV2Dispatcher:
+    def __init__(
+        self,
+        *,
+        enqueue_job_id: str = "compare-job-1",
+        status_payload: dict | None = None,
+        enqueue_error: Exception | None = None,
+        status_error: Exception | None = None,
+    ):
+        self.enqueue_job_id = enqueue_job_id
+        self.status_payload = status_payload or {
+            "jobId": enqueue_job_id,
+            "status": "queued",
+            "done": False,
+            "result": None,
+            "error": None,
+            "cacheHit": False,
+        }
+        self.enqueue_error = enqueue_error
+        self.status_error = status_error
+        self.enqueue_calls = []
+        self.status_calls = []
+
+    def enqueue_compare(self, payload):
+        self.enqueue_calls.append(payload)
+        if self.enqueue_error is not None:
+            raise self.enqueue_error
+        return self.enqueue_job_id
+
+    def get_compare_status(self, *, job_id: str):
+        self.status_calls.append(job_id)
+        if self.status_error is not None:
+            raise self.status_error
+        return self.status_payload
 
 
 class StubDocumentIngestionService:
@@ -290,12 +328,15 @@ def test_request_lock_is_released_after_request():
 
 
 def test_request_lock_rejects_when_another_request_is_processing():
+    # POST requests are subject to the mutex; GET/HEAD are now exempt.
+    app.dependency_overrides[get_diff_engine] = lambda: StubDiffEngine()
     acquired = request_lock.acquire_nowait()
     assert acquired is True
     try:
-        response = client.get("/health")
+        response = client.post("/compare", json=compare_payload(), headers=auth_headers())
     finally:
         request_lock.release()
+        app.dependency_overrides.clear()
     assert response.status_code == 423
     assert response.json() == {"detail": "Another request is currently being processed"}
 
@@ -315,6 +356,9 @@ def test_openapi_includes_core_routes():
     assert "/documents/upload/v2/{job_id}" in paths
     assert "/compare" in paths
     assert "/compare/with-summary" in paths
+    assert "/v2/compare" in paths
+    assert "/v2/compare/response" in paths
+    assert "/v2/compare/response/{job_id}" in paths
 
     security_schemes = schema["components"]["securitySchemes"]
     assert any(
@@ -873,6 +917,146 @@ def test_compare_with_summary():
     payload = response.json()
     assert payload["summary"] == "Compared policy-v1 with policy-v2"
     assert payload["keyDifferences"][0]["changeType"] == "ADDED"
+
+
+def test_compare_v2_enqueue():
+    dispatcher = StubCompareV2Dispatcher(enqueue_job_id="compare-job-123")
+
+    class StubCacheStore:
+        def load_for_pair(self, *, doc1_id: str, doc2_id: str):
+            return None
+
+        def cached_job_id_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+            return f"cached-{doc1_id}-{doc2_id}"
+
+        def cache_key_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+            return f"{doc1_id}:{doc2_id}"
+
+    app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
+    app.dependency_overrides[get_comparison_cache_store] = lambda: StubCacheStore()
+
+    response = client.post("/v2/compare", json=compare_payload(), headers=auth_headers())
+    assert response.status_code == 202
+    assert response.json() == {
+        "jobId": "compare-job-123",
+        "status": "queued",
+        "cacheHit": False,
+        "result": None,
+    }
+    assert len(dispatcher.enqueue_calls) == 1
+    queued_payload = dispatcher.enqueue_calls[0]
+    assert queued_payload.doc1.id == "policy-v1"
+    assert queued_payload.doc2.id == "policy-v2"
+    assert queued_payload.cache_key == "policy-v1:policy-v2"
+
+
+def test_compare_v2_enqueue_returns_cached_result():
+    dispatcher = StubCompareV2Dispatcher(enqueue_job_id="compare-job-123")
+    cached_result = ComparisonResult(
+        summary="cached",
+        keyDifferences=[],
+        actionPlan=[],
+        followUpQuestions=[],
+    )
+
+    class StubCacheStore:
+        def load_for_pair(self, *, doc1_id: str, doc2_id: str):
+            return cached_result
+
+        def cached_job_id_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+            return f"cached-{doc1_id}-{doc2_id}"
+
+        def cache_key_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+            return f"{doc1_id}:{doc2_id}"
+
+    app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
+    app.dependency_overrides[get_comparison_cache_store] = lambda: StubCacheStore()
+
+    response = client.post("/v2/compare", json=compare_payload(), headers=auth_headers())
+    assert response.status_code == 202
+    assert response.json() == {
+        "jobId": "cached-policy-v1-policy-v2",
+        "status": "finished",
+        "cacheHit": True,
+        "result": {
+            "summary": "cached",
+            "keyDifferences": [],
+            "actionPlan": [],
+            "followUpQuestions": [],
+            "accuracyMetrics": None,
+        },
+    }
+    assert dispatcher.enqueue_calls == []
+
+
+def test_compare_v2_response_by_path_param():
+    dispatcher = StubCompareV2Dispatcher(
+        status_payload={
+            "jobId": "compare-job-456",
+            "status": "finished",
+            "done": True,
+            "result": {
+                "summary": "Compared policy-v1 with policy-v2",
+                "keyDifferences": [],
+                "actionPlan": [],
+                "followUpQuestions": [],
+                "accuracyMetrics": None,
+            },
+            "error": None,
+            "cacheHit": False,
+        }
+    )
+    app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
+
+    response = client.get(
+        "/v2/compare/response/compare-job-456",
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "jobId": "compare-job-456",
+        "status": "finished",
+        "done": True,
+        "result": {
+            "summary": "Compared policy-v1 with policy-v2",
+            "keyDifferences": [],
+            "actionPlan": [],
+            "followUpQuestions": [],
+            "accuracyMetrics": None,
+        },
+        "error": None,
+        "cacheHit": False,
+    }
+    assert dispatcher.status_calls == ["compare-job-456"]
+
+
+def test_compare_v2_response_by_query_param():
+    dispatcher = StubCompareV2Dispatcher(
+        status_payload={
+            "jobId": "compare-job-789",
+            "status": "queued",
+            "done": False,
+            "result": None,
+            "error": None,
+            "cacheHit": False,
+        }
+    )
+    app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
+
+    response = client.get(
+        "/v2/compare/response?jobid=compare-job-789",
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "jobId": "compare-job-789",
+        "status": "queued",
+        "done": False,
+        "result": None,
+        "error": None,
+        "cacheHit": False,
+    }
+    assert dispatcher.status_calls == ["compare-job-789"]
 
 
 def test_weaviate_dependency_closes_client(monkeypatch):
