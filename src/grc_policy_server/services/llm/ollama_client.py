@@ -1,6 +1,7 @@
 # src/grc_policy_server/services/llm/ollama_client.py
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ Constraints:
 - No numbering.
 
 Differences JSON:
-{json.dumps(diffs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+{diffs}
 
 Summary:
 """.strip()
@@ -78,7 +79,7 @@ Vorgaben:
 - Keine Nummerierung.
 
 Differences JSON:
-{json.dumps(diffs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+{diffs}
 
 Zusammenfassung:
 """.strip()
@@ -110,7 +111,7 @@ Contraintes :
 - Pas de numérotation.
 
 Differences JSON :
-{json.dumps(diffs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+{diffs}
 
 Résumé :
 """.strip()
@@ -127,7 +128,15 @@ class OllamaSettings:
     base_url: str = "http://localhost:11434"
     chat_model: str = "granite3.3:8b"
     embed_model: str = "qwen3-embedding"
-    timeout_sec: float = 180.0
+    connect_timeout_sec: float = 10.0
+    read_timeout_sec: float = 300.0
+    write_timeout_sec: float = 30.0
+    max_retries: int = 2
+
+    @property
+    def timeout_sec(self) -> float:
+        """Back-compat: largest of the configured timeouts."""
+        return self.read_timeout_sec
 
 
 class OllamaClient(BaseLLM):
@@ -146,7 +155,20 @@ class OllamaClient(BaseLLM):
         self._meaning_cache: dict[str, dict[str, str]] = {}
         self._async_client = httpx.AsyncClient(
             base_url=self.settings.base_url,
-            timeout=self.settings.timeout_sec,
+            timeout=httpx.Timeout(
+                connect=self.settings.connect_timeout_sec,
+                read=self.settings.read_timeout_sec,
+                write=self.settings.write_timeout_sec,
+                pool=self.settings.connect_timeout_sec,
+            ),
+        )
+        self._sync_client = httpx.Client(
+            timeout=httpx.Timeout(
+                connect=self.settings.connect_timeout_sec,
+                read=self.settings.read_timeout_sec,
+                write=self.settings.write_timeout_sec,
+                pool=self.settings.connect_timeout_sec,
+            ),
         )
 
     def embed(self, text: str) -> list[float]:
@@ -193,13 +215,18 @@ class OllamaClient(BaseLLM):
             )
             uncached.append((index, text, markdown))
 
-        for start in range(0, len(uncached), 8):
-            batch = uncached[start : start + 8]
-            batch_texts = [text for _, text, _ in batch]
-            batch_markdown = [markdown for _, _, markdown in batch]
-            extracted = await self._extract_policy_meanings_batch(
-                batch_texts, markdown_texts=batch_markdown, language=language
-            )
+        batches = [uncached[i : i + 8] for i in range(0, len(uncached), 8)]
+        batch_results = await asyncio.gather(
+            *[
+                self._extract_policy_meanings_batch(
+                    [text for _, text, _ in batch],
+                    markdown_texts=[markdown for _, _, markdown in batch],
+                    language=language,
+                )
+                for batch in batches
+            ]
+        )
+        for batch, extracted in zip(batches, batch_results, strict=False):
             for (index, text, _), meaning in zip(batch, extracted, strict=False):
                 payload = self._normalize_meaning_dict(meaning)
                 self._meaning_cache[text] = payload
@@ -346,16 +373,15 @@ class OllamaClient(BaseLLM):
 
     def close(self) -> None:
         """Sync best-effort close. Use aclose() in async contexts."""
-        import asyncio
-
+        self._sync_client.close()
         try:
-            loop = asyncio.get_event_loop()
-            if not loop.is_running():
-                loop.run_until_complete(self._async_client.aclose())
-        except Exception:
-            pass
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._async_client.aclose())
+        except RuntimeError:
+            asyncio.run(self._async_client.aclose())
 
     async def aclose(self) -> None:
+        self._sync_client.close()
         await self._async_client.aclose()
 
     def _language_hint(self, language: str) -> str:
@@ -375,25 +401,44 @@ class OllamaClient(BaseLLM):
 
     def _post_json_sync(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.settings.base_url}{path}"
-        with httpx.Client(timeout=self.settings_timeout) as client:
-            response = client.post(url, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            if not isinstance(data, dict):
-                raise RuntimeError(f"Ollama response is not JSON object: {data}")
-            return data
+        last_exc: Exception | None = None
+        for attempt in range(self.settings.max_retries + 1):
+            try:
+                response = self._sync_client.post(url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"Ollama response is not JSON object: {data}")
+                return data
+            except httpx.TimeoutException as exc:
+                last_exc = exc
+                logger.warning(
+                    "Ollama sync timeout on attempt %d/%d: %s",
+                    attempt + 1,
+                    self.settings.max_retries + 1,
+                    path,
+                )
+        raise RuntimeError(f"Ollama request timed out after {self.settings.max_retries + 1} attempts") from last_exc
 
     async def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        r = await self._async_client.post(path, json=payload)
-        r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, dict):
-            raise RuntimeError(f"Ollama response is not JSON object: {data}")
-        return data
-
-    @property
-    def settings_timeout(self) -> float:
-        return self.settings.timeout_sec
+        last_exc: Exception | None = None
+        for attempt in range(self.settings.max_retries + 1):
+            try:
+                r = await self._async_client.post(path, json=payload)
+                r.raise_for_status()
+                data = r.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"Ollama response is not JSON object: {data}")
+                return data
+            except httpx.TimeoutException as exc:
+                last_exc = exc
+                logger.warning(
+                    "Ollama async timeout on attempt %d/%d: %s",
+                    attempt + 1,
+                    self.settings.max_retries + 1,
+                    path,
+                )
+        raise RuntimeError(f"Ollama request timed out after {self.settings.max_retries + 1} attempts") from last_exc
 
     # -------------------------
     # Prompt builders

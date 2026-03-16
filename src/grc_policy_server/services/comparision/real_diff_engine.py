@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import (
@@ -50,7 +50,7 @@ def impact_from_distance(
     change_type: str,
     *,
     obligation_change: str = "unchanged",
-) -> str:
+) -> Literal["Critical", "High", "Medium", "Low"]:
     if change_type == "ADDED":
         return "High"
     if change_type == "REMOVED":
@@ -228,7 +228,9 @@ class RealDiffEngine:
                 language=language,
             )
         except Exception:
-            logger.exception("failed to generate follow-up questions via LLM; using fallback")
+            logger.exception(
+                "failed to generate follow-up questions via LLM; using fallback"
+            )
             follow_up_questions = self._follow_ups(only_changed_diffs)
 
         return ComparisonResult(

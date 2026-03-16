@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import AsyncIterator, Dict, List, Optional
+from typing import AsyncIterator, Dict, List, Literal, Optional
 
 from grc_policy_server.models.schemas import (
     ActionItem,
@@ -32,7 +32,7 @@ def impact_from(
     distance: Optional[float],
     *,
     obligation_change: str = "unchanged",
-) -> str:
+) -> Literal["Critical", "High", "Medium", "Low"]:
     if change_type in ("ADDED", "REMOVED"):
         return "High"
     if obligation_change == "weakened":

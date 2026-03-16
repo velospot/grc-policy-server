@@ -40,7 +40,7 @@ def _build_diff_engine() -> tuple[
             base_url=settings.ollama_url,
             chat_model=settings.ollama_chat_model,
             embed_model=settings.ollama_embed_model,
-            timeout_sec=settings.ollama_timeout_sec,
+            read_timeout_sec=settings.ollama_timeout_sec,
         )
     )
     engine = RealDiffEngine(

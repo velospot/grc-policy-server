@@ -54,7 +54,7 @@ class ComparisonAccuracyMetrics(BaseModel):
     total_matches: int
     overall_confidence: float
     confidence_breakdown: dict[str, int]
-    section_metrics: List[SectionAccuracyMetrics]     
+    section_metrics: List[SectionAccuracyMetrics]
 
 
 class ComparisonResult(BaseModel):
