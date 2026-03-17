@@ -34,6 +34,11 @@ Rules:
 - Write in English.
 - No introduction or conclusion.
 
+Be SPECIFIC about what changed:
+- Quote exact values when possible (old value → new value)
+- Name specific rows, columns, or cells that changed
+- Describe additions/removals precisely
+
 For each item, use this EXACT Markdown format:
 
 - **[ADDED|REMOVED|MODIFIED] <Section or topic>**
@@ -45,6 +50,7 @@ Constraints:
 - Do not merge unrelated changes.
 - If implications are not explicit, infer only direct operational impact (e.g., scope, timing, obligation).
 - No numbering.
+- Do NOT use vague descriptions like "table updated" or "content modified".
 
 Differences JSON:
 {diffs}
@@ -66,6 +72,12 @@ Regeln:
 - Schreiben Sie auf Deutsch.
 - Keine Einleitung und kein Schluss.
 
+Sei SPEZIFISCH, was sich geändert hat:
+
+- Nenne nach Möglichkeit exakte Werte (alter Wert → neuer Wert)
+- Benenne die konkreten Zeilen, Spalten oder Zellen, die sich geändert haben
+- Beschreibe Ergänzungen/Entfernungen präzise
+
 Für jeden Punkt verwenden Sie GENAU dieses Markdown-Format:
 
 - **[ADDED|REMOVED|MODIFIED] <Abschnitt oder Thema>**
@@ -77,6 +89,7 @@ Vorgaben:
 - Keine Zusammenlegung nicht zusammengehöriger Änderungen.
 - Falls Auswirkungen nicht ausdrücklich genannt sind, nur direkte operative Folgen ableiten (z. B. Umfang, Fristen, Verpflichtungen).
 - Keine Nummerierung.
+- Verwende KEINE vagen Beschreibungen wie „Tabelle aktualisiert“ oder „Inhalt geändert“.
 
 Differences JSON:
 {diffs}
@@ -98,6 +111,11 @@ Règles :
 - Écrire en français.
 - Pas d’introduction ni de conclusion.
 
+Soyez PRÉCIS sur ce qui a changé:
+- Indiquez les valeurs exactes lorsque possible (ancienne valeur → nouvelle valeur)
+- Nommez les lignes, colonnes ou cellules spécifiques qui ont été modifiées
+- Décrivez précisément les ajouts/suppressions
+
 Pour chaque élément, utiliser EXACTEMENT ce format Markdown :
 
 - **[ADDED|REMOVED|MODIFIED] <Section ou sujet>**
@@ -109,6 +127,7 @@ Contraintes :
 - Ne pas fusionner des modifications non liées.
 - Si les implications ne sont pas explicites, déduire uniquement l’impact opérationnel direct (ex. portée, délais, obligations).
 - Pas de numérotation.
+- N’utilisez PAS de descriptions vagues telles que « tableau mis à jour » ou « contenu modifié »
 
 Differences JSON :
 {diffs}
@@ -418,7 +437,9 @@ class OllamaClient(BaseLLM):
                     self.settings.max_retries + 1,
                     path,
                 )
-        raise RuntimeError(f"Ollama request timed out after {self.settings.max_retries + 1} attempts") from last_exc
+        raise RuntimeError(
+            f"Ollama request timed out after {self.settings.max_retries + 1} attempts"
+        ) from last_exc
 
     async def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         last_exc: Exception | None = None
@@ -438,7 +459,9 @@ class OllamaClient(BaseLLM):
                     self.settings.max_retries + 1,
                     path,
                 )
-        raise RuntimeError(f"Ollama request timed out after {self.settings.max_retries + 1} attempts") from last_exc
+        raise RuntimeError(
+            f"Ollama request timed out after {self.settings.max_retries + 1} attempts"
+        ) from last_exc
 
     # -------------------------
     # Prompt builders
@@ -484,7 +507,6 @@ One-line summary:
         canonical_diffs = json.dumps(
             diffs,
             ensure_ascii=False,
-            sort_keys=True,
             separators=(",", ":"),
         )
         return PROMPTS[lang_code].format(

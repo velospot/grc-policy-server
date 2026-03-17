@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Callable
 
-from grc_policy_server.utils.hashing import normalize_whitespace
-
 from grc_policy_server.services.comparision.policy_semantics import (
     ClauseMeaning,
     clean_policy_text,
@@ -15,15 +13,16 @@ from grc_policy_server.services.comparision.policy_semantics import (
     semantic_signature,
     token_overlap,
 )
+from grc_policy_server.utils.hashing import normalize_whitespace
 
 
 @dataclass(frozen=True)
 class MatchThresholds:
-    max_match_distance: float = 0.45
+    max_match_distance: float = 0.35
     unchanged_distance: float = 0.20
     modified_distance: float = 0.25
     min_section_score: float = 0.55
-    min_clause_score: float = 0.45
+    min_clause_score: float = 0.50
 
 
 @dataclass(frozen=True)
@@ -137,11 +136,16 @@ class ClauseMatcher:
         }
         grouped_items: dict[str, list[dict]] = defaultdict(list)
         for node in content_nodes:
-            grouped_items[str(node.get("section_path") or "Unknown Section")].append(node)
+            grouped_items[str(node.get("section_path") or "Unknown Section")].append(
+                node
+            )
 
         buckets: dict[str, _SectionBucket] = {}
         for order, section_path in enumerate(
-            sorted(grouped_items, key=lambda path: self._section_sort_key(grouped_items[path]))
+            sorted(
+                grouped_items,
+                key=lambda path: self._section_sort_key(grouped_items[path]),
+            )
         ):
             items = sorted(grouped_items[section_path], key=self._node_sort_key)
             section_node = section_nodes.get(section_path)
@@ -150,10 +154,14 @@ class ClauseMatcher:
                 or (section_node or {}).get("section_path")
                 or section_path
             )
-            title = str((section_node or {}).get("title") or section_path.split(" / ")[-1])
+            title = str(
+                (section_node or {}).get("title") or section_path.split(" / ")[-1]
+            )
             clean_text = str((section_node or {}).get("clean_text") or "").strip()
             if not clean_text:
-                clean_text = " ".join(self._node_clean_text(item) for item in items if item)
+                clean_text = " ".join(
+                    self._node_clean_text(item) for item in items if item
+                )
             buckets[section_path] = _SectionBucket(
                 key=section_path,
                 stable_id=stable_id,
@@ -173,8 +181,12 @@ class ClauseMatcher:
         matched_left: set[str] = set()
         matched_right: set[str] = set()
 
-        left_by_stable = Counter(section.stable_id for section in left_sections.values())
-        right_by_stable = Counter(section.stable_id for section in right_sections.values())
+        left_by_stable = Counter(
+            section.stable_id for section in left_sections.values()
+        )
+        right_by_stable = Counter(
+            section.stable_id for section in right_sections.values()
+        )
         unique_right = defaultdict(list)
         for key, section in right_sections.items():
             unique_right[section.stable_id].append(key)
@@ -220,7 +232,9 @@ class ClauseMatcher:
         matched_by: str,
     ) -> None:
         left_by_stable = Counter(
-            str(node.get("stable_id") or "") for node in left_items if node.get("stable_id")
+            str(node.get("stable_id") or "")
+            for node in left_items
+            if node.get("stable_id")
         )
         right_by_stable: dict[str, list[dict]] = defaultdict(list)
         for node in right_items:
@@ -233,7 +247,10 @@ class ClauseMatcher:
             stable_id = str(left_node.get("stable_id") or "")
             if not left_id or left_id in matched_left or not stable_id:
                 continue
-            if left_by_stable[stable_id] != 1 or len(right_by_stable.get(stable_id, [])) != 1:
+            if (
+                left_by_stable[stable_id] != 1
+                or len(right_by_stable.get(stable_id, [])) != 1
+            ):
                 continue
             right_node = right_by_stable[stable_id][0]
             right_id = str(right_node.get("chunk_id") or "")
@@ -259,7 +276,9 @@ class ClauseMatcher:
                     continue
                 score = self._clause_score(left_node, right_node)
                 if score >= self.thresholds.min_clause_score:
-                    candidate_edges.append((score, left_id, right_id, left_node, right_node))
+                    candidate_edges.append(
+                        (score, left_id, right_id, left_node, right_node)
+                    )
 
         candidate_edges.sort(key=lambda item: item[0], reverse=True)
         for score, left_id, right_id, left_node, right_node in candidate_edges:
@@ -275,6 +294,39 @@ class ClauseMatcher:
                 right=right_node,
             )
             matched_right_ids.add(right_id)
+
+        # When a section pair has a single unmatched item on each side, keep them aligned
+        # even if lexical distance is slightly above the global threshold.
+        unmatched_left = [
+            node
+            for node in left_items
+            if str(node.get("chunk_id") or "") not in matched_left
+        ]
+        unmatched_right = [
+            node
+            for node in right_items
+            if str(node.get("chunk_id") or "") not in matched_right_ids
+        ]
+        if len(unmatched_left) == 1 and len(unmatched_right) == 1:
+            left_node = unmatched_left[0]
+            right_node = unmatched_right[0]
+            left_id = str(left_node.get("chunk_id") or "")
+            right_id = str(right_node.get("chunk_id") or "")
+            if (
+                left_id
+                and right_id
+                and left_id not in matched_left
+                and right_id not in matched_right_ids
+                and left_node.get("node_type") == right_node.get("node_type")
+            ):
+                score = self._clause_score(left_node, right_node)
+                matched_left[left_id] = ClauseMatch(
+                    distance=1.0 - score,
+                    matched_by=matched_by,
+                    left=left_node,
+                    right=right_node,
+                )
+                matched_right_ids.add(right_id)
 
     def _vector_fallback(
         self,
@@ -322,7 +374,9 @@ class ClauseMatcher:
                 score = self._clause_score(left_node, right_node)
                 if score < self.thresholds.min_clause_score:
                     continue
-                candidate_edges.append((score, left_id, right_id, left_node, right_node))
+                candidate_edges.append(
+                    (score, left_id, right_id, left_node, right_node)
+                )
 
         candidate_edges.sort(key=lambda item: item[0], reverse=True)
         for score, left_id, right_id, left_node, right_node in candidate_edges:
@@ -375,11 +429,13 @@ class ClauseMatcher:
             self.language,
         )
 
+        # Weight text-based scores higher for robustness with numerical changes
+        # Text similarity is deterministic; semantic extraction can vary
         score = (
-            0.25 * text_score
-            + 0.15 * lexical_score
+            0.35 * text_score
+            + 0.20 * lexical_score
             + 0.05 * length_score
-            + 0.40 * meaning_score
+            + 0.25 * meaning_score
             + 0.15 * signature_score
         )
         if left.get("node_type") != right.get("node_type"):
@@ -422,7 +478,8 @@ class ClauseMatcher:
             cell_score = dim_score
         else:
             exact_matches = sum(
-                1 for pos in all_positions
+                1
+                for pos in all_positions
                 if left_cell_map.get(pos) == right_cell_map.get(pos)
                 and left_cell_map.get(pos)  # Non-empty match
             )
@@ -447,8 +504,18 @@ class ClauseMatcher:
     def _table_text_score(self, left: dict, right: dict) -> float:
         """Compute text-based similarity for tables (fallback when no structure)."""
         # Prefer markdown_text for tables as it preserves structure
-        left_text = str(left.get("markdown_text") or left.get("clean_text") or left.get("text") or "")
-        right_text = str(right.get("markdown_text") or right.get("clean_text") or right.get("text") or "")
+        left_text = str(
+            left.get("markdown_text")
+            or left.get("clean_text")
+            or left.get("text")
+            or ""
+        )
+        right_text = str(
+            right.get("markdown_text")
+            or right.get("clean_text")
+            or right.get("text")
+            or ""
+        )
 
         if not left_text and not right_text:
             return 1.0
@@ -457,9 +524,7 @@ class ClauseMatcher:
 
         # Use SequenceMatcher for overall structure similarity
         text_ratio = SequenceMatcher(
-            None,
-            normalize_whitespace(left_text),
-            normalize_whitespace(right_text)
+            None, normalize_whitespace(left_text), normalize_whitespace(right_text)
         ).ratio()
 
         # Token overlap for content similarity
@@ -474,7 +539,10 @@ class ClauseMatcher:
             self.language,
         )
         score = comparison.score
-        if comparison.obligation_change in {"strengthened", "weakened"} and score >= 0.35:
+        if (
+            comparison.obligation_change in {"strengthened", "weakened"}
+            and score >= 0.35
+        ):
             return min(score + 0.15, 1.0)
         return score
 
@@ -490,8 +558,7 @@ class ClauseMatcher:
 
     def _semantic_signature_from_node(self, node: dict) -> str:
         if any(
-            node.get(field)
-            for field in ("subject", "action", "object", "condition")
+            node.get(field) for field in ("subject", "action", "object", "condition")
         ):
             return " | ".join(
                 str(node.get(field) or "")
@@ -501,7 +568,9 @@ class ClauseMatcher:
         return semantic_signature(str(node.get("text") or ""))
 
     def _node_clean_text(self, node: dict) -> str:
-        return str(node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))).strip()
+        return str(
+            node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))
+        ).strip()
 
     def _length_similarity(self, left: str, right: str) -> float:
         longest = max(len(left), len(right))

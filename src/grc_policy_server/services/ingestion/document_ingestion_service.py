@@ -2,22 +2,23 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import replace
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from grc_policy_server.core.config import settings
+from grc_policy_server.services.comparision.policy_semantics import meaning_to_metadata
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
 from grc_policy_server.services.ingestion.docling_chunker import (
     chunk_document,
     parse_docling_chunks,
 )
-from grc_policy_server.services.comparision.policy_semantics import meaning_to_metadata
-from grc_policy_server.services.ingestion.hierarchy_builder import build_document_hierarchy
+from grc_policy_server.services.ingestion.hierarchy_builder import (
+    build_document_hierarchy,
+)
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 from grc_policy_server.services.ingestion.ocr_fallback import build_ocr_fallback_chunks
 from grc_policy_server.services.ingestion.policy_preprocessor import (
@@ -76,7 +77,8 @@ class DocumentIngestionService:
         content_hash = sha256_hex(content)
 
         raw_chunks = chunk_document(dl_doc, merge_list_items=True)
-        parsed_chunks = parse_docling_chunks(dl_doc, raw_chunks)
+        # Pass doc_json (dict) instead of dl_doc for better table extraction
+        parsed_chunks = parse_docling_chunks(doc_json, raw_chunks)
         parsed_chunks, ocr_metadata = self._apply_ocr_fallback(
             filename=filename,
             content=content,
@@ -163,7 +165,9 @@ class DocumentIngestionService:
         # Detect language from first chunks for better LLM accuracy
         language = await self._detect_language_from_chunks(parsed_chunks)
 
-        extracted = await self.llm.extract_policy_meanings(texts=clause_texts, language=language)
+        extracted = await self.llm.extract_policy_meanings(
+            texts=clause_texts, language=language
+        )
         enriched = list(parsed_chunks)
         for chunk_index, meaning in zip(clause_indexes, extracted, strict=False):
             chunk = enriched[chunk_index]
@@ -177,16 +181,8 @@ class DocumentIngestionService:
 
     async def _detect_language_from_chunks(self, chunks: list[ParsedChunk]) -> str:
         """Detect language from first few chunks of text."""
-        ordered_chunks = sorted(
-            chunks,
-            key=lambda chunk: (
-                int(chunk.page_number or 0),
-                int(chunk.ordinal or 0),
-                str(chunk.title or ""),
-            ),
-        )
         sample_texts = []
-        for chunk in ordered_chunks[:5]:
+        for chunk in chunks[:5]:
             text = (chunk.text or "").strip()
             if text:
                 sample_texts.append(text)
@@ -206,7 +202,11 @@ class DocumentIngestionService:
         parsed_chunks: list[ParsedChunk],
     ) -> tuple[list[ParsedChunk], dict[str, Any]]:
         if not settings.ocr_fallback_enabled:
-            return parsed_chunks, {"enabled": False, "used": False, "reason": "disabled"}
+            return parsed_chunks, {
+                "enabled": False,
+                "used": False,
+                "reason": "disabled",
+            }
 
         ocr_chunks, ocr_metadata, ocr_pages = build_ocr_fallback_chunks(
             filename=filename,

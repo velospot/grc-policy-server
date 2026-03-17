@@ -5,6 +5,7 @@ from typing import AsyncIterator, Dict, List, Literal, Optional
 
 from grc_policy_server.models.schemas import (
     ActionItem,
+    ChangeDetail,
     ComparisonAccuracyMetrics,
     Document,
     DocumentReference,
@@ -32,13 +33,22 @@ def impact_from(
     distance: Optional[float],
     *,
     obligation_change: str = "unchanged",
-) -> Literal["Critical", "High", "Medium", "Low"]:
-    if change_type in ("ADDED", "REMOVED"):
+    node_type: str = "clause",
+) -> str:
+    if change_type == "ADDED":
+        return "High"
+    if change_type == "REMOVED":
         return "High"
     if obligation_change == "weakened":
         return "Critical"
     if obligation_change == "strengthened":
         return "High"
+    # For tables, "modified" means structural/content changes detected
+    if obligation_change == "modified" and node_type == "table":
+        # Tables with detected changes should be at least Medium impact
+        if distance is not None and distance > 0.15:
+            return "High"
+        return "Medium"
     if distance is None:
         return "High"
     if distance > 0.45:
@@ -159,49 +169,111 @@ class RealDiffEngineStream:
     ) -> KeyDifference:
         left_ref = self._citation_from_neo4j_or_fallback(left.get("chunk_id"), left)
         right_ref = self._citation_from_neo4j_or_fallback(right.get("chunk_id"), right)
+
+        # Use better formatting for tables
+        node_type = left.get("node_type") or right.get("node_type") or "clause"
+        if node_type == "table":
+            doc1_content = self._format_table_content(left)
+            doc2_content = self._format_table_content(right)
+        else:
+            doc1_content = self._short(str(left.get("text") or ""))
+            doc2_content = self._short(str(right.get("text") or ""))
+
         return KeyDifference(
             changeType="MODIFIED",
             section=(
-                left_ref.section if left_ref else (left.get("section_path") or "Unknown Section")
+                left_ref.section
+                if left_ref
+                else (left.get("section_path") or "Unknown Section")
             ),
-            doc1Content=self._short(str(left.get("text") or "")),
-            doc2Content=self._short(str(right.get("text") or "")),
+            doc1Content=doc1_content,
+            doc2Content=doc2_content,
             impact=impact_from(
                 "MODIFIED",
                 dist,
                 obligation_change=obligation_change,
+                node_type=node_type,
             ),
             doc1Reference=left_ref,
             doc2Reference=right_ref,
+            nodeType=node_type,
+            changes=self._extract_changes(left, right, node_type),
         )
 
     async def _make_removed(self, left: dict) -> KeyDifference:
         left_ref = self._citation_from_neo4j_or_fallback(left.get("chunk_id"), left)
+        node_type = left.get("node_type") or "clause"
+
+        if node_type == "table":
+            doc1_content = self._format_table_content(left)
+        else:
+            doc1_content = self._short(str(left.get("text") or ""))
+
         return KeyDifference(
             changeType="REMOVED",
             section=(
-                left_ref.section if left_ref else (left.get("section_path") or "Unknown Section")
+                left_ref.section
+                if left_ref
+                else (left.get("section_path") or "Unknown Section")
             ),
-            doc1Content=self._short(str(left.get("text") or "")),
+            doc1Content=doc1_content,
             doc2Content=None,
             impact=impact_from("REMOVED", None),
             doc1Reference=left_ref,
             doc2Reference=None,
+            nodeType=node_type,
+            changes=[
+                ChangeDetail(type="removed", text=str(left.get("text") or doc1_content))
+            ],
         )
 
     async def _make_added(self, right: dict) -> KeyDifference:
         right_ref = self._citation_from_neo4j_or_fallback(right.get("chunk_id"), right)
+        node_type = right.get("node_type") or "clause"
+
+        if node_type == "table":
+            doc2_content = self._format_table_content(right)
+        else:
+            doc2_content = self._short(str(right.get("text") or ""))
+
         return KeyDifference(
             changeType="ADDED",
             section=(
-                right_ref.section if right_ref else (right.get("section_path") or "Unknown Section")
+                right_ref.section
+                if right_ref
+                else (right.get("section_path") or "Unknown Section")
             ),
             doc1Content=None,
-            doc2Content=self._short(str(right.get("text") or "")),
+            doc2Content=doc2_content,
             impact=impact_from("ADDED", None),
             doc1Reference=None,
             doc2Reference=right_ref,
+            nodeType=node_type,
+            changes=[
+                ChangeDetail(type="added", text=str(right.get("text") or doc2_content))
+            ],
         )
+
+    def _format_table_content(self, node: dict) -> str:
+        """Format table content for display in diffs."""
+        title = node.get("title") or ""
+        num_rows = node.get("table_num_rows", 0)
+        num_cols = node.get("table_num_cols", 0)
+
+        if num_rows and num_cols:
+            table_desc = f"Table ({num_rows} rows × {num_cols} cols)"
+            if title:
+                table_desc = f"{title}: {table_desc}"
+            return table_desc
+
+        # Fallback to markdown or text
+        markdown = node.get("markdown_text") or ""
+        if markdown:
+            # Return first few lines of markdown table
+            lines = markdown.strip().split("\n")[:4]
+            return "\n".join(lines) + ("..." if len(markdown.split("\n")) > 4 else "")
+
+        return self._short(str(node.get("text") or ""), n=120)
 
     def _citation_from_neo4j_or_fallback(
         self, chunk_id: Optional[str], fallback: dict
@@ -220,15 +292,47 @@ class RealDiffEngineStream:
         )
 
     def _meaning_change(self, left: dict, right: dict, language: str = "") -> str:
-        # Tables don't have clause semantics (obligation/subject/action)
+        # For tables, compare structural differences instead of semantics
         if left.get("node_type") == "table" or right.get("node_type") == "table":
-            return "unchanged"  # Tables are compared structurally, not semantically
+            return self._table_meaning_change(left, right)
 
         return compare_clause_meaning(
             self._node_meaning(left),
             self._node_meaning(right),
             language,
         ).obligation_change
+
+    def _table_meaning_change(self, left: dict, right: dict) -> str:
+        """Detect structural/content differences in tables."""
+        left_rows = left.get("table_num_rows", 0)
+        left_cols = left.get("table_num_cols", 0)
+        right_rows = right.get("table_num_rows", 0)
+        right_cols = right.get("table_num_cols", 0)
+
+        # Dimension change = structural modification
+        if left_rows != right_rows or left_cols != right_cols:
+            return "modified"
+
+        # Check cell content differences
+        left_cells = left.get("table_cells") or []
+        right_cells = right.get("table_cells") or []
+
+        left_cell_map = {
+            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).strip().lower()
+            for c in left_cells
+        }
+        right_cell_map = {
+            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).strip().lower()
+            for c in right_cells
+        }
+
+        # Any cell content difference = modified
+        all_positions = set(left_cell_map.keys()) | set(right_cell_map.keys())
+        for pos in all_positions:
+            if left_cell_map.get(pos) != right_cell_map.get(pos):
+                return "modified"
+
+        return "unchanged"
 
     async def _enrich_nodes_with_semantics(
         self,
@@ -248,7 +352,8 @@ class RealDiffEngineStream:
                 continue
             # Skip if already has semantics, unless force_re_extract is True
             if not force_re_extract and any(
-                node.get(field) for field in ("obligation", "subject", "action", "object", "condition")
+                node.get(field)
+                for field in ("obligation", "subject", "action", "object", "condition")
             ):
                 continue
             text = str(node.get("text") or "").strip()
@@ -278,16 +383,8 @@ class RealDiffEngineStream:
 
     async def _detect_document_language(self, nodes: list[dict]) -> str:
         """Detect language from first few chunks of text."""
-        ordered_nodes = sorted(
-            nodes,
-            key=lambda node: (
-                int(node.get("page_number") or node.get("page") or 0),
-                int(node.get("chunk_index") or node.get("ordinal") or 0),
-                str(node.get("chunk_id") or ""),
-            ),
-        )
         sample_texts = []
-        for node in ordered_nodes[:5]:
+        for node in nodes[:5]:
             text = str(node.get("text") or "").strip()
             if text:
                 sample_texts.append(text)
@@ -360,7 +457,9 @@ class RealDiffEngineStream:
             med = sum(
                 1
                 for d in distances
-                if self.thresholds.unchanged_distance < d <= self.thresholds.max_match_distance
+                if self.thresholds.unchanged_distance
+                < d
+                <= self.thresholds.max_match_distance
             )
             low = count - high - med
             confidence = (high * 1.0 + med * 0.7 + low * 0.3) / count
@@ -411,8 +510,11 @@ class RealDiffEngineStream:
 
         high_conf = sum(1 for d in distances if d <= self.thresholds.unchanged_distance)
         medium_conf = sum(
-            1 for d in distances
-            if self.thresholds.unchanged_distance < d <= self.thresholds.max_match_distance
+            1
+            for d in distances
+            if self.thresholds.unchanged_distance
+            < d
+            <= self.thresholds.max_match_distance
         )
         low_conf = sum(1 for d in distances if d > self.thresholds.max_match_distance)
 
@@ -435,3 +537,129 @@ class RealDiffEngineStream:
             confidence_breakdown=breakdown,
             section_metrics=self._section_accuracy_metrics(matches),
         )
+
+    def _extract_changes(
+        self, left: dict, right: dict, node_type: str
+    ) -> List[ChangeDetail]:
+        """Extract specific changes between two nodes for UI highlighting."""
+        if node_type == "table":
+            return self._extract_table_changes(left, right)
+        return self._extract_text_changes(left, right)
+
+    def _extract_text_changes(self, left: dict, right: dict) -> List[ChangeDetail]:
+        """Extract line-level changes between two text chunks."""
+        changes: List[ChangeDetail] = []
+        left_text = str(left.get("text") or "")
+        right_text = str(right.get("text") or "")
+
+        # Split into lines/items (handle bullet points)
+        left_lines = [
+            l.strip() for l in left_text.replace(" - ", "\n- ").split("\n") if l.strip()
+        ]
+        right_lines = [
+            r.strip()
+            for r in right_text.replace(" - ", "\n- ").split("\n")
+            if r.strip()
+        ]
+
+        left_set = set(left_lines)
+        right_set = set(right_lines)
+
+        # Find removed/modified lines
+        for line in left_lines:
+            if line not in right_set:
+                # Check if it was modified
+                match = self._find_similar_line(line, right_lines)
+                if match:
+                    changes.append(
+                        ChangeDetail(
+                            type="modified", text=line, oldValue=line, newValue=match
+                        )
+                    )
+                else:
+                    changes.append(ChangeDetail(type="removed", text=line))
+
+        # Find added lines
+        modified_new = {c.newValue for c in changes if c.type == "modified"}
+        for line in right_lines:
+            if line not in left_set and line not in modified_new:
+                changes.append(ChangeDetail(type="added", text=line))
+
+        return changes
+
+    def _find_similar_line(self, line: str, candidates: list[str]) -> str | None:
+        """Find a similar line in candidates."""
+        from difflib import SequenceMatcher
+
+        for candidate in candidates:
+            if SequenceMatcher(None, line.lower(), candidate.lower()).ratio() > 0.6:
+                return candidate
+        return None
+
+    def _extract_table_changes(self, left: dict, right: dict) -> List[ChangeDetail]:
+        """Extract cell-level changes between two tables."""
+        changes: List[ChangeDetail] = []
+
+        left_rows = left.get("table_num_rows", 0)
+        right_rows = right.get("table_num_rows", 0)
+
+        # Dimension changes
+        if left_rows != right_rows:
+            if right_rows > left_rows:
+                changes.append(
+                    ChangeDetail(
+                        type="added",
+                        text=f"{right_rows - left_rows} row(s) added",
+                        location=f"Rows {left_rows + 1}-{right_rows}",
+                    )
+                )
+            else:
+                changes.append(
+                    ChangeDetail(
+                        type="removed",
+                        text=f"{left_rows - right_rows} row(s) removed",
+                    )
+                )
+
+        # Cell-level changes
+        left_cells = left.get("table_cells") or []
+        right_cells = right.get("table_cells") or []
+
+        left_cell_map = {
+            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).strip()
+            for c in left_cells
+        }
+        right_cell_map = {
+            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).strip()
+            for c in right_cells
+        }
+
+        # Modified cells
+        for pos, left_val in left_cell_map.items():
+            right_val = right_cell_map.get(pos)
+            if right_val is not None and left_val != right_val:
+                row, col = pos
+                changes.append(
+                    ChangeDetail(
+                        type="modified",
+                        text="Cell changed",
+                        oldValue=left_val,
+                        newValue=right_val,
+                        location=f"Row {row + 1}, Col {col + 1}",
+                    )
+                )
+
+        # New cells in added rows
+        for pos, right_val in right_cell_map.items():
+            if pos not in left_cell_map and right_val:
+                row, col = pos
+                if row >= left_rows:
+                    changes.append(
+                        ChangeDetail(
+                            type="added",
+                            text=right_val,
+                            location=f"Row {row + 1}, Col {col + 1}",
+                        )
+                    )
+
+        return changes
