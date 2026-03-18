@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from typing import List, Literal, Optional
+from typing import List, Optional
 
 from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import (
@@ -19,6 +20,12 @@ from grc_policy_server.services.comparision.clause_matcher import (
     ClauseMatcher,
     MatchThresholds,
 )
+from grc_policy_server.services.comparision.diff_postprocessor import (
+    build_section_alignment_maps,
+    # filter_key_differences,
+    # find_unchanged_section_pairs,
+    random_diff_subset,
+)
 from grc_policy_server.services.comparision.policy_semantics import (
     ClauseMeaning,
     clean_policy_text,
@@ -28,22 +35,8 @@ from grc_policy_server.services.comparision.policy_semantics import (
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
-from grc_policy_server.utils.hashing import normalize_for_comparison
 
 logger = logging.getLogger(__name__)
-
-
-def build_markdown_lookup(nodes: list[dict]) -> dict[str, str]:
-    """Build chunk_id -> markdown_text lookup from fetched nodes.
-
-    This hashmap is built at runtime from Weaviate data and used
-    for LLM prompts where markdown formatting improves accuracy.
-    """
-    return {
-        str(node.get("chunk_id") or ""): str(node.get("markdown_text") or "")
-        for node in nodes
-        if node.get("chunk_id") and node.get("markdown_text")
-    }
 
 
 def impact_from_distance(
@@ -96,15 +89,6 @@ class RealDiffEngine:
         left_nodes = self.weaviate.fetch_chunks_by_document(doc1.id)
         right_nodes = self.weaviate.fetch_chunks_by_document(doc2.id)
 
-        # Build markdown lookup for LLM prompts (runtime hashmap)
-        left_markdown = build_markdown_lookup(left_nodes)
-        right_markdown = build_markdown_lookup(right_nodes)
-        logger.info(
-            "markdown lookup built: left=%d right=%d",
-            len(left_markdown),
-            len(right_markdown),
-        )
-
         # Detect language from first document's text for better LLM accuracy
         language = await self._detect_document_language(left_nodes)
         logger.info("detected document language=%s", language or "unknown")
@@ -130,6 +114,14 @@ class RealDiffEngine:
             right_nodes=right_nodes,
             target_document_id=doc2.id,
         )
+        left_to_right, right_to_left = build_section_alignment_maps(
+            matching.section_matches
+        )
+        # unchanged_section_pairs = find_unchanged_section_pairs(
+        #     section_matches=matching.section_matches,
+        #     left_nodes=left_nodes,
+        #     right_nodes=right_nodes,
+        # )
 
         diffs: List[KeyDifference] = []
 
@@ -252,43 +244,37 @@ class RealDiffEngine:
             )
         )
 
-        only_changed_diffs: List[KeyDifference] = []
+        # only_changed_diffs = filter_key_differences(
+        #     diffs,
+        #     unchanged_section_pairs=unchanged_section_pairs,
+        #     left_to_right=left_to_right,
+        #     right_to_left=right_to_left,
+        # )
 
-        for diff in diffs:
-            # Always include ADDED and REMOVED items
-            if diff.changeType in ("ADDED", "REMOVED"):
-                only_changed_diffs.append(diff)
-            # For MODIFIED items, only include if content actually changed
-            elif diff.doc1Reference and diff.doc2Reference is not None:
-                # Normalize to ignore cosmetic differences (whitespace, case, number-unit spacing, etc.)
-                left_normalized = normalize_for_comparison(
-                    diff.doc1Reference.sourceText or ""
-                )
-                right_normalized = normalize_for_comparison(
-                    diff.doc2Reference.sourceText or ""
-                )
-                if left_normalized != right_normalized:
-                    only_changed_diffs.append(diff)
-
-        diffs = diffs[: self.max_diffs]
-
-        summary = await self.llm.summarize_changes(
+        summary = await self._two_step_summary(
             doc1_name=doc1.name,
             doc2_name=doc2.name,
-            key_differences=only_changed_diffs,
+            key_differences=diffs,
             language=language,
         )
         accuracy_metrics = self._compute_accuracy_metrics(matching.matches)
 
         return ComparisonResult(
             summary=summary,
-            keyDifferences=only_changed_diffs,
-            actionPlan=self._action_plan(only_changed_diffs),
-            followUpQuestions=self._follow_ups(only_changed_diffs),
+            keyDifferences=diffs,
+            actionPlan=self._action_plan(diffs),
+            followUpQuestions=await self._follow_ups(
+                doc1_name=doc1.name,
+                doc2_name=doc2.name,
+                diffs=diffs,
+                language=language,
+            ),
             accuracyMetrics=accuracy_metrics,
         )
 
     def _meaning_change(self, left: dict, right: dict, language: str = "") -> str:
+        if left.get("node_type") == "table" or right.get("node_type") == "table":
+            return self._table_meaning_change(left, right)
         return compare_clause_meaning(
             self._node_meaning(left),
             self._node_meaning(right),
@@ -429,17 +415,29 @@ class RealDiffEngine:
         if chunk_id and self.neo4j is not None:
             citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
             if citation:
+                source_text = self._reference_source_text(chunk) or str(
+                    citation.get("sourceText") or ""
+                )
+                citation["sourceText"] = source_text
                 return DocumentReference(**citation)
         page = chunk.get("page_number")
         if page is None:
             page = chunk.get("page")
+        source_text = self._reference_source_text(chunk)
         return DocumentReference(
             section=str(chunk.get("section_path") or "Unknown Section"),
             page=int(page or 0),
             lineStart=chunk.get("line_start"),
             lineEnd=chunk.get("line_end"),
-            sourceText=str(chunk.get("text") or ""),
+            sourceText=source_text,
         )
+
+    def _reference_source_text(self, chunk: dict) -> str:
+        if chunk.get("node_type") == "table":
+            markdown = str(chunk.get("markdown_text") or "").strip()
+            if markdown:
+                return markdown
+        return str(chunk.get("text") or "")
 
     def _short(self, text: str, n: int = 90) -> str:
         t = " ".join((text or "").split())
@@ -459,18 +457,119 @@ class RealDiffEngine:
                 )
         return actions[:5]
 
-    def _follow_ups(self, diffs: List[KeyDifference]) -> List[str]:
-        questions = []
-        for diff in diffs[:6]:
-            questions.append(
-                f"What controls/evidence need updates due to {diff.changeType.lower()} changes in {diff.section}?"
-            )
-        if not questions:
-            questions = [
+    async def _follow_ups(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        diffs: List[KeyDifference],
+        language: str,
+    ) -> List[str]:
+        sampled_diffs = random_diff_subset(diffs, max_items=10)
+        if not sampled_diffs:
+            return [
                 "Are there any material compliance requirement changes between these versions?",
                 "Which sections require immediate policy updates?",
             ]
-        return questions
+
+        try:
+            questions = await self.llm.generate_followups(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                key_differences=sampled_diffs,
+                max_questions=4,
+                language=language,
+            )
+            questions = [question.strip() for question in questions if question.strip()]
+            if questions:
+                return questions[:4]
+        except Exception:
+            logger.exception("failed to generate LLM follow-up questions")
+
+        return [
+            f"What controls or evidence must be updated for {diff.section}?"
+            for diff in sampled_diffs[:4]
+        ]
+
+    async def _two_step_summary(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        key_differences: List[KeyDifference],
+        language: str,
+    ) -> str:
+        if not key_differences:
+            return "No material differences were detected."
+
+        explanations = await self._explain_differences(
+            key_differences, language=language
+        )
+
+        summarize_explanations = getattr(self.llm, "summarize_explanations", None)
+        if callable(summarize_explanations):
+            try:
+                return await self.llm.summarize_explanations(
+                    doc1_name=doc1_name,
+                    doc2_name=doc2_name,
+                    explanations=explanations,
+                    language=language,
+                )
+            except Exception:
+                logger.exception("failed two-step summary aggregation, falling back")
+
+        return await self.llm.summarize_changes(
+            doc1_name=doc1_name,
+            doc2_name=doc2_name,
+            key_differences=key_differences,
+            language=language,
+        )
+
+    async def _explain_differences(
+        self,
+        key_differences: List[KeyDifference],
+        *,
+        language: str,
+    ) -> list[dict[str, str]]:
+        capped = key_differences[: self.max_diffs]
+        tasks = [
+            self.llm.summarize_diff(
+                old_text=self._diff_text(diff.doc1Reference, diff.doc1Content),
+                new_text=self._diff_text(diff.doc2Reference, diff.doc2Content),
+                section=diff.section,
+                language=language,
+            )
+            for diff in capped
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        explanations: list[dict[str, str]] = []
+        for diff, result in zip(capped, results, strict=False):
+            if isinstance(result, Exception):
+                explanation = (
+                    f"{diff.changeType} change in {diff.section}: "
+                    "content changed based on canonical comparison."
+                )
+            else:
+                explanation = str(result or "").strip()
+            explanations.append(
+                {
+                    "changeType": diff.changeType,
+                    "section": diff.section,
+                    "nodeType": diff.nodeType,
+                    "explanation": explanation,
+                }
+            )
+        return explanations
+
+    def _diff_text(
+        self,
+        reference: DocumentReference | None,
+        fallback: str | None,
+    ) -> str:
+        if reference and reference.sourceText:
+            return reference.sourceText
+        return str(fallback or "")
 
     def _section_accuracy_metrics(
         self, matches: list[ClauseMatch]
@@ -588,7 +687,9 @@ class RealDiffEngine:
 
         # Split into lines/items (handle bullet points)
         left_lines = [
-            l.strip() for l in left_text.replace(" - ", "\n- ").split("\n") if l.strip()
+            line.strip()
+            for line in left_text.replace(" - ", "\n- ").split("\n")
+            if line.strip()
         ]
         right_lines = [
             r.strip()
@@ -691,7 +792,7 @@ class RealDiffEngine:
                 changes.append(
                     ChangeDetail(
                         type="modified",
-                        text=f"Cell changed",
+                        text="Cell changed",
                         oldValue=left_val,
                         newValue=right_val,
                         location=f"Row {row + 1}, Col {col + 1}",

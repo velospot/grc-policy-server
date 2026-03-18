@@ -60,19 +60,38 @@ def _to_hybrid_search_chunks(chunks: list[dict[str, Any]]) -> list[HybridSearchC
         elif isinstance(chunk_index_raw, float):
             chunk_index = int(chunk_index_raw)
 
-        score_raw = chunk.get("_distance")
+        distance_raw = chunk.get("_distance")
+        distance: float | None = None
+        if isinstance(distance_raw, (int, float)):
+            distance = float(distance_raw)
+
+        score_raw = chunk.get("_score")
         score: float | None = None
         if isinstance(score_raw, (int, float)):
             score = float(score_raw)
+        elif distance is not None:
+            # Backward compatibility for existing clients using `score`.
+            score = distance
+
+        canonical_text = str(chunk.get("canonical_text") or "").strip() or None
+        markdown = str(chunk.get("markdown_text") or "").strip() or None
+        node_type = str(chunk.get("node_type") or "").strip() or None
+        table_markdown = markdown if node_type == "table" else None
 
         out.append(
             HybridSearchChunk(
                 chunkId=str(chunk.get("chunk_id") or ""),
                 documentId=str(chunk.get("document_id") or ""),
                 sectionPath=str(chunk.get("section_path") or ""),
-                text=str(chunk.get("text") or ""),
+                text=canonical_text or str(chunk.get("text") or ""),
+                nodeType=node_type,
+                canonicalText=canonical_text,
+                markdown=markdown,
+                tableMarkdown=table_markdown,
                 chunkIndex=chunk_index,
                 score=score,
+                distance=distance,
+                scores={"score": score, "distance": distance},
             )
         )
     return out

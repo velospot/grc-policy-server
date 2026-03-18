@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Callable
 
@@ -38,6 +38,7 @@ class ClauseMatchingResult:
     matches: list[ClauseMatch]
     removed: list[dict]
     added: list[dict]
+    section_matches: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,7 @@ class ClauseMatcher:
             matches=list(matched_left.values()),
             removed=removed,
             added=added,
+            section_matches=[(left, right) for left, right, _ in matched_section_keys],
         )
 
     def _select_content_nodes(self, nodes: list[dict]) -> list[dict]:
@@ -450,10 +452,23 @@ class ClauseMatcher:
         left_cols = left.get("table_num_cols", 0)
         right_rows = right.get("table_num_rows", 0)
         right_cols = right.get("table_num_cols", 0)
+        left_schema = str(left.get("table_schema_signature") or "")
+        right_schema = str(right.get("table_schema_signature") or "")
+        left_row_fp = set(left.get("table_row_fingerprints") or [])
+        right_row_fp = set(right.get("table_row_fingerprints") or [])
+
+        schema_score = 0.0
+        if left_schema and right_schema:
+            schema_score = 1.0 if left_schema == right_schema else 0.0
+
+        row_fp_score = 0.0
+        if left_row_fp and right_row_fp:
+            row_fp_score = len(left_row_fp & right_row_fp) / len(left_row_fp | right_row_fp)
 
         # If no structural data available, fall back to text comparison
         if not left_cells or not right_cells:
-            return self._table_text_score(left, right)
+            text_score = self._table_text_score(left, right)
+            return 0.6 * text_score + 0.25 * schema_score + 0.15 * row_fp_score
 
         # Dimension similarity (20% weight)
         if left_rows == right_rows and left_cols == right_cols:
@@ -496,10 +511,16 @@ class ClauseMatcher:
 
             cell_score = (exact_matches + partial_matches) / len(all_positions)
 
-        # Text similarity as backup (20% weight)
+        # Text and canonical-signature similarity as backup
         text_score = self._table_text_score(left, right)
 
-        return 0.2 * dim_score + 0.6 * cell_score + 0.2 * text_score
+        return (
+            0.2 * dim_score
+            + 0.45 * cell_score
+            + 0.15 * text_score
+            + 0.1 * schema_score
+            + 0.1 * row_fp_score
+        )
 
     def _table_text_score(self, left: dict, right: dict) -> float:
         """Compute text-based similarity for tables (fallback when no structure)."""

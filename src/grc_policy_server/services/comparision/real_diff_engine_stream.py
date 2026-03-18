@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from typing import AsyncIterator, Dict, List, Literal, Optional
+from typing import AsyncIterator, Dict, List, Optional
 
+from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import (
     ActionItem,
     ChangeDetail,
@@ -17,6 +19,12 @@ from grc_policy_server.services.comparision.clause_matcher import (
     ClauseMatcher,
     MatchThresholds,
 )
+from grc_policy_server.services.comparision.diff_postprocessor import (
+    build_section_alignment_maps,
+    filter_key_differences,
+    find_unchanged_section_pairs,
+    random_diff_subset,
+)
 from grc_policy_server.services.comparision.policy_semantics import (
     ClauseMeaning,
     clean_policy_text,
@@ -26,6 +34,8 @@ from grc_policy_server.services.comparision.policy_semantics import (
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+
+logger = logging.getLogger(__name__)
 
 
 def impact_from(
@@ -108,6 +118,14 @@ class RealDiffEngineStream:
             right_nodes=right_nodes,
             target_document_id=doc2.id,
         )
+        left_to_right, right_to_left = build_section_alignment_maps(
+            matching.section_matches
+        )
+        unchanged_section_pairs = find_unchanged_section_pairs(
+            section_matches=matching.section_matches,
+            left_nodes=left_nodes,
+            right_nodes=right_nodes,
+        )
 
         yield {"type": "progress", "stage": "classification_start"}
 
@@ -126,29 +144,38 @@ class RealDiffEngineStream:
                 obligation_change=obligation_change,
             )
             streamed_diffs.append(diff)
-            yield {"type": "diff", "item": diff.model_dump()}
 
         for left_node in matching.removed:
             diff = await self._make_removed(left_node)
             streamed_diffs.append(diff)
-            yield {"type": "diff", "item": diff.model_dump()}
 
         for right_node in matching.added:
             diff = await self._make_added(right_node)
             streamed_diffs.append(diff)
+
+        streamed_diffs = filter_key_differences(
+            streamed_diffs,
+            unchanged_section_pairs=unchanged_section_pairs,
+            left_to_right=left_to_right,
+            right_to_left=right_to_left,
+        )
+
+        for diff in streamed_diffs:
             yield {"type": "diff", "item": diff.model_dump()}
 
         yield {"type": "progress", "stage": "finalizing"}
 
-        summary = await self.llm.summarize_changes(
-            doc1_name=doc1.name,
-            doc2_name=doc2.name,
-            key_differences=streamed_diffs,
-            language=language,
+        summary = await self._two_step_summary(
+            doc1_name=doc1.name, doc2_name=doc2.name, diffs=streamed_diffs, language=language
         )
 
         action_plan = self._action_plan(streamed_diffs)
-        followups = self._followups(streamed_diffs)
+        followups = await self._followups(
+            doc1_name=doc1.name,
+            doc2_name=doc2.name,
+            diffs=streamed_diffs,
+            language=language,
+        )
         accuracy_metrics = self._compute_accuracy_metrics(matching.matches)
 
         yield {
@@ -281,6 +308,10 @@ class RealDiffEngineStream:
         if chunk_id and self.neo4j is not None:
             citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
             if citation:
+                source_text = self._reference_source_text(fallback) or str(
+                    citation.get("sourceText") or ""
+                )
+                citation["sourceText"] = source_text
                 return DocumentReference(**citation)
 
         return DocumentReference(
@@ -288,8 +319,15 @@ class RealDiffEngineStream:
             page=int(fallback.get("page_number") or fallback.get("page") or 0),
             lineStart=fallback.get("line_start"),
             lineEnd=fallback.get("line_end"),
-            sourceText=fallback.get("text", "") or "",
+            sourceText=self._reference_source_text(fallback),
         )
+
+    def _reference_source_text(self, node: dict) -> str:
+        if node.get("node_type") == "table":
+            markdown = str(node.get("markdown_text") or "").strip()
+            if markdown:
+                return markdown
+        return str(node.get("text") or "")
 
     def _meaning_change(self, left: dict, right: dict, language: str = "") -> str:
         # For tables, compare structural differences instead of semantics
@@ -423,18 +461,108 @@ class RealDiffEngineStream:
                 )
         return actions[:5]
 
-    def _followups(self, diffs: List[KeyDifference]) -> List[str]:
-        questions = []
-        for diff in diffs[:6]:
-            questions.append(
-                f"What controls/evidence need updates due to {diff.changeType.lower()} changes in {diff.section}?"
-            )
-        if not questions:
-            questions = [
+    async def _followups(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        diffs: List[KeyDifference],
+        language: str,
+    ) -> List[str]:
+        sampled = random_diff_subset(diffs, max_items=10)
+        if not sampled:
+            return [
                 "Are there any material compliance requirement changes between these versions?",
                 "Which sections require immediate policy updates?",
             ]
-        return questions
+
+        try:
+            questions = await self.llm.generate_followups(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                key_differences=sampled,
+                max_questions=4,
+                language=language,
+            )
+            questions = [question.strip() for question in questions if question.strip()]
+            if questions:
+                return questions[:4]
+        except Exception:
+            logger.exception("failed to generate LLM follow-up questions")
+
+        return [f"What controls must be updated in {diff.section}?" for diff in sampled[:4]]
+
+    async def _two_step_summary(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        diffs: List[KeyDifference],
+        language: str,
+    ) -> str:
+        if not diffs:
+            return "No material differences were detected."
+
+        explanations = await self._explain_differences(diffs, language=language)
+        summarize_explanations = getattr(self.llm, "summarize_explanations", None)
+        if callable(summarize_explanations):
+            try:
+                return await summarize_explanations(
+                    doc1_name=doc1_name,
+                    doc2_name=doc2_name,
+                    explanations=explanations,
+                    language=language,
+                )
+            except Exception:
+                logger.exception("failed two-step summary aggregation, falling back")
+
+        return await self.llm.summarize_changes(
+            doc1_name=doc1_name,
+            doc2_name=doc2_name,
+            key_differences=diffs,
+            language=language,
+        )
+
+    async def _explain_differences(
+        self,
+        diffs: List[KeyDifference],
+        *,
+        language: str,
+    ) -> list[dict[str, str]]:
+        tasks = [
+            self.llm.summarize_diff(
+                old_text=self._diff_text(diff.doc1Reference, diff.doc1Content),
+                new_text=self._diff_text(diff.doc2Reference, diff.doc2Content),
+                section=diff.section,
+                language=language,
+            )
+            for diff in diffs
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        explanations: list[dict[str, str]] = []
+        for diff, result in zip(diffs, results, strict=False):
+            if isinstance(result, Exception):
+                explanation = (
+                    f"{diff.changeType} change in {diff.section}: "
+                    "content changed based on canonical comparison."
+                )
+            else:
+                explanation = str(result or "").strip()
+            explanations.append(
+                {
+                    "changeType": diff.changeType,
+                    "section": diff.section,
+                    "nodeType": diff.nodeType,
+                    "explanation": explanation,
+                }
+            )
+        return explanations
+
+    def _diff_text(self, reference: DocumentReference | None, fallback: str | None) -> str:
+        if reference and reference.sourceText:
+            return reference.sourceText
+        return str(fallback or "")
 
     def _section_accuracy_metrics(
         self, matches: list[ClauseMatch]
@@ -554,7 +682,9 @@ class RealDiffEngineStream:
 
         # Split into lines/items (handle bullet points)
         left_lines = [
-            l.strip() for l in left_text.replace(" - ", "\n- ").split("\n") if l.strip()
+            line.strip()
+            for line in left_text.replace(" - ", "\n- ").split("\n")
+            if line.strip()
         ]
         right_lines = [
             r.strip()

@@ -180,6 +180,10 @@ def build_document_hierarchy(
         else:
             clean_text = str(chunk.metadata.get("clean_text") or normalize_text(chunk.text))
         normalized_text = normalize_text(clean_text or chunk.text)
+        node_text = chunk.text.strip()
+        if chunk.chunk_type == "table" and chunk.markdown_text:
+            # Persist full markdown table as primary content for retrieval/comparison.
+            node_text = chunk.markdown_text.strip()
         content_digest = sha256_hex(normalized_text.encode("utf-8")) if normalized_text else ""
         stable_id = stable_uuid(
             f"{chunk.chunk_type}::{doc_family}::{section_path}::{anchor_text}"
@@ -218,7 +222,7 @@ def build_document_hierarchy(
             node_type=chunk.chunk_type,
             parent_id=section_nodes[section_titles].node_id,
             title=chunk.title,
-            text=chunk.text.strip(),
+            text=node_text,
             section_path=section_path,
             section_titles=list(section_titles),
             page_number=chunk.page_number,
@@ -233,6 +237,7 @@ def build_document_hierarchy(
                 **chunk.metadata,
                 "clean_text": clean_text,
                 "markdown_text": chunk.markdown_text,
+                "canonical_text": str(chunk.metadata.get("canonical_text") or normalized_text),
                 "anchor_text": anchor_text,
                 "docling_path": chunk.docling_path,
                 "source_labels": list(chunk.labels),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from grc_policy_server.services.comparision.policy_semantics import (
@@ -9,13 +10,50 @@ from grc_policy_server.services.comparision.policy_semantics import (
     starts_with_lowercase,
 )
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
+from grc_policy_server.utils.hashing import normalize_for_comparison
+
+_AUXILIARY_TITLE_RE = re.compile(
+    r"^\s*(table of contents|contents|index|glossary|list of figures|list of tables)\s*$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_auxiliary(text: str, section_title: str) -> bool:
+    body = (text or "").strip()
+    if not body:
+        return True
+
+    if section_title and _AUXILIARY_TITLE_RE.match(section_title.strip()):
+        return True
+
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    dot_leaders = len(re.findall(r"\.{3,}", body))
+    trailing_numbers = sum(1 for line in lines if re.search(r"\s\d{1,4}\s*$", line))
+    short_lines = sum(1 for line in lines if len(line) <= 70)
+
+    return (
+        len(lines) >= 6
+        and dot_leaders >= 3
+        and trailing_numbers >= 3
+        and short_lines / max(len(lines), 1) > 0.6
+    )
 
 
 def preprocess_parsed_chunks(parsed_chunks: list[ParsedChunk]) -> list[ParsedChunk]:
     processed: list[ParsedChunk] = []
 
     for chunk in parsed_chunks:
-        clean_text = clean_policy_text(chunk.text)
+        section_title = chunk.section_path[-1] if chunk.section_path else (chunk.title or "")
+        if chunk.chunk_type in {"clause", "table"} and looks_like_auxiliary(
+            chunk.text, section_title
+        ):
+            continue
+
+        if chunk.chunk_type == "table":
+            clean_source = str(chunk.metadata.get("table_clean_text") or chunk.text)
+        else:
+            clean_source = chunk.text
+        clean_text = clean_policy_text(clean_source)
         if chunk.chunk_type in {"clause", "table"} and (
             not clean_text or is_noise_text(clean_text)
         ):
@@ -23,6 +61,9 @@ def preprocess_parsed_chunks(parsed_chunks: list[ParsedChunk]) -> list[ParsedChu
 
         metadata = dict(chunk.metadata)
         metadata["clean_text"] = clean_text
+        metadata["canonical_text"] = normalize_for_comparison(clean_source)
+        if chunk.chunk_type == "table" and chunk.markdown_text:
+            metadata["table_markdown"] = chunk.markdown_text
         current = replace(chunk, metadata=metadata)
 
         if _should_merge(processed[-1], current) if processed else False:

@@ -80,10 +80,17 @@ class HierarchyNode:
             "object": str(self.metadata.get("object") or ""),
             "condition": str(self.metadata.get("condition") or ""),
             "markdown_text": str(self.metadata.get("markdown_text") or ""),
+            "canonical_text": str(self.metadata.get("canonical_text") or ""),
             # Table structure for structural comparison
             "table_num_rows": table_structure.get("num_rows", 0) if table_structure else 0,
             "table_num_cols": table_structure.get("num_cols", 0) if table_structure else 0,
             "table_cells": table_structure.get("cells", []) if table_structure else [],
+            "table_schema_signature": str(
+                self.metadata.get("table_schema_signature") or ""
+            ),
+            "table_row_fingerprints": list(
+                self.metadata.get("table_row_fingerprints") or []
+            ),
         }
 
     def to_graph_record(self) -> dict[str, Any]:
