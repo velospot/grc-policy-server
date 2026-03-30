@@ -1,0 +1,8 @@
+stateDiagram-v2
+    [*] --> queued
+    queued --> running : worker started
+    running --> finished : task success
+    running --> failed : task error
+    queued --> failed : dispatch/broker error
+    finished --> [*]
+    failed --> [*]

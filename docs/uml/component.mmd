@@ -1,0 +1,65 @@
+flowchart TB
+    subgraph Frontend["Frontend"]
+        DocumentsPage["Documents Page"]
+        UploadModal["Upload Modal"]
+        JobStatus["Job Status + Polling"]
+        CompareUI["Comparison UI"]
+    end
+
+    subgraph Backend["grc-policy-server"]
+        Routes["API Routes"]
+        IngestSvc["DocumentIngestionService"]
+        CompareSvc["RealDiffEngine / Stream"]
+        UploadDispatcher["UploadV2Dispatcher"]
+        CompareDispatcher["CompareV2Dispatcher"]
+        Repo["DocumentRepository"]
+        Cache["ComparisonCacheStore"]
+        Mutex["RequestMutex (write lock)"]
+    end
+
+    subgraph Async["Async Processing"]
+        Celery["Celery App"]
+        UploadTask["upload_v2 task"]
+        CompareTask["compare_v2 task"]
+    end
+
+    subgraph Infra["Infra Dependencies"]
+        Redis["Redis"]
+        Weaviate["Weaviate"]
+        Neo4j["Neo4j (optional)"]
+        Ollama["Ollama"]
+        FS["Filesystem Upload Root"]
+    end
+
+    DocumentsPage --> Routes
+    UploadModal --> Routes
+    JobStatus --> Routes
+    CompareUI --> Routes
+
+    Routes --> Mutex
+    Routes --> Repo
+    Routes --> IngestSvc
+    Routes --> CompareSvc
+    Routes --> UploadDispatcher
+    Routes --> CompareDispatcher
+    Routes --> Cache
+
+    UploadDispatcher --> Celery
+    CompareDispatcher --> Celery
+    Celery --> Redis
+    Celery --> UploadTask
+    Celery --> CompareTask
+
+    UploadTask --> IngestSvc
+    CompareTask --> CompareSvc
+    CompareTask --> Cache
+
+    Repo --> FS
+    Cache --> FS
+    IngestSvc --> FS
+    IngestSvc --> Weaviate
+    IngestSvc --> Neo4j
+    IngestSvc --> Ollama
+    CompareSvc --> Weaviate
+    CompareSvc --> Neo4j
+    CompareSvc --> Ollama
