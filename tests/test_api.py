@@ -16,7 +16,7 @@ from grc_policy_server.api.deps import (
     get_weaviate_client,
 )
 from grc_policy_server.core.config import settings
-from grc_policy_server.main import app, request_lock
+from grc_policy_server.main import app
 from grc_policy_server.models.domain import DocumentDomain
 from grc_policy_server.models.schemas import (
     ActionItem,
@@ -24,6 +24,7 @@ from grc_policy_server.models.schemas import (
     DocumentReference,
     KeyDifference,
 )
+from grc_policy_server.respositories.documents import DocumentRepository
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     UploadIngestionResult,
 )
@@ -321,24 +322,15 @@ def test_swagger_ui_is_available():
     assert "Swagger UI" in response.text
 
 
-def test_request_lock_is_released_after_request():
+def test_health_is_available():
     response = client.get("/health")
     assert response.status_code == 200
-    assert request_lock.locked() is False
 
 
-def test_request_lock_rejects_when_another_request_is_processing():
-    # POST requests are subject to the mutex; GET/HEAD are now exempt.
+def test_write_requests_are_not_globally_blocked():
     app.dependency_overrides[get_diff_engine] = lambda: StubDiffEngine()
-    acquired = request_lock.acquire_nowait()
-    assert acquired is True
-    try:
-        response = client.post("/compare", json=compare_payload(), headers=auth_headers())
-    finally:
-        request_lock.release()
-        app.dependency_overrides.clear()
-    assert response.status_code == 423
-    assert response.json() == {"detail": "Another request is currently being processed"}
+    response = client.post("/compare", json=compare_payload(), headers=auth_headers())
+    assert response.status_code == 200
 
 
 def test_openapi_includes_core_routes():
@@ -349,6 +341,7 @@ def test_openapi_includes_core_routes():
     paths = schema["paths"]
     assert "/health" in paths
     assert "/documents" in paths
+    assert "/documents/{document_id}/download" in paths
     assert "/documents/delete" in paths
     assert "/documents/search/hybrid" in paths
     assert "/documents/upload" in paths
@@ -411,6 +404,83 @@ def test_list_documents():
             "category": "risk",
         }
     ]
+
+
+def test_download_document_default_pdf(tmp_path):
+    doc_dir = tmp_path / "doc-1"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "policy.pdf").write_bytes(b"%PDF-1.7 default")
+    (doc_dir / "metadata.json").write_text(
+        '{"id":"doc-1","stored_filename":"policy.pdf"}',
+        encoding="utf-8",
+    )
+
+    app.dependency_overrides[get_document_repository] = lambda: DocumentRepository(
+        upload_root=tmp_path
+    )
+    response = client.get("/documents/doc-1/download", headers=auth_headers())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert "attachment; filename=\"policy.pdf\"" in response.headers["content-disposition"]
+    assert response.content == b"%PDF-1.7 default"
+
+
+def test_download_document_specific_pdf(tmp_path):
+    doc_dir = tmp_path / "doc-1"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "policy-v1.pdf").write_bytes(b"%PDF-1.7 v1")
+    (doc_dir / "policy-v2.pdf").write_bytes(b"%PDF-1.7 v2")
+    (doc_dir / "metadata.json").write_text(
+        '{"id":"doc-1","stored_filename":"policy-v1.pdf"}',
+        encoding="utf-8",
+    )
+
+    app.dependency_overrides[get_document_repository] = lambda: DocumentRepository(
+        upload_root=tmp_path
+    )
+    response = client.get(
+        "/documents/doc-1/download?filename=policy-v2.pdf",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert "attachment; filename=\"policy-v2.pdf\"" in response.headers["content-disposition"]
+    assert response.content == b"%PDF-1.7 v2"
+
+
+def test_download_document_rejects_non_pdf_filename(tmp_path):
+    doc_dir = tmp_path / "doc-1"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "policy.pdf").write_bytes(b"%PDF-1.7")
+    (doc_dir / "metadata.json").write_text(
+        '{"id":"doc-1","stored_filename":"policy.pdf"}',
+        encoding="utf-8",
+    )
+
+    app.dependency_overrides[get_document_repository] = lambda: DocumentRepository(
+        upload_root=tmp_path
+    )
+    response = client.get(
+        "/documents/doc-1/download?filename=policy.txt",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Only PDF files can be downloaded from this endpoint"
+    }
+
+
+def test_download_document_returns_404_for_missing_document(tmp_path):
+    app.dependency_overrides[get_document_repository] = lambda: DocumentRepository(
+        upload_root=tmp_path
+    )
+    response = client.get("/documents/missing/download", headers=auth_headers())
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Document not found"}
 
 
 def test_upload_document():
@@ -784,8 +854,12 @@ def test_hybrid_search_documents():
                     "document_id": "doc-1",
                     "section_path": "Access Control",
                     "text": "MFA is required for admins.",
+                    "canonical_text": "mfa is required for admins.",
+                    "node_type": "clause",
+                    "markdown_text": "MFA is required for admins.",
                     "chunk_index": 2,
                     "_distance": 0.12,
+                    "_score": 0.88,
                 }
             ],
             "doc-2": [
@@ -793,9 +867,13 @@ def test_hybrid_search_documents():
                     "chunk_id": "doc-2:4",
                     "document_id": "doc-2",
                     "section_path": "Authentication",
-                    "text": "MFA is mandatory for all users.",
+                    "text": "| Role | Requirement |\n| --- | --- |\n| User | MFA mandatory |",
+                    "canonical_text": "role requirement user mfa mandatory",
+                    "node_type": "table",
+                    "markdown_text": "| Role | Requirement |\n| --- | --- |\n| User | MFA mandatory |",
                     "chunk_index": 4,
                     "_distance": 0.08,
+                    "_score": 0.92,
                 }
             ],
         }
@@ -823,9 +901,15 @@ def test_hybrid_search_documents():
                         "chunkId": "doc-1:2",
                         "documentId": "doc-1",
                         "sectionPath": "Access Control",
-                        "text": "MFA is required for admins.",
+                        "text": "mfa is required for admins.",
+                        "nodeType": "clause",
+                        "canonicalText": "mfa is required for admins.",
+                        "markdown": "MFA is required for admins.",
+                        "tableMarkdown": None,
                         "chunkIndex": 2,
-                        "score": 0.12,
+                        "score": 0.88,
+                        "distance": 0.12,
+                        "scores": {"score": 0.88, "distance": 0.12},
                     }
                 ],
             },
@@ -836,9 +920,15 @@ def test_hybrid_search_documents():
                         "chunkId": "doc-2:4",
                         "documentId": "doc-2",
                         "sectionPath": "Authentication",
-                        "text": "MFA is mandatory for all users.",
+                        "text": "role requirement user mfa mandatory",
+                        "nodeType": "table",
+                        "canonicalText": "role requirement user mfa mandatory",
+                        "markdown": "| Role | Requirement |\n| --- | --- |\n| User | MFA mandatory |",
+                        "tableMarkdown": "| Role | Requirement |\n| --- | --- |\n| User | MFA mandatory |",
                         "chunkIndex": 4,
-                        "score": 0.08,
+                        "score": 0.92,
+                        "distance": 0.08,
+                        "scores": {"score": 0.92, "distance": 0.08},
                     }
                 ],
             },

@@ -1,9 +1,8 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from grc_policy_server.api.routes import (
     compare,
@@ -14,7 +13,6 @@ from grc_policy_server.api.routes import (
 )
 from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import log_runtime_environment, setup_logging
-from grc_policy_server.core.request_mutex import RequestMutex
 
 setup_logging(
     level=settings.log_level,
@@ -57,29 +55,6 @@ app.add_middleware(
     allow_methods=_parse_cors_items(settings.cors_allow_methods),
     allow_headers=_parse_cors_items(settings.cors_allow_headers),
 )
-
-request_lock = RequestMutex(lock_file=settings.request_mutex_lock_file)
-
-_LOCK_FREE_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
-
-
-@app.middleware("http")
-async def with_request_lock(request: Request, call_next):
-    # Skip mutex for health probes, docs, and all read-only (GET/HEAD) requests.
-    if request.method in {"GET", "HEAD"} or request.url.path in _LOCK_FREE_PATHS:
-        return await call_next(request)
-
-    if not request_lock.acquire_nowait():
-        return JSONResponse(
-            status_code=423,
-            content={"detail": "Another request is currently being processed"},
-        )
-
-    try:
-        response = await call_next(request)
-        return response
-    finally:
-        request_lock.release()
 
 
 app.include_router(health.router)

@@ -1,0 +1,33 @@
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant FE as Next.js UI
+    participant API as FastAPI /v2/compare
+    participant CACHE as Comparison Cache
+    participant Q as Celery + Redis
+    participant W as Worker compare_v2
+    participant CMP as RealDiffEngine
+    participant V as Weaviate
+    participant L as Ollama
+
+    U->>FE: Select doc1/doc2 and compare
+    FE->>API: POST /v2/compare
+    API->>CACHE: lookup(doc1, doc2)
+
+    alt Cache hit
+        API-->>FE: 202 finished + cacheHit + result
+    else Cache miss
+        API->>Q: send_task(compare_v2)
+        API-->>FE: 202 queued + jobId
+        loop Until terminal state
+            FE->>API: GET /v2/compare/response/{jobId}
+            API->>Q: AsyncResult(jobId)
+            API-->>FE: queued | running | finished | failed
+        end
+        Q->>W: Deliver compare task
+        W->>CMP: compare(doc1, doc2)
+        CMP->>V: fetch + semantic/hybrid matching
+        CMP->>L: summarize/action/follow-up generation
+        W->>CACHE: save comparison result
+        W-->>Q: SUCCESS with result payload
+    end

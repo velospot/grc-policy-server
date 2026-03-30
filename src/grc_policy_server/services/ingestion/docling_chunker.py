@@ -11,6 +11,13 @@ from docling_core.transforms.chunker.hierarchical_chunker import (
 from docling_core.types.doc.labels import DocItemLabel
 
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
+from grc_policy_server.services.ingestion.table_normalization import (
+    extract_headers_from_cells,
+    normalize_table_cells,
+    rows_from_cells,
+    schema_signature,
+    table_text_projection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,17 +61,19 @@ def _extract_table_structure(doc_chunk: DocChunk, dl_doc: Any) -> dict[str, Any]
                 }
             )
 
+        normalized_cells = normalize_table_cells(cells)
+
         logger.info(
             "Extracted table structure: %d rows x %d cols, %d cells",
             data.get("num_rows", 0),
             data.get("num_cols", 0),
-            len(cells),
+            len(normalized_cells),
         )
 
         return {
             "num_rows": data.get("num_rows", 0),
             "num_cols": data.get("num_cols", 0),
-            "cells": cells,
+            "cells": normalized_cells,
             "grid": data.get("grid"),
         }
 
@@ -179,28 +188,15 @@ def _table_structure_to_clean_text(
     if not struct or not struct.get("cells"):
         return ""
 
-    parts = []
-    if title:
-        parts.append(f"Table: {title}")
-
-    num_rows = struct.get("num_rows", 0)
-    num_cols = struct.get("num_cols", 0)
-    parts.append(f"Dimensions: {num_rows} rows x {num_cols} columns")
-
-    # Group cells by row for readable output
-    rows_data: dict[int, list[str]] = {}
-    for cell in struct.get("cells", []):
-        row_idx = cell.get("row", 0)
-        text = str(cell.get("text", "")).strip()
-        if text:
-            rows_data.setdefault(row_idx, []).append(text)
-
-    # Build clean text representation
-    for row_idx in sorted(rows_data.keys()):
-        row_text = " | ".join(rows_data[row_idx])
-        parts.append(row_text)
-
-    return "\n".join(parts)
+    cells = list(struct.get("cells") or [])
+    num_cols = int(struct.get("num_cols") or 0)
+    headers = extract_headers_from_cells(cells, num_cols)
+    rows = rows_from_cells(cells, headers=headers)
+    return table_text_projection(
+        title or "",
+        headers,
+        [row.get("row_data", {}) for row in rows],
+    )
 
 
 _HEADER_FOOTER_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -270,15 +266,26 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
                 "SUCCESS" if table_struct else "FAILED",
             )
             if table_struct:
+                headers = extract_headers_from_cells(
+                    table_struct.get("cells", []),
+                    int(table_struct.get("num_cols") or 0),
+                )
+                rows = rows_from_cells(table_struct.get("cells", []), headers=headers)
                 metadata["table_structure"] = {
                     "num_rows": table_struct.get("num_rows", 0),
                     "num_cols": table_struct.get("num_cols", 0),
                     "cells": table_struct.get("cells", []),
                 }
+                metadata["table_headers"] = headers
+                metadata["table_schema_signature"] = schema_signature(headers)
+                metadata["table_row_fingerprints"] = [
+                    str(row.get("row_fingerprint") or "") for row in rows
+                ]
                 # Generate proper markdown from structure
                 struct_markdown = _table_structure_to_markdown(table_struct, title)
                 if struct_markdown:
                     markdown_text = struct_markdown
+                    metadata["table_markdown"] = struct_markdown
                 # Generate better clean_text for embeddings
                 struct_clean_text = _table_structure_to_clean_text(table_struct, title)
                 if struct_clean_text:

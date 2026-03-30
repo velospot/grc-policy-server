@@ -3,7 +3,8 @@ import base64
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 
 from grc_policy_server.api.deps import (
     get_document_ingestion_service_factory,
@@ -60,19 +61,38 @@ def _to_hybrid_search_chunks(chunks: list[dict[str, Any]]) -> list[HybridSearchC
         elif isinstance(chunk_index_raw, float):
             chunk_index = int(chunk_index_raw)
 
-        score_raw = chunk.get("_distance")
+        distance_raw = chunk.get("_distance")
+        distance: float | None = None
+        if isinstance(distance_raw, (int, float)):
+            distance = float(distance_raw)
+
+        score_raw = chunk.get("_score")
         score: float | None = None
         if isinstance(score_raw, (int, float)):
             score = float(score_raw)
+        elif distance is not None:
+            # Backward compatibility for existing clients using `score`.
+            score = distance
+
+        canonical_text = str(chunk.get("canonical_text") or "").strip() or None
+        markdown = str(chunk.get("markdown_text") or "").strip() or None
+        node_type = str(chunk.get("node_type") or "").strip() or None
+        table_markdown = markdown if node_type == "table" else None
 
         out.append(
             HybridSearchChunk(
                 chunkId=str(chunk.get("chunk_id") or ""),
                 documentId=str(chunk.get("document_id") or ""),
                 sectionPath=str(chunk.get("section_path") or ""),
-                text=str(chunk.get("text") or ""),
+                text=canonical_text or str(chunk.get("text") or ""),
+                nodeType=node_type,
+                canonicalText=canonical_text,
+                markdown=markdown,
+                tableMarkdown=table_markdown,
                 chunkIndex=chunk_index,
                 score=score,
+                distance=distance,
+                scores={"score": score, "distance": distance},
             )
         )
     return out
@@ -267,6 +287,57 @@ def list_documents(
     """Return uploaded documents using metadata stored on disk."""
     documents = repository.list_documents()
     return [to_document_response(document) for document in documents]
+
+
+@router.get(
+    "/{document_id}/download",
+    summary="Download an uploaded PDF document",
+    responses={
+        status.HTTP_200_OK: {
+            "content": {"application/pdf": {}},
+            "description": "Requested PDF document binary",
+        }
+    },
+)
+def download_document_pdf(
+    document_id: str,
+    filename: str | None = Query(
+        default=None,
+        description=(
+            "Optional PDF filename inside the document folder. "
+            "When omitted, the stored upload filename is used."
+        ),
+    ),
+    repository: DocumentRepository = Depends(get_document_repository),
+):
+    document_id = document_id.strip()
+    if not document_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document id must not be empty",
+        )
+
+    try:
+        pdf_path = repository.resolve_pdf_path(
+            document_id=document_id,
+            filename=filename,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    return FileResponse(
+        path=pdf_path,
+        media_type="application/pdf",
+        filename=pdf_path.name,
+    )
 
 
 @router.post(

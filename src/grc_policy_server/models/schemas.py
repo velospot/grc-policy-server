@@ -171,8 +171,14 @@ class HybridSearchChunk(BaseModel):
     documentId: str
     sectionPath: str
     text: str
+    nodeType: str | None = None
+    canonicalText: str | None = None
+    markdown: str | None = None
+    tableMarkdown: str | None = None
     chunkIndex: int | None = None
     score: float | None = None
+    distance: float | None = None
+    scores: dict[str, float | None] | None = None
 
 
 class HybridSearchDocumentResult(BaseModel):

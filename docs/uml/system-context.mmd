@@ -1,0 +1,16 @@
+flowchart LR
+    User["Compliance User"] --> UI["Next.js UI (ectest-audit-v2)"]
+    UI --> API["FastAPI (grc-policy-server)"]
+
+    API --> Auth["Bearer Auth"]
+    API --> Queue["Celery + Redis"]
+    API --> Storage["Upload Storage (FS/Object Store)"]
+    API --> Vector["Weaviate"]
+    API --> Graph["Neo4j (optional)"]
+    API --> LLM["Ollama"]
+
+    Queue --> Worker["Celery Worker"]
+    Worker --> Storage
+    Worker --> Vector
+    Worker --> Graph
+    Worker --> LLM

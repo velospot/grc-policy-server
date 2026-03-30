@@ -39,7 +39,12 @@ class DocumentRepository:
         if not self.upload_root.exists():
             return documents
 
-        for doc_dir in self.upload_root.iterdir():
+        try:
+            doc_dirs = list(self.upload_root.iterdir())
+        except OSError:
+            return documents
+
+        for doc_dir in doc_dirs:
             if not doc_dir.is_dir():
                 continue
             meta_file = doc_dir / "metadata.json"
@@ -82,5 +87,51 @@ class DocumentRepository:
         if not document_dir.is_dir():
             return False
 
-        shutil.rmtree(document_dir)
+        try:
+            shutil.rmtree(document_dir)
+        except FileNotFoundError:
+            # Another concurrent request may already have removed this document.
+            return False
         return True
+
+    def resolve_pdf_path(
+        self,
+        *,
+        document_id: str,
+        filename: str | None = None,
+    ) -> Path:
+        document_dir = self._resolve_document_dir(document_id)
+        if not document_dir.exists() or not document_dir.is_dir():
+            raise FileNotFoundError("Document not found")
+
+        requested_name = (filename or "").strip()
+        if requested_name:
+            return self._resolve_pdf_file(document_dir=document_dir, filename=requested_name)
+
+        metadata = self._load_metadata(document_dir / "metadata.json") or {}
+        stored_filename = str(metadata.get("stored_filename") or "").strip()
+        if stored_filename:
+            try:
+                return self._resolve_pdf_file(
+                    document_dir=document_dir,
+                    filename=stored_filename,
+                )
+            except FileNotFoundError:
+                pass
+
+        for candidate in sorted(document_dir.glob("*.pdf")):
+            if candidate.is_file():
+                return candidate
+
+        raise FileNotFoundError("No PDF file found for this document")
+
+    @staticmethod
+    def _resolve_pdf_file(*, document_dir: Path, filename: str) -> Path:
+        candidate = (document_dir / filename).resolve()
+        if document_dir not in candidate.parents:
+            raise ValueError("Invalid PDF filename")
+        if candidate.suffix.lower() != ".pdf":
+            raise ValueError("Only PDF files can be downloaded from this endpoint")
+        if not candidate.exists() or not candidate.is_file():
+            raise FileNotFoundError("Requested PDF file was not found")
+        return candidate

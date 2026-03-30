@@ -141,6 +141,226 @@ PROMPTS = {
     "fr": PROMPT_FR,
 }
 
+PROMPT_SUMMARIZE_DIFF_EN = """
+
+
+Task: Summarize the change in one sentence, strictly grounded in the provided texts.
+
+Rules:
+- Use ONLY the OLD and NEW text below.
+- Do NOT invent new requirements, dates, or sections.
+- If change is ambiguous, say so.
+- Be concise: one sentence describing what changed and its impact.
+- Write in English.
+
+Section: {section}
+
+OLD:
+{old_text}
+
+NEW:
+{new_text}
+
+One-line summary:
+""".strip()
+
+PROMPT_SUMMARIZE_DIFF_DE = """
+
+
+Aufgabe: Fassen Sie die Änderung in genau einem Satz zusammen, ausschließlich basierend auf den bereitgestellten Texten.
+
+Regeln:
+- Verwenden Sie NUR den OLD- und NEW-Text.
+- Erfinden Sie keine Anforderungen, Daten oder Abschnitte.
+- Wenn die Änderung unklar ist, nennen Sie dies.
+- Schreiben Sie präzise in einem Satz inklusive Auswirkung.
+- Schreiben Sie auf Deutsch.
+
+Abschnitt: {section}
+
+ALT:
+{old_text}
+
+NEU:
+{new_text}
+
+Ein-Satz-Zusammenfassung:
+""".strip()
+
+PROMPT_SUMMARIZE_DIFF_FR = """
+Vous êtes analyste conformité GRC.
+
+Tâche : Résumer la modification en une seule phrase, uniquement à partir des textes fournis.
+
+Règles :
+- Utiliser UNIQUEMENT les textes OLD et NEW.
+- Ne pas inventer d’exigences, de dates ou de sections.
+- Si la modification est ambiguë, le préciser.
+- Rester concis : une phrase avec le changement et son impact.
+- Écrire en français.
+
+Section : {section}
+
+ANCIEN :
+{old_text}
+
+NOUVEAU :
+{new_text}
+
+Résumé en une phrase :
+""".strip()
+
+SUMMARIZE_DIFF_PROMPTS = {
+    "en": PROMPT_SUMMARIZE_DIFF_EN,
+    "de": PROMPT_SUMMARIZE_DIFF_DE,
+    "fr": PROMPT_SUMMARIZE_DIFF_FR,
+}
+
+PROMPT_SUMMARIZE_EXPLANATIONS_EN = """
+
+Task:
+1) Use the Explanation JSON entries as the only source of truth.
+2) Aggregate change explanations into concise points grouped by ADDED, MODIFIED, REMOVED.
+3) Omit groups with no entries.
+
+Output format (Markdown):
+- **ADDED**
+  - <point>
+- **MODIFIED**
+  - <point>
+- **REMOVED**
+  - <point>
+
+Rules:
+- Keep it brief and specific.
+- Mention sections when available.
+- Include table/formula/equation implications only if present in explanations.
+- Do not invent facts beyond the JSON.
+- Write in English.
+
+Document A: {doc1_name}
+Document B: {doc2_name}
+
+Explanation JSON:
+{explanations}
+""".strip()
+
+PROMPT_SUMMARIZE_EXPLANATIONS_DE = """
+
+Aufgabe:
+1) Verwenden Sie das Explanation-JSON als einzige Quelle.
+2) Aggregieren Sie die Erklärungen in prägnante Punkte nach ADDED, MODIFIED, REMOVED.
+3) Lassen Sie Gruppen ohne Einträge weg.
+
+Ausgabeformat (Markdown):
+- **ADDED**
+  - <Punkt>
+- **MODIFIED**
+  - <Punkt>
+- **REMOVED**
+  - <Punkt>
+
+Regeln:
+- Kurz und spezifisch formulieren.
+- Abschnitte nennen, wenn vorhanden.
+- Auswirkungen zu Tabellen/Formeln/Gleichungen nur nennen, wenn im JSON vorhanden.
+- Keine Fakten außerhalb des JSON erfinden.
+- Schreiben Sie auf Deutsch.
+
+Dokument A: {doc1_name}
+Dokument B: {doc2_name}
+
+Explanation JSON:
+{explanations}
+""".strip()
+
+PROMPT_SUMMARIZE_EXPLANATIONS_FR = """
+Vous êtes analyste conformité GRC.
+
+Tâche :
+1) Utiliser le JSON des explications comme seule source.
+2) Agréger les explications en points concis par ADDED, MODIFIED, REMOVED.
+3) Omettre les groupes sans élément.
+
+Format de sortie (Markdown) :
+- **ADDED**
+  - <point>
+- **MODIFIED**
+  - <point>
+- **REMOVED**
+  - <point>
+
+Règles :
+- Rester bref et précis.
+- Mentionner les sections si disponibles.
+- Inclure les implications table/formule/équation seulement si présentes dans le JSON.
+- Ne pas inventer d’informations hors JSON.
+- Écrire en français.
+
+Document A : {doc1_name}
+Document B : {doc2_name}
+
+Explanation JSON :
+{explanations}
+""".strip()
+
+SUMMARIZE_EXPLANATIONS_PROMPTS = {
+    "en": PROMPT_SUMMARIZE_EXPLANATIONS_EN,
+    "de": PROMPT_SUMMARIZE_EXPLANATIONS_DE,
+    "fr": PROMPT_SUMMARIZE_EXPLANATIONS_FR,
+}
+
+PROMPT_FOLLOWUPS_EN = """
+
+Generate up to {max_questions} follow-up questions based ONLY on the diff list.
+Do NOT invent sections not present.
+Write in English.
+
+Document A: {doc1_name}
+Document B: {doc2_name}
+
+Diffs JSON:
+{diffs}
+
+Return as a numbered list (1., 2., 3., ...). Keep questions specific and actionable.
+""".strip()
+
+PROMPT_FOLLOWUPS_DE = """
+
+Erstellen Sie bis zu {max_questions} Folgefragen ausschließlich auf Basis der Diff-Liste.
+Erfinden Sie keine Abschnitte, die nicht enthalten sind.
+Schreiben Sie auf Deutsch.
+
+Dokument A: {doc1_name}
+Dokument B: {doc2_name}
+
+Diffs JSON:
+{diffs}
+
+Geben Sie die Fragen als nummerierte Liste zurück (1., 2., 3., ...). Die Fragen sollen konkret und umsetzbar sein.
+""".strip()
+
+PROMPT_FOLLOWUPS_FR = """
+
+Générez jusqu’à {max_questions} questions de suivi en vous basant UNIQUEMENT sur la liste des diffs.
+N’inventez pas de sections absentes.
+Écrivez en français.
+
+Document A : {doc1_name}
+Document B : {doc2_name}
+
+Diffs JSON :
+{diffs}
+
+Retournez une liste numérotée (1., 2., 3., ...). Les questions doivent être spécifiques et actionnables.
+""".strip()
+
+FOLLOWUP_PROMPTS = {
+    "en": PROMPT_FOLLOWUPS_EN,
+    "de": PROMPT_FOLLOWUPS_DE,
+    "fr": PROMPT_FOLLOWUPS_FR,
+}
+
 
 @dataclass(frozen=True)
 class OllamaSettings:
@@ -370,6 +590,22 @@ class OllamaClient(BaseLLM):
         )
         return await self._generate_text(prompt, temperature=0.5)
 
+    async def summarize_explanations(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        explanations: List[Dict[str, str]],
+        language: str = "",
+    ) -> str:
+        prompt = self._prompt_summarize_explanations(
+            doc1_name=doc1_name,
+            doc2_name=doc2_name,
+            explanations=explanations,
+            language=language,
+        )
+        return await self._generate_text(prompt, temperature=0.4)
+
     async def generate_followups(
         self,
         *,
@@ -387,7 +623,7 @@ class OllamaClient(BaseLLM):
             max_questions=max_questions,
             language=language,
         )
-        text = await self._generate_text(prompt, temperature=0.5)
+        text = await self._generate_text(prompt, temperature=0.6)
         return self._parse_numbered_questions(text, max_questions=max_questions)
 
     def close(self) -> None:
@@ -470,30 +706,12 @@ class OllamaClient(BaseLLM):
     def _prompt_summarize_diff(
         self, *, old_text: str, new_text: str, section: str, language: str = ""
     ) -> str:
-        lang_hint = self._language_hint(language)
-        return f"""
-You are a GRC compliance analyst.
-
-{lang_hint}Understand the original language but write the summary in English.
-
-Task: Summarize the change in one sentence, strictly grounded in the provided texts.
-
-Rules:
-- Use ONLY the OLD and NEW text below.
-- Do NOT invent new requirements, dates, or sections.
-- If change is ambiguous, say so.
-- Be concise: one sentence describing what changed and its impact.
-
-Section: {section}
-
-OLD:
-{old_text}
-
-NEW:
-{new_text}
-
-One-line summary:
-""".strip()
+        lang_code = language if language in SUMMARIZE_DIFF_PROMPTS else "en"
+        return SUMMARIZE_DIFF_PROMPTS[lang_code].format(
+            section=section,
+            old_text=old_text,
+            new_text=new_text,
+        )
 
     def _prompt_summarize_changes(
         self,
@@ -508,11 +726,33 @@ One-line summary:
             diffs,
             ensure_ascii=False,
             separators=(",", ":"),
+            sort_keys=True,
         )
         return PROMPTS[lang_code].format(
             doc1_name=doc1_name,
             doc2_name=doc2_name,
             diffs=canonical_diffs,
+        )
+
+    def _prompt_summarize_explanations(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        explanations: List[Dict[str, str]],
+        language: str = "",
+    ) -> str:
+        lang_code = language if language in SUMMARIZE_EXPLANATIONS_PROMPTS else "en"
+        canonical_explanations = json.dumps(
+            explanations[:80],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return SUMMARIZE_EXPLANATIONS_PROMPTS[lang_code].format(
+            doc1_name=doc1_name,
+            doc2_name=doc2_name,
+            explanations=canonical_explanations,
         )
 
     def _prompt_followups(
@@ -524,23 +764,19 @@ One-line summary:
         max_questions: int,
         language: str = "",
     ) -> str:
-        lang_hint = self._language_hint(language)
-        return f"""
-You are a GRC auditor.
-
-{lang_hint}Write questions in English.
-
-Generate up to {max_questions} follow-up questions based ONLY on the diff list.
-Do NOT invent sections not present.
-
-Document A: {doc1_name}
-Document B: {doc2_name}
-
-Diffs JSON:
-{json.dumps(diffs, ensure_ascii=False)}
-
-Return as a numbered list (1., 2., 3., ...). Keep questions specific and actionable.
-""".strip()
+        lang_code = language if language in FOLLOWUP_PROMPTS else "en"
+        canonical_diffs = json.dumps(
+            diffs,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return FOLLOWUP_PROMPTS[lang_code].format(
+            doc1_name=doc1_name,
+            doc2_name=doc2_name,
+            diffs=canonical_diffs,
+            max_questions=max_questions,
+        )
 
     # -------------------------
     # Diff compaction (token safety)

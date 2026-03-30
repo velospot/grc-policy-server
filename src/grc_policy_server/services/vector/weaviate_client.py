@@ -97,6 +97,7 @@ class WeaviateClient:
             Property(name="section_path", data_type=DataType.TEXT),
             Property(name="text", data_type=DataType.TEXT),
             Property(name="clean_text", data_type=DataType.TEXT),
+            Property(name="canonical_text", data_type=DataType.TEXT),
             Property(name="chunk_index", data_type=DataType.INT),
             Property(name="page_number", data_type=DataType.INT),
             Property(name="indexable", data_type=DataType.BOOL),
@@ -114,6 +115,8 @@ class WeaviateClient:
             # Table structure fields
             Property(name="table_num_rows", data_type=DataType.INT),
             Property(name="table_num_cols", data_type=DataType.INT),
+            Property(name="table_schema_signature", data_type=DataType.TEXT),
+            Property(name="table_row_fingerprints", data_type=DataType.TEXT_ARRAY),
             Property(
                 name="table_cells",
                 data_type=DataType.OBJECT_ARRAY,
@@ -130,7 +133,13 @@ class WeaviateClient:
                 vector_config=Configure.Vectors.text2vec_ollama(
                     api_endpoint=settings.ollama_embedding_url,
                     model=settings.ollama_embed_model,
-                    source_properties=["clean_text", "text", "section_path", "title"],
+                    source_properties=[
+                        "clean_text",
+                        "text",
+                        "section_path",
+                        "mark_down",
+                        "title",
+                    ],
                 ),
             )
             return
@@ -190,6 +199,7 @@ class WeaviateClient:
                     "section_path": str(chunk.get("section_path") or "Unknown Section"),
                     "text": str(chunk.get("text") or ""),
                     "clean_text": str(chunk.get("clean_text") or ""),
+                    "canonical_text": str(chunk.get("canonical_text") or ""),
                     "chunk_index": int(chunk.get("chunk_index") or 0),
                     "page_number": chunk.get("page_number"),
                     "indexable": bool(chunk.get("indexable", True)),
@@ -209,6 +219,12 @@ class WeaviateClient:
                     # Table structure fields
                     "table_num_rows": int(chunk.get("table_num_rows") or 0),
                     "table_num_cols": int(chunk.get("table_num_cols") or 0),
+                    "table_schema_signature": str(
+                        chunk.get("table_schema_signature") or ""
+                    ),
+                    "table_row_fingerprints": list(
+                        chunk.get("table_row_fingerprints") or []
+                    ),
                     "table_cells": list(chunk.get("table_cells") or []),
                 }
                 unique_id = str(uuid5(NAMESPACE_URL, chunk_id))
@@ -320,6 +336,7 @@ class WeaviateClient:
             "section_path",
             "text",
             "clean_text",
+            "canonical_text",
             "chunk_index",
             "page_number",
             "indexable",
@@ -337,6 +354,8 @@ class WeaviateClient:
             # Table structure fields
             "table_num_rows",
             "table_num_cols",
+            "table_schema_signature",
+            "table_row_fingerprints",
             QueryNested(
                 name="table_cells",
                 properties=["row", "col", "row_span", "col_span", "text", "is_header"],
