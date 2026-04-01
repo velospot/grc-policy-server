@@ -42,6 +42,7 @@ class KeyDifference(BaseModel):
     changes: List[ChangeDetail] = Field(
         default_factory=list
     )  # Specific changes for highlighting
+    markdownDiffSummary: Optional[str] = None  # LLM-generated markdown diff summary
 
 
 class ActionItem(BaseModel):

@@ -361,6 +361,63 @@ FOLLOWUP_PROMPTS = {
     "fr": PROMPT_FOLLOWUPS_FR,
 }
 
+PROMPT_MARKDOWN_DIFF_CLAUSE = """
+Produce a brief semantic diff in markdown. Change type: {change_type}.
+
+{source_block}
+
+Rules — follow strictly:
+- Semantic changes ONLY: obligations, conditions, scope, numeric values, named entities, actions.
+- IGNORE cosmetic differences: whitespace, punctuation, capitalisation, rephrasing with identical meaning.
+- If no semantic change is detectable, output nothing at all.
+- Do NOT mention tables, cells, rows, columns, or node types under any circumstance.
+- No explanations, commentary, or notes about what is or is not applicable.
+- Write in the same language as the source text.
+
+Output EXACTLY ONE of the following formats — never combine them:
+
+Format A — inline bullets (word/phrase-level changes):
+- Removed: <span style="color:red">~~phrase~~</span>
+- Added: <span style="color:green">**phrase**</span>
+- Modified: <span style="color:red">~~old~~</span> → <span style="color:green">**new**</span>
+
+Format B — fenced diff block (sentence/line-level changes):
+```diff
+- removed sentence or line
++ added sentence or line
+```
+""".strip()
+
+PROMPT_MARKDOWN_DIFF_TABLE = """
+Produce a brief semantic diff of table changes in markdown. Change type: {change_type}.
+
+{source_block}
+
+Rules — follow strictly:
+- Semantic changes ONLY: changed cell values, added or removed rows/columns.
+- IGNORE cosmetic differences: whitespace, punctuation, capitalisation with identical meaning.
+- If no semantic change is detectable, output nothing at all.
+- Do NOT use standalone inline word/phrase bullets (~~phrase~~ or **phrase** alone).
+- No explanations or commentary.
+- Write in the same language as the source text.
+
+Output EXACTLY ONE of the following formats — never combine them:
+
+Format A — fenced diff block (for row-level additions or removals):
+```diff
+- removed row content
++ added row content
+```
+
+Format B — cell-level bullets (for in-place cell value changes):
+- `Row R, Col C:` <span style="color:red">~~old~~</span> → <span style="color:green">**new**</span>
+- Added row: <span style="color:green">**+ Row R: cell1 | cell2 | ...**</span>
+- Removed row: <span style="color:red">~~- Row R: cell1 | cell2 | ...~~</span>
+""".strip()
+
+# Back-compat alias used by tests that import this name directly.
+PROMPT_MARKDOWN_DIFF_SUMMARY = PROMPT_MARKDOWN_DIFF_CLAUSE
+
 
 @dataclass(frozen=True)
 class OllamaSettings:
@@ -626,6 +683,33 @@ class OllamaClient(BaseLLM):
         text = await self._generate_text(prompt, temperature=0.6)
         return self._parse_numbered_questions(text, max_questions=max_questions)
 
+    _NO_CHANGE_MARKERS = frozenset(
+        {"(no semantic change)", "(no change)", "no semantic change", "no change"}
+    )
+
+    async def generate_markdown_diff_summary(
+        self,
+        *,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+    ) -> str:
+        prompt = self._prompt_markdown_diff_summary(
+            node_type=node_type,
+            change_type=change_type,
+            doc1_source_text=doc1_source_text,
+            doc2_source_text=doc2_source_text,
+            language=language,
+        )
+        result = await self._generate_text(prompt, temperature=0)
+        # Return empty string when the LLM signals no semantic change, so
+        # _populate_markdown_diff_summaries can set markdownDiffSummary = None.
+        if result.strip().lower().strip("().") in self._NO_CHANGE_MARKERS:
+            return ""
+        return result
+
     def close(self) -> None:
         """Sync best-effort close. Use aclose() in async contexts."""
         self._sync_client.close()
@@ -777,6 +861,43 @@ class OllamaClient(BaseLLM):
             diffs=canonical_diffs,
             max_questions=max_questions,
         )
+
+    _LANGUAGE_NAMES = {"en": "English", "de": "German (Deutsch)", "fr": "French (Français)"}
+
+    def _prompt_markdown_diff_summary(
+        self,
+        *,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+    ) -> str:
+        if change_type == "ADDED":
+            source_block = f"Added content:\n{doc2_source_text or ''}"
+        elif change_type == "REMOVED":
+            source_block = f"Removed content:\n{doc1_source_text or ''}"
+        else:  # MODIFIED
+            source_block = (
+                f"Before:\n{doc1_source_text or ''}\n\n"
+                f"After:\n{doc2_source_text or ''}"
+            )
+        template = (
+            PROMPT_MARKDOWN_DIFF_TABLE
+            if node_type == "table"
+            else PROMPT_MARKDOWN_DIFF_CLAUSE
+        )
+        prompt = template.format(
+            change_type=change_type,
+            source_block=source_block,
+        )
+        lang_name = self._LANGUAGE_NAMES.get(language)
+        if lang_name:
+            return (
+                f"IMPORTANT: You MUST write your entire response in {lang_name} only.\n\n"
+                + prompt
+            )
+        return prompt
 
     # -------------------------
     # Diff compaction (token safety)

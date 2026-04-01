@@ -160,6 +160,8 @@ class RealDiffEngineStream:
             right_to_left=right_to_left,
         )
 
+        await self._populate_markdown_diff_summaries(streamed_diffs, language=language)
+
         for diff in streamed_diffs:
             yield {"type": "diff", "item": diff.model_dump()}
 
@@ -665,6 +667,35 @@ class RealDiffEngineStream:
             confidence_breakdown=breakdown,
             section_metrics=self._section_accuracy_metrics(matches),
         )
+
+    async def _populate_markdown_diff_summaries(
+        self, diffs: List[KeyDifference], *, language: str = ""
+    ) -> None:
+        """Generate markdownDiffSummary for every diff in parallel via LLM."""
+        tasks = [
+            self.llm.generate_markdown_diff_summary(
+                node_type=diff.nodeType,
+                change_type=diff.changeType,
+                doc1_source_text=(
+                    diff.doc1Reference.sourceText if diff.doc1Reference else None
+                ),
+                doc2_source_text=(
+                    diff.doc2Reference.sourceText if diff.doc2Reference else None
+                ),
+                language=language,
+            )
+            for diff in diffs
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for diff, result in zip(diffs, results, strict=False):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "markdownDiffSummary generation failed for section=%s: %s",
+                    diff.section,
+                    result,
+                )
+            else:
+                diff.markdownDiffSummary = str(result or "").strip() or None
 
     def _extract_changes(
         self, left: dict, right: dict, node_type: str

@@ -82,3 +82,23 @@ class BaseLLM(ABC):
         Returns language code: 'en' (English), 'de' (German), 'fr' (French), or 'unknown'.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    async def generate_markdown_diff_summary(
+        self,
+        *,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+    ) -> str:
+        """
+        Generate a markdown-formatted diff summary for a single change.
+        Strictly highlights what changed using markdown (bold, color, strikethrough).
+        Not creative — only reflects what is present in the source texts.
+        Output is written in the same language as the source text (language hint
+        improves accuracy when the detected language code is passed in).
+        Returns an empty string when no semantic change is detected.
+        """
+        raise NotImplementedError
