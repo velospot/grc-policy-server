@@ -13,7 +13,6 @@ from grc_policy_server.api.routes import (
 )
 from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import log_runtime_environment, setup_logging
-
 setup_logging(
     level=settings.log_level,
     service_name=settings.app_name,

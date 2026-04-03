@@ -199,6 +199,23 @@ def _table_structure_to_clean_text(
     )
 
 
+_TABLE_PREFIX_RE = re.compile(
+    r"^(?:table|fig(?:ure)?|exhibit|appendix|annex|tbl\.?)\s*[A-Z]?[\d.]*[:\s\-]*",
+    re.IGNORECASE,
+)
+
+
+def _normalize_table_caption(caption: str) -> str:
+    """Return a normalized caption suitable for cross-document title matching.
+
+    Strips leading 'Table N:', 'Figure 3 -', etc. then lowercases and
+    collapses whitespace so captions like "Table 3: Risk Matrix" and
+    "Table 7: Risk Matrix" compare as equal.
+    """
+    stripped = _TABLE_PREFIX_RE.sub("", caption).strip()
+    return " ".join((stripped or caption).lower().split())
+
+
 _HEADER_FOOTER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^page\\s+\\d+(\\s+of\\s+\\d+)?$", re.IGNORECASE),
     re.compile(r"^\\d+\\s*/\\s*\\d+$"),
@@ -250,6 +267,8 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
         if any(item.label == DocItemLabel.TABLE for item in doc_chunk.meta.doc_items):
             chunk_type = "table"
             title = captions[0] if captions else None
+            if title:
+                metadata["normalized_caption"] = _normalize_table_caption(title)
 
             # Log doc_items for debugging
             for item in doc_chunk.meta.doc_items:

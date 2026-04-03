@@ -11,6 +11,7 @@ localconf/*
 neo4j*
 weaviate_data/*
 data/uploads
+todo
 
 # Virtual environments
 .venv

@@ -266,18 +266,68 @@ make test
 make lint
 ```
 
+## LLM Observability (Opik)
+
+The server and Celery workers are fully instrumented with [Opik 1.10.58](https://github.com/comet-ml/opik) for LLM tracing and accuracy monitoring.
+
+### What is traced
+
+Every LLM operation is captured as a named span:
+
+| Span | Tags | Description |
+|------|------|-------------|
+| `extract_policy_meanings` | `llm`, `semantic-extraction` | Batch semantic clause extraction |
+| `summarize_diff` | `llm`, `summarization` | Single section diff summary |
+| `summarize_changes` | `llm`, `summarization` | Executive changes summary |
+| `summarize_explanations` | `llm`, `summarization` | Aggregated explanation summary |
+| `generate_followups` | `llm`, `generation` | Follow-up question generation |
+| `generate_markdown_diff_summary` | `llm`, `generation` | Markdown-formatted diff summary |
+| `ollama_generate` | `llm`, `ollama` | Raw Ollama `/api/generate` call (prompt + response) |
+
+Workers initialize Opik automatically via the `worker_init` Celery signal, so traces from background jobs appear in the same project.
+
+### Accessing the Opik UI
+
+1. Start infrastructure (includes Opik):
+   ```bash
+   docker-compose up -d
+   ```
+2. Open **[http://localhost:5173](http://localhost:5173)** in your browser.
+3. Select the **`grc-policy-server`** project from the left sidebar.
+
+You will see a trace list with latency, input prompts, model responses, and nested spans showing the full call chain for each request.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPIK_ENABLED` | `true` | Set to `false` to disable all tracing |
+| `OPIK_URL` | `http://localhost:5174` | Opik backend API URL (direct, bypasses nginx) |
+| `OPIK_PROJECT_NAME` | `grc-policy-server` | Project name in the Opik UI |
+
+When running the API or worker on the host (outside Docker), set `OPIK_URL=http://localhost:5174` in your `.env`.
+When running in Docker with the shared network, set `OPIK_URL=http://opik-backend:8080`.
+
+### Evaluating LLM accuracy
+
+From the Opik UI you can:
+- Browse individual traces to inspect prompts and model outputs side-by-side.
+- Filter by tag (`semantic-extraction`, `summarization`, `generation`) to focus on a specific operation type.
+- Compare latency across runs to detect regressions.
+- Add manual annotations or automated evaluations against a golden dataset.
+
 ## Infrastructure
 
 `docker-compose.yml` includes:
 
 - `redis`
-- `neo4j`
 - `weaviate`
+- `opik` (MySQL + ClickHouse + backend + frontend)
 
 Start with:
 
 ```bash
-docker-compose up --build
+docker-compose up -d
 ```
 
 ## TODOs

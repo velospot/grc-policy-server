@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -10,6 +11,7 @@ from grc_policy_server.services.comparision.policy_semantics import (
     clean_policy_text,
     compare_clause_meaning,
     extract_clause_meaning,
+    is_non_semantic_content,
     semantic_signature,
     token_overlap,
 )
@@ -119,11 +121,19 @@ class ClauseMatcher:
 
     def _select_content_nodes(self, nodes: list[dict]) -> list[dict]:
         content_nodes = [
-            node for node in nodes if node.get("node_type") in {"clause", "table"}
+            node
+            for node in nodes
+            if node.get("node_type") in {"clause", "table"}
+            and not is_non_semantic_content(self._node_clean_text(node))
         ]
         if content_nodes:
             return sorted(content_nodes, key=self._node_sort_key)
-        clause_nodes = [node for node in nodes if node.get("node_type") == "clause"]
+        clause_nodes = [
+            node
+            for node in nodes
+            if node.get("node_type") == "clause"
+            and not is_non_semantic_content(self._node_clean_text(node))
+        ]
         if clause_nodes:
             return sorted(clause_nodes, key=self._node_sort_key)
         return sorted(nodes, key=self._node_sort_key)
@@ -395,12 +405,25 @@ class ClauseMatcher:
             )
             matched_right_ids.add(right_id)
 
+    # Matches leading section numbers like "3.", "3.1", "3.1.2", "A.1", "B.2.1" or
+    # keyword prefixes like "Section 4", "Article 2.1", "Annex A.1", "Chapter 3 -"
+    _SECTION_NUMBER_RE = re.compile(
+        r'^(?:(?:section|article|chapter|part|annex|appendix)\s+)?(?:[A-Z]\.)?[\d.]+\s*[-–:.]?\s*',
+        re.IGNORECASE,
+    )
+
+    def _normalize_section_title(self, title: str) -> str:
+        """Strip leading section numbers/keywords so titles like
+        '3.1 Data Protection' and '4.1 Data Protection' compare as equal."""
+        cleaned = self._SECTION_NUMBER_RE.sub('', title).strip()
+        return cleaned or title
+
     def _section_score(self, left: _SectionBucket, right: _SectionBucket) -> float:
-        title_score = SequenceMatcher(
-            None,
-            left.title.lower(),
-            right.title.lower(),
-        ).ratio()
+        # Normalize titles to remove section numbers/depths before comparing so
+        # sections that were renumbered across document versions still match.
+        left_title = self._normalize_section_title(left.title.lower())
+        right_title = self._normalize_section_title(right.title.lower())
+        title_score = SequenceMatcher(None, left_title, right_title).ratio()
         text_score = token_overlap(left.clean_text, right.clean_text, self.language)
         order_penalty = abs(left.order - right.order)
         order_score = 1.0 / (1 + order_penalty)
@@ -444,8 +467,40 @@ class ClauseMatcher:
             score *= 0.8
         return max(0.0, min(score, 1.0))
 
+    def _table_title_score(self, left: dict, right: dict) -> float | None:
+        """Similarity between table captions/titles after normalisation.
+
+        Prefers the pre-normalised ``table_normalized_caption`` stored at
+        ingestion time (which already strips "Table N:", "Figure 3 -", etc.)
+        and falls back to stripping section-number prefixes from the raw title.
+
+        Returns None when either table has no caption/title so the caller can
+        skip this component rather than treating absence as zero similarity.
+        """
+        left_title = (
+            str(left.get("table_normalized_caption") or "").strip()
+            or self._normalize_section_title(str(left.get("title") or "").lower()).strip()
+        )
+        right_title = (
+            str(right.get("table_normalized_caption") or "").strip()
+            or self._normalize_section_title(str(right.get("title") or "").lower()).strip()
+        )
+        if not left_title or not right_title:
+            return None
+        return SequenceMatcher(None, left_title, right_title).ratio()
+
     def _table_score(self, left: dict, right: dict) -> float:
-        """Compute similarity score specifically for tables using structural comparison."""
+        """Compute similarity score for tables.
+
+        Matching is a two-step process that mirrors the overall comparison
+        strategy: first check whether the tables *refer to the same subject*
+        (title similarity), then measure how much of the actual content
+        (cells, structure) changed.
+
+        When tables have different section numbers or depths the title
+        normalization strips the numeric prefix so "Table 3: Risk Matrix" and
+        "Table 5: Risk Matrix" still receive a high title score.
+        """
         left_cells = left.get("table_cells") or []
         right_cells = right.get("table_cells") or []
         left_rows = left.get("table_num_rows", 0)
@@ -457,6 +512,10 @@ class ClauseMatcher:
         left_row_fp = set(left.get("table_row_fingerprints") or [])
         right_row_fp = set(right.get("table_row_fingerprints") or [])
 
+        # Step 1 – title similarity (subject-level match)
+        title_score = self._table_title_score(left, right)
+        has_title = title_score is not None
+
         schema_score = 0.0
         if left_schema and right_schema:
             schema_score = 1.0 if left_schema == right_schema else 0.0
@@ -465,12 +524,28 @@ class ClauseMatcher:
         if left_row_fp and right_row_fp:
             row_fp_score = len(left_row_fp & right_row_fp) / len(left_row_fp | right_row_fp)
 
-        # If no structural data available, fall back to text comparison
+        # Step 2 – content similarity (cell / text / structure)
+        # If no structural cell data fall back to full-text comparison.
         if not left_cells or not right_cells:
             text_score = self._table_text_score(left, right)
-            return 0.6 * text_score + 0.25 * schema_score + 0.15 * row_fp_score
+            if has_title:
+                # Strong caption match → title drives subject identity, text covers content.
+                if title_score >= 0.85:  # type: ignore[operator]
+                    return (
+                        0.50 * title_score  # type: ignore[operator]
+                        + 0.35 * text_score
+                        + 0.10 * schema_score
+                        + 0.05 * row_fp_score
+                    )
+                return (
+                    0.35 * title_score  # type: ignore[operator]
+                    + 0.40 * text_score
+                    + 0.15 * schema_score
+                    + 0.10 * row_fp_score
+                )
+            return 0.60 * text_score + 0.25 * schema_score + 0.15 * row_fp_score
 
-        # Dimension similarity (20% weight)
+        # Dimension similarity
         if left_rows == right_rows and left_cols == right_cols:
             dim_score = 1.0
         else:
@@ -478,14 +553,18 @@ class ClauseMatcher:
             col_sim = min(left_cols, right_cols) / max(left_cols, right_cols, 1)
             dim_score = (row_sim + col_sim) / 2
 
-        # Cell content comparison (60% weight)
+        # Cell content comparison – skip cells that carry no semantic value
+        # (page-number columns, bare numerics, etc.) so the score reflects
+        # meaningful content changes only.
         left_cell_map = {
             (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).lower().strip()
             for c in left_cells
+            if not is_non_semantic_content(str(c.get("text", "")))
         }
         right_cell_map = {
             (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).lower().strip()
             for c in right_cells
+            if not is_non_semantic_content(str(c.get("text", "")))
         }
 
         all_positions = set(left_cell_map.keys()) | set(right_cell_map.keys())
@@ -498,28 +577,49 @@ class ClauseMatcher:
                 if left_cell_map.get(pos) == right_cell_map.get(pos)
                 and left_cell_map.get(pos)  # Non-empty match
             )
-            # Partial matches - check for similar content
-            partial_matches = 0
+            partial_matches = 0.0
             for pos in all_positions:
                 left_val = left_cell_map.get(pos, "")
                 right_val = right_cell_map.get(pos, "")
                 if left_val and right_val and left_val != right_val:
-                    # Use token overlap for partial matching
                     overlap = token_overlap(left_val, right_val, self.language)
                     if overlap > 0.5:
                         partial_matches += overlap
 
             cell_score = (exact_matches + partial_matches) / len(all_positions)
 
-        # Text and canonical-signature similarity as backup
         text_score = self._table_text_score(left, right)
 
+        if has_title:
+            # Strong caption match → title is reliable subject identity signal.
+            if title_score >= 0.85:  # type: ignore[operator]
+                # Title (40%) + cell content (30%) + dims (10%) + text (8%) + schema (7%) + row_fp (5%)
+                return (
+                    0.40 * title_score  # type: ignore[operator]
+                    + 0.30 * cell_score
+                    + 0.10 * dim_score
+                    + 0.08 * text_score
+                    + 0.07 * schema_score
+                    + 0.05 * row_fp_score
+                )
+            # Moderate title match – balanced weights
+            # Title (20%) + cell content (35%) + dims (15%) + text (10%) + schema (10%) + row_fp (10%)
+            return (
+                0.20 * title_score  # type: ignore[operator]
+                + 0.35 * cell_score
+                + 0.15 * dim_score
+                + 0.10 * text_score
+                + 0.10 * schema_score
+                + 0.10 * row_fp_score
+            )
+
+        # No title available – fall back to structure-only weights
         return (
-            0.2 * dim_score
+            0.20 * dim_score
             + 0.45 * cell_score
             + 0.15 * text_score
-            + 0.1 * schema_score
-            + 0.1 * row_fp_score
+            + 0.10 * schema_score
+            + 0.10 * row_fp_score
         )
 
     def _table_text_score(self, left: dict, right: dict) -> float:

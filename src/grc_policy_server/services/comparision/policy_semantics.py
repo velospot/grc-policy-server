@@ -450,6 +450,51 @@ def is_noise_text(value: str) -> bool:
     return bool(_NOISE_RE.fullmatch(text))
 
 
+_NUMERIC_ONLY_RE = re.compile(r"^[\d\s.\-/,;:()\[\]]+$")
+_PAGE_REF_RE = re.compile(
+    r"^\s*(?:page|p\.?|pg\.?|seite|s\.?)\s*\d+\s*(?:of|von|de|sur)?\s*\d*\s*$",
+    re.IGNORECASE,
+)
+_VERSION_REF_RE = re.compile(r"^v?\d+(?:\.\d+){1,3}$", re.IGNORECASE)
+# Bare section/article labels with no descriptive text: "Section 3", "Annex B.2"
+_BARE_SECTION_REF_RE = re.compile(
+    r"^\s*(?:section|article|clause|annex|appendix|chapter|part)\s+[A-Z]?[\d.]+\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_non_semantic_content(text: str) -> bool:
+    """Return True if text is trivial / non-semantic.
+
+    Catches: page numbers, bare section-number refs, version strings,
+    short numeric codes, and other content that adds no diff signal.
+    Standard names like "ISO 27001" are *not* filtered.
+    """
+    cleaned = normalize_whitespace(text or "").strip()
+    if not cleaned:
+        return True
+    if len(cleaned) <= 7:
+        return True
+    # Pure numeric / punctuation sequences ("3.1.4", "42 / 56", etc.)
+    if _NUMERIC_ONLY_RE.fullmatch(cleaned):
+        return True
+    # Explicit page references ("Page 3", "p. 12 of 40")
+    if _PAGE_REF_RE.fullmatch(cleaned):
+        return True
+    # Version strings ("v1.2.3", "2.0.1")
+    if _VERSION_REF_RE.fullmatch(cleaned):
+        return True
+    # Bare section labels with no descriptive text ("Section 3", "Annex B.2")
+    if _BARE_SECTION_REF_RE.fullmatch(cleaned):
+        return True
+    # Short text that is overwhelmingly numeric (e.g. "ID 12345678")
+    # Threshold kept at 0.65 so "ISO 27001" (5/9 ≈ 0.56) is NOT filtered.
+    digit_count = sum(ch.isdigit() for ch in cleaned)
+    if len(cleaned) <= 20 and digit_count / len(cleaned) > 0.65:
+        return True
+    return False
+
+
 def ends_with_terminal_punctuation(value: str) -> bool:
     return bool((value or "").rstrip().endswith((".", "!", "?", ":", ";")))
 

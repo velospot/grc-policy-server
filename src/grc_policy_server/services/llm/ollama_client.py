@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
+import time
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -742,6 +745,8 @@ class OllamaClient(BaseLLM):
         url = f"{self.settings.base_url}{path}"
         last_exc: Exception | None = None
         for attempt in range(self.settings.max_retries + 1):
+            if attempt > 0:
+                time.sleep(random.uniform(0.1, 0.5))
             try:
                 response = self._sync_client.post(url, json=payload)
                 response.raise_for_status()
@@ -764,6 +769,8 @@ class OllamaClient(BaseLLM):
     async def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         last_exc: Exception | None = None
         for attempt in range(self.settings.max_retries + 1):
+            if attempt > 0:
+                await asyncio.sleep(random.uniform(0.1, 0.5))
             try:
                 r = await self._async_client.post(path, json=payload)
                 r.raise_for_status()

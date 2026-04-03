@@ -36,6 +36,7 @@ class KeyDifference(BaseModel):
     doc1Content: str | None
     doc2Content: str | None
     impact: str
+    changeSeverity: Literal["low", "medium", "high"] = "medium"
     doc1Reference: DocumentReference | None
     doc2Reference: DocumentReference | None
     nodeType: str = "clause"  # "clause" or "table"

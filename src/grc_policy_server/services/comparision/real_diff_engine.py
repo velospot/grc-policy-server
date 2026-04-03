@@ -31,12 +31,36 @@ from grc_policy_server.services.comparision.policy_semantics import (
     clean_policy_text,
     compare_clause_meaning,
     extract_clause_meaning,
+    is_non_semantic_content,
 )
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
+
+
+def severity_from_distance(distance: Optional[float], change_type: str) -> str:
+    """changeSeverity is the *inverse* of matchScore (distance = 1 − matchScore).
+
+    matchScore ≈ 1.0  →  distance ≈ 0.0  →  "low"   (barely changed)
+    matchScore ≈ 0.5  →  distance ≈ 0.5  →  "medium"
+    matchScore ≈ 0.0  →  distance ≈ 1.0  →  "high"  (completely different)
+
+    ADDED / REMOVED nodes have no counterpart so they are always "high".
+    """
+    if change_type in ("ADDED", "REMOVED"):
+        return "high"
+    if distance is None:
+        return "high"
+    # distance > 0.60  →  matchScore < 0.40
+    if distance > 0.60:
+        return "high"
+    # distance > 0.35  →  matchScore < 0.65
+    if distance > 0.35:
+        return "medium"
+    # distance ≤ 0.35  →  matchScore ≥ 0.65
+    return "low"
 
 
 def impact_from_distance(
@@ -126,6 +150,12 @@ class RealDiffEngine:
         diffs: List[KeyDifference] = []
 
         for match in matching.matches:
+            # Skip nodes whose content carries no semantic diff signal
+            # (page numbers, bare section refs, single digits, etc.)
+            if self._is_non_semantic_node(match.left) and self._is_non_semantic_node(
+                match.right
+            ):
+                continue
             meaning_change = self._meaning_change(match.left, match.right, language)
             if (
                 match.distance <= self.thresholds.unchanged_distance
@@ -163,6 +193,7 @@ class RealDiffEngine:
                         obligation_change=meaning_change,
                         node_type=node_type,
                     ),
+                    changeSeverity=severity_from_distance(match.distance, "MODIFIED"),
                     doc1Reference=left_ref,
                     doc2Reference=right_ref,
                     nodeType=node_type,
@@ -171,6 +202,8 @@ class RealDiffEngine:
             )
 
         for left_node in matching.removed:
+            if self._is_non_semantic_node(left_node):
+                continue
             left_ref = self._citation_from_neo4j_or_fallback(left_node)
             node_type = left_node.get("node_type") or "clause"
             is_table = node_type == "table"
@@ -191,6 +224,7 @@ class RealDiffEngine:
                     doc1Content=doc1_content,
                     doc2Content=None,
                     impact=impact_from_distance(None, "REMOVED"),
+                    changeSeverity="high",
                     doc1Reference=left_ref,
                     doc2Reference=None,
                     nodeType=node_type,
@@ -204,6 +238,8 @@ class RealDiffEngine:
             )
 
         for right_node in matching.added:
+            if self._is_non_semantic_node(right_node):
+                continue
             right_ref = self._citation_from_neo4j_or_fallback(right_node)
             node_type = right_node.get("node_type") or "clause"
             is_table = node_type == "table"
@@ -224,6 +260,7 @@ class RealDiffEngine:
                     doc1Content=None,
                     doc2Content=doc2_content,
                     impact=impact_from_distance(None, "ADDED"),
+                    changeSeverity="high",
                     doc1Reference=None,
                     doc2Reference=right_ref,
                     nodeType=node_type,
@@ -440,6 +477,13 @@ class RealDiffEngine:
             if markdown:
                 return markdown
         return str(chunk.get("text") or "")
+
+    def _is_non_semantic_node(self, node: dict) -> bool:
+        """Return True if the node's content has no semantic diff value."""
+        text = str(
+            node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))
+        ).strip()
+        return is_non_semantic_content(text)
 
     def _short(self, text: str, n: int = 90) -> str:
         t = " ".join((text or "").split())

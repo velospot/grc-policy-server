@@ -91,6 +91,9 @@ class HierarchyNode:
             "table_row_fingerprints": list(
                 self.metadata.get("table_row_fingerprints") or []
             ),
+            "table_normalized_caption": str(
+                self.metadata.get("normalized_caption") or ""
+            ),
         }
 
     def to_graph_record(self) -> dict[str, Any]:

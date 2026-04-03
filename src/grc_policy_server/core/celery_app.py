@@ -4,7 +4,6 @@ from celery import Celery
 
 from grc_policy_server.core.config import settings
 
-
 celery_app = Celery(
     "grc_policy_server",
     broker=settings.celery_broker_url,

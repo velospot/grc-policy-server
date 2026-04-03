@@ -30,7 +30,9 @@ from grc_policy_server.services.comparision.policy_semantics import (
     clean_policy_text,
     compare_clause_meaning,
     extract_clause_meaning,
+    is_non_semantic_content,
 )
+from grc_policy_server.services.comparision.real_diff_engine import severity_from_distance
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
@@ -131,6 +133,10 @@ class RealDiffEngineStream:
 
         streamed_diffs: List[KeyDifference] = []
         for match in matching.matches:
+            if self._is_non_semantic_node(match.left) and self._is_non_semantic_node(
+                match.right
+            ):
+                continue
             obligation_change = self._meaning_change(match.left, match.right, language)
             if (
                 match.distance <= self.thresholds.unchanged_distance
@@ -146,10 +152,14 @@ class RealDiffEngineStream:
             streamed_diffs.append(diff)
 
         for left_node in matching.removed:
+            if self._is_non_semantic_node(left_node):
+                continue
             diff = await self._make_removed(left_node)
             streamed_diffs.append(diff)
 
         for right_node in matching.added:
+            if self._is_non_semantic_node(right_node):
+                continue
             diff = await self._make_added(right_node)
             streamed_diffs.append(diff)
 
@@ -223,6 +233,7 @@ class RealDiffEngineStream:
                 obligation_change=obligation_change,
                 node_type=node_type,
             ),
+            changeSeverity=severity_from_distance(dist, "MODIFIED"),
             doc1Reference=left_ref,
             doc2Reference=right_ref,
             nodeType=node_type,
@@ -248,6 +259,7 @@ class RealDiffEngineStream:
             doc1Content=doc1_content,
             doc2Content=None,
             impact=impact_from("REMOVED", None),
+            changeSeverity="high",
             doc1Reference=left_ref,
             doc2Reference=None,
             nodeType=node_type,
@@ -275,6 +287,7 @@ class RealDiffEngineStream:
             doc1Content=None,
             doc2Content=doc2_content,
             impact=impact_from("ADDED", None),
+            changeSeverity="high",
             doc1Reference=None,
             doc2Reference=right_ref,
             nodeType=node_type,
@@ -282,6 +295,13 @@ class RealDiffEngineStream:
                 ChangeDetail(type="added", text=str(right.get("text") or doc2_content))
             ],
         )
+
+    def _is_non_semantic_node(self, node: dict) -> bool:
+        """Return True if the node's content has no semantic diff value."""
+        text = str(
+            node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))
+        ).strip()
+        return is_non_semantic_content(text)
 
     def _format_table_content(self, node: dict) -> str:
         """Format table content for display in diffs."""
