@@ -159,16 +159,22 @@ class DocumentIngestionService:
             clause_indexes.append(index)
             clause_texts.append(text)
 
-        if not clause_texts:
-            return parsed_chunks
-
         # Detect language from first chunks for better LLM accuracy
         language = await self._detect_language_from_chunks(parsed_chunks)
+
+        enriched = list(parsed_chunks)
+        if language:
+            for idx, chunk in enumerate(enriched):
+                metadata = dict(chunk.metadata)
+                metadata.setdefault("detected_language", language)
+                enriched[idx] = replace(chunk, metadata=metadata)
+
+        if not clause_texts:
+            return enriched
 
         extracted = await self.llm.extract_policy_meanings(
             texts=clause_texts, language=language
         )
-        enriched = list(parsed_chunks)
         for chunk_index, meaning in zip(clause_indexes, extracted, strict=False):
             chunk = enriched[chunk_index]
             metadata = dict(chunk.metadata)

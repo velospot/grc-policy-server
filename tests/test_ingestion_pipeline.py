@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from grc_policy_server.services.comparision.clause_matcher import (
@@ -14,6 +16,9 @@ from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 from grc_policy_server.services.ingestion.ocr_fallback import build_ocr_fallback_chunks
 from grc_policy_server.services.ingestion.policy_preprocessor import (
     preprocess_parsed_chunks,
+)
+from grc_policy_server.services.ingestion.section_summary_backfill import (
+    SectionSummaryBackfillService,
 )
 
 
@@ -364,3 +369,93 @@ def test_ocr_fallback_skips_when_tesseract_binary_missing(monkeypatch):
     assert metadata["enabled"] is True
     assert metadata["used"] is False
     assert metadata["reason"] == "missing_tesseract_binary"
+
+
+def test_section_summary_backfill_updates_existing_hierarchy(tmp_path):
+    document_dir = tmp_path / "doc-1"
+    document_dir.mkdir()
+    (document_dir / "metadata.json").write_text(
+        json.dumps({"id": "doc-1", "name": "policy.pdf"}),
+        encoding="utf-8",
+    )
+    (document_dir / "hierarchy.json").write_text(
+        json.dumps(
+            {
+                "documentStableId": "stable-doc-1",
+                "documentFamily": "policy",
+                "contentHash": "hash-1",
+                "metadata": {},
+                "nodes": [
+                    {
+                        "node_id": "section-1",
+                        "stable_id": "section-stable-1",
+                        "content_hash": "section-hash",
+                        "document_id": "doc-1",
+                        "document_stable_id": "stable-doc-1",
+                        "node_type": "section",
+                        "parent_id": "doc-1",
+                        "title": "Access Control",
+                        "text": "admins must use mfa.",
+                        "section_path": "Access Control",
+                        "section_titles": ["Access Control"],
+                        "page_number": 1,
+                        "ordinal": 1,
+                        "indexable": True,
+                        "excluded_from_index": False,
+                        "exclusion_reason": None,
+                        "source": "docling",
+                        "lineage": ["Access Control"],
+                        "lineage_ids": ["doc-1", "section-1"],
+                        "metadata": {},
+                    },
+                    {
+                        "node_id": "clause-1",
+                        "stable_id": "clause-stable-1",
+                        "content_hash": "clause-hash",
+                        "document_id": "doc-1",
+                        "document_stable_id": "stable-doc-1",
+                        "node_type": "clause",
+                        "parent_id": "section-1",
+                        "title": None,
+                        "text": "Admins must use MFA every 12 months.",
+                        "section_path": "Access Control",
+                        "section_titles": ["Access Control"],
+                        "page_number": 1,
+                        "ordinal": 2,
+                        "indexable": True,
+                        "excluded_from_index": False,
+                        "exclusion_reason": None,
+                        "source": "docling",
+                        "lineage": ["Access Control"],
+                        "lineage_ids": ["doc-1", "section-1"],
+                        "metadata": {"clean_text": "admins must use mfa every 12 months."},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class StubWeaviate:
+        def __init__(self):
+            self.records = []
+
+        def upsert_chunks(self, records):
+            self.records.extend(records)
+
+    service = SectionSummaryBackfillService(
+        upload_root=tmp_path,
+        weaviate=StubWeaviate(),  # type: ignore[arg-type]
+        neo4j=None,
+    )
+
+    result = service.backfill_all()
+    hierarchy = json.loads((document_dir / "hierarchy.json").read_text(encoding="utf-8"))
+    section_node = next(node for node in hierarchy["nodes"] if node["node_type"] == "section")
+
+    assert result.documents_seen == 1
+    assert result.documents_updated == 1
+    assert result.section_nodes_updated == 1
+    assert "section_summary_backfill_at" in hierarchy["metadata"]
+    assert section_node["metadata"]["summary_text"] == "admins must use mfa every 12 months."
+    assert section_node["metadata"]["summary_numbers"] == ["12"]

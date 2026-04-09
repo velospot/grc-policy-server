@@ -23,7 +23,7 @@ class MatchThresholds:
     max_match_distance: float = 0.35
     unchanged_distance: float = 0.20
     modified_distance: float = 0.25
-    min_section_score: float = 0.55
+    min_section_score: float = 0.45
     min_clause_score: float = 0.50
 
 
@@ -86,6 +86,7 @@ class ClauseMatcher:
         left_sections = self._build_sections(left_nodes, left)
         right_sections = self._build_sections(right_nodes, right)
         matched_section_keys = self._match_sections(left_sections, right_sections)
+        section_map = {left: right for left, right, _ in matched_section_keys}
 
         for left_key, right_key, matched_by in matched_section_keys:
             self._match_section_items(
@@ -102,6 +103,7 @@ class ClauseMatcher:
             matched_left=matched_left,
             matched_right_ids=matched_right_ids,
             target_document_id=target_document_id,
+            section_map=section_map,
         )
 
         removed = [
@@ -127,6 +129,9 @@ class ClauseMatcher:
             and not is_non_semantic_content(self._node_clean_text(node))
         ]
         if content_nodes:
+            prioritized = [node for node in content_nodes if not node.get("low_priority")]
+            if prioritized:
+                return sorted(prioritized, key=self._node_sort_key)
             return sorted(content_nodes, key=self._node_sort_key)
         clause_nodes = [
             node
@@ -169,7 +174,12 @@ class ClauseMatcher:
             title = str(
                 (section_node or {}).get("title") or section_path.split(" / ")[-1]
             )
-            clean_text = str((section_node or {}).get("clean_text") or "").strip()
+            clean_text = str(
+                (section_node or {}).get("section_summary")
+                or (section_node or {}).get("summary_text")
+                or (section_node or {}).get("clean_text")
+                or ""
+            ).strip()
             if not clean_text:
                 clean_text = " ".join(
                     self._node_clean_text(item) for item in items if item
@@ -348,6 +358,7 @@ class ClauseMatcher:
         matched_left: dict[str, ClauseMatch],
         matched_right_ids: set[str],
         target_document_id: str,
+        section_map: dict[str, str],
     ) -> None:
         node_types = sorted(
             {
@@ -364,6 +375,11 @@ class ClauseMatcher:
             left_id = str(left_node.get("chunk_id") or "")
             if not left_id or left_id in matched_left:
                 continue
+            left_section = str(left_node.get("section_path") or "")
+            right_section = section_map.get(left_section)
+            if not right_section:
+                # Hierarchical compare: only align within matched sections.
+                continue
             query_text = self._node_clean_text(left_node)
             if not query_text:
                 continue
@@ -376,6 +392,8 @@ class ClauseMatcher:
             )
             for candidate in matches:
                 right_id = str(candidate.get("chunk_id") or "")
+                if str(candidate.get("section_path") or "") != right_section:
+                    continue
                 if (
                     not right_id
                     or right_id in matched_right_ids
@@ -411,6 +429,10 @@ class ClauseMatcher:
         r'^(?:(?:section|article|chapter|part|annex|appendix)\s+)?(?:[A-Z]\.)?[\d.]+\s*[-–:.]?\s*',
         re.IGNORECASE,
     )
+    # Extracts the pure numeric portion of a section number (e.g. "3.2.1" from "3.2.1 Title")
+    _SECTION_NUM_EXTRACT_RE = re.compile(r'^(?:[A-Z]\.)?(\d+(?:\.\d+)*)', re.IGNORECASE)
+    # Detects a table/figure caption row: starts with "table N" or "figure N"
+    _CAPTION_ROW_RE = re.compile(r'^(?:table|tbl\.?|figure|fig\.?)\s*\d', re.IGNORECASE)
 
     def _normalize_section_title(self, title: str) -> str:
         """Strip leading section numbers/keywords so titles like
@@ -418,16 +440,94 @@ class ClauseMatcher:
         cleaned = self._SECTION_NUMBER_RE.sub('', title).strip()
         return cleaned or title
 
+    def _numbering_depth_score(self, left_key: str, right_key: str) -> float:
+        """Score how closely the section numbering depths match.
+
+        Sections at the same nesting depth (e.g. "3.2" and "8.2") receive 1.0.
+        Sections differing by one level receive 0.6; more than one level, 0.2.
+        Unnumbered sections on both sides receive 1.0.
+        """
+        left_m = self._SECTION_NUM_EXTRACT_RE.match(left_key.strip())
+        right_m = self._SECTION_NUM_EXTRACT_RE.match(right_key.strip())
+        if not left_m and not right_m:
+            return 1.0  # both unnumbered (e.g. "FOREWORD")
+        if not left_m or not right_m:
+            return 0.3  # one numbered, one not
+        left_depth = left_m.group(1).count('.') + 1
+        right_depth = right_m.group(1).count('.') + 1
+        diff = abs(left_depth - right_depth)
+        if diff == 0:
+            return 1.0
+        if diff == 1:
+            return 0.6
+        return 0.2
+
+    def _has_caption_row(self, node: dict) -> bool:
+        """Return True when a table's row 0 is a caption embedded as a table cell.
+
+        This happens when the PDF extractor folds the caption text into the first
+        row of the table rather than exposing it as a separate title field.
+        A caption row is identified by:
+          - a single cell at (row=0, col=0) that spans all (or all-but-one) columns, AND
+          - the cell text matches the "Table N" / "Figure N" pattern.
+        """
+        cells = node.get("table_cells") or []
+        num_cols = int(node.get("table_num_cols") or 0)
+        if not cells or num_cols == 0:
+            return False
+        row0_cells = [c for c in cells if int(c.get("row", -1)) == 0]
+        if len(row0_cells) != 1:
+            return False
+        cell = row0_cells[0]
+        col_span = int(cell.get("col_span", 1))
+        text = str(cell.get("text") or "").strip()
+        return col_span >= max(1, num_cols - 1) and bool(self._CAPTION_ROW_RE.match(text))
+
+    def _normalize_cells_for_comparison(self, node: dict) -> list[dict]:
+        """Return cells with the caption row stripped and remaining rows re-indexed.
+
+        When a table has a caption at row 0, stripping it and shifting all other
+        rows down by 1 aligns the cell grid with a table that stores the caption
+        externally, enabling accurate position-based cell comparison.
+        """
+        cells = node.get("table_cells") or []
+        if not cells or not self._has_caption_row(node):
+            return cells
+        result = []
+        for c in cells:
+            row = int(c.get("row", 0))
+            if row == 0:
+                continue
+            result.append({**c, "row": row - 1})
+        return result
+
     def _section_score(self, left: _SectionBucket, right: _SectionBucket) -> float:
-        # Normalize titles to remove section numbers/depths before comparing so
-        # sections that were renumbered across document versions still match.
+        """Hybrid section similarity using four weighted components.
+
+        Formula (mirrors the spec):
+          0.20 * title_similarity       – normalized title match
+          0.15 * numbering_similarity   – section depth match
+          0.15 * path_similarity        – document-order proximity (proxy for parent path)
+          0.50 * content_similarity     – token overlap of concatenated child content
+
+        Content gets the dominant weight so sections that were renumbered or
+        lightly renamed still align as long as their child content is similar.
+        Order proximity uses a soft penalty (× 0.3) so sections that shifted
+        position across versions are not penalised too harshly.
+        """
         left_title = self._normalize_section_title(left.title.lower())
         right_title = self._normalize_section_title(right.title.lower())
         title_score = SequenceMatcher(None, left_title, right_title).ratio()
-        text_score = token_overlap(left.clean_text, right.clean_text, self.language)
+        content_score = token_overlap(left.clean_text, right.clean_text, self.language)
+        numbering_score = self._numbering_depth_score(left.key, right.key)
         order_penalty = abs(left.order - right.order)
-        order_score = 1.0 / (1 + order_penalty)
-        return 0.45 * title_score + 0.40 * text_score + 0.15 * order_score
+        path_score = 1.0 / (1 + order_penalty * 0.3)
+        return (
+            0.20 * title_score
+            + 0.15 * numbering_score
+            + 0.15 * path_score
+            + 0.50 * content_score
+        )
 
     def _clause_score(self, left: dict, right: dict) -> float:
         # Use table-specific scoring for tables
@@ -497,23 +597,48 @@ class ClauseMatcher:
         (title similarity), then measure how much of the actual content
         (cells, structure) changed.
 
+        Caption-row normalisation: some PDF extractors embed the table caption
+        as a spanning row 0 rather than as an external title.  We detect and
+        strip such rows before comparing cell grids and dimensions so that a
+        table with an embedded caption is treated identically to one where the
+        caption is stored externally.
+
         When tables have different section numbers or depths the title
         normalization strips the numeric prefix so "Table 3: Risk Matrix" and
         "Table 5: Risk Matrix" still receive a high title score.
         """
-        left_cells = left.get("table_cells") or []
-        right_cells = right.get("table_cells") or []
-        left_rows = left.get("table_num_rows", 0)
+        # Normalise cells – strip caption rows and re-index remaining rows.
+        left_cells_norm = self._normalize_cells_for_comparison(left)
+        right_cells_norm = self._normalize_cells_for_comparison(right)
+        left_has_caption = self._has_caption_row(left)
+        right_has_caption = self._has_caption_row(right)
+
+        # Use caption-adjusted row counts for dimension comparison.
+        left_rows = max(0, (left.get("table_num_rows") or 0) - (1 if left_has_caption else 0))
         left_cols = left.get("table_num_cols", 0)
-        right_rows = right.get("table_num_rows", 0)
+        right_rows = max(0, (right.get("table_num_rows") or 0) - (1 if right_has_caption else 0))
         right_cols = right.get("table_num_cols", 0)
+
         left_schema = str(left.get("table_schema_signature") or "")
         right_schema = str(right.get("table_schema_signature") or "")
         left_row_fp = set(left.get("table_row_fingerprints") or [])
         right_row_fp = set(right.get("table_row_fingerprints") or [])
 
-        # Step 1 – title similarity (subject-level match)
+        # Step 1 – title similarity (subject-level match).
+        # Prefer the table's own normalised caption; fall back to any caption row
+        # text that was detected during normalisation.
         title_score = self._table_title_score(left, right)
+        if title_score is None and (left_has_caption or right_has_caption):
+            # Derive title from the caption row cell text.
+            def _caption_text(node: dict) -> str:
+                for c in (node.get("table_cells") or []):
+                    if int(c.get("row", -1)) == 0 and int(c.get("col", -1)) == 0:
+                        return self._normalize_section_title(str(c.get("text") or "").lower()).strip()
+                return ""
+            lt = _caption_text(left)
+            rt = _caption_text(right)
+            if lt and rt:
+                title_score = SequenceMatcher(None, lt, rt).ratio()
         has_title = title_score is not None
 
         schema_score = 0.0
@@ -524,12 +649,11 @@ class ClauseMatcher:
         if left_row_fp and right_row_fp:
             row_fp_score = len(left_row_fp & right_row_fp) / len(left_row_fp | right_row_fp)
 
-        # Step 2 – content similarity (cell / text / structure)
+        # Step 2 – content similarity (cell / text / structure).
         # If no structural cell data fall back to full-text comparison.
-        if not left_cells or not right_cells:
+        if not left_cells_norm or not right_cells_norm:
             text_score = self._table_text_score(left, right)
             if has_title:
-                # Strong caption match → title drives subject identity, text covers content.
                 if title_score >= 0.85:  # type: ignore[operator]
                     return (
                         0.50 * title_score  # type: ignore[operator]
@@ -545,7 +669,7 @@ class ClauseMatcher:
                 )
             return 0.60 * text_score + 0.25 * schema_score + 0.15 * row_fp_score
 
-        # Dimension similarity
+        # Dimension similarity (using caption-adjusted counts).
         if left_rows == right_rows and left_cols == right_cols:
             dim_score = 1.0
         else:
@@ -553,17 +677,21 @@ class ClauseMatcher:
             col_sim = min(left_cols, right_cols) / max(left_cols, right_cols, 1)
             dim_score = (row_sim + col_sim) / 2
 
-        # Cell content comparison – skip cells that carry no semantic value
-        # (page-number columns, bare numerics, etc.) so the score reflects
-        # meaningful content changes only.
+        # Cell content comparison using normalised cells (caption rows removed).
+        # Skip cells that carry no semantic value (page numbers, bare numerics).
+        # Strip trailing punctuation so "Temperature:" == "temperature".
+        def _norm_cell(text: str) -> str:
+            t = str(text).lower().strip()
+            return t.rstrip(':.,;-')
+
         left_cell_map = {
-            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).lower().strip()
-            for c in left_cells
+            (c.get("row", 0), c.get("col", 0)): _norm_cell(str(c.get("text", "")))
+            for c in left_cells_norm
             if not is_non_semantic_content(str(c.get("text", "")))
         }
         right_cell_map = {
-            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).lower().strip()
-            for c in right_cells
+            (c.get("row", 0), c.get("col", 0)): _norm_cell(str(c.get("text", "")))
+            for c in right_cells_norm
             if not is_non_semantic_content(str(c.get("text", "")))
         }
 
@@ -591,9 +719,7 @@ class ClauseMatcher:
         text_score = self._table_text_score(left, right)
 
         if has_title:
-            # Strong caption match → title is reliable subject identity signal.
             if title_score >= 0.85:  # type: ignore[operator]
-                # Title (40%) + cell content (30%) + dims (10%) + text (8%) + schema (7%) + row_fp (5%)
                 return (
                     0.40 * title_score  # type: ignore[operator]
                     + 0.30 * cell_score
@@ -602,8 +728,6 @@ class ClauseMatcher:
                     + 0.07 * schema_score
                     + 0.05 * row_fp_score
                 )
-            # Moderate title match – balanced weights
-            # Title (20%) + cell content (35%) + dims (15%) + text (10%) + schema (10%) + row_fp (10%)
             return (
                 0.20 * title_score  # type: ignore[operator]
                 + 0.35 * cell_score
@@ -613,7 +737,7 @@ class ClauseMatcher:
                 + 0.10 * row_fp_score
             )
 
-        # No title available – fall back to structure-only weights
+        # No title available – fall back to structure-only weights.
         return (
             0.20 * dim_score
             + 0.45 * cell_score
@@ -690,7 +814,10 @@ class ClauseMatcher:
 
     def _node_clean_text(self, node: dict) -> str:
         return str(
-            node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))
+            node.get("comparison_text")
+            or node.get("canonical_text")
+            or node.get("clean_text")
+            or clean_policy_text(str(node.get("text") or ""))
         ).strip()
 
     def _length_similarity(self, left: str, right: str) -> float:

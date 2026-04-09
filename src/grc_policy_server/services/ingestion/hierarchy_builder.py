@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 from typing import Iterable
 
+from grc_policy_server.services.comparision.policy_semantics import extract_clause_meaning
 from grc_policy_server.services.ingestion.hierarchy_models import (
     DocumentHierarchy,
     HierarchyNode,
@@ -30,6 +31,18 @@ _VERSION_SUFFIX_RE = re.compile(
     r"(?i)(?:[-_ ](?:v(?:ersion)?[-_ ]?)?\d+(?:\.\d+)*)$"
 )
 _MAX_SECTION_TEXT = 5000
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_SUMMARY_OBLIGATION_RE = re.compile(
+    r"\b(shall|must|required|should|may|muss|müssen|soll|sollen|"
+    r"doit|doivent|devrait|peut|obligatoire|requis|exig[eé])\b",
+    re.IGNORECASE,
+)
+_SUMMARY_NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
+_SUMMARY_DURATION_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(day|days|week|weeks|month|months|year|years|"
+    r"hour|hours|minute|minutes|second|seconds|%|percent)\b",
+    re.IGNORECASE,
+)
 
 
 def build_document_hierarchy(
@@ -252,6 +265,7 @@ def build_document_hierarchy(
 
     for path, section_node in section_nodes.items():
         aggregated_text = _aggregate_section_text(section_buffers.get(path, []))
+        summary = summarize_section_fragments(section_buffers.get(path, []))
         section_node.text = aggregated_text
         section_node.content_hash = (
             sha256_hex(normalize_text(aggregated_text).encode("utf-8"))
@@ -261,6 +275,10 @@ def build_document_hierarchy(
         section_node.indexable = bool(aggregated_text) and not section_node.excluded_from_index
         section_node.metadata["descendant_text_fragments"] = len(section_buffers.get(path, []))
         section_node.metadata["clean_text"] = aggregated_text
+        section_node.metadata["summary_text"] = summary["summary_text"]
+        section_node.metadata["summary_obligations"] = summary["obligations"]
+        section_node.metadata["summary_numbers"] = summary["numbers"]
+        section_node.metadata["summary_sentences"] = summary["sentence_count"]
 
     indexable_nodes = [
         node
@@ -378,3 +396,52 @@ def _aggregate_section_text(parts: list[str]) -> str:
         out.append(cleaned)
         size += len(cleaned) + 2
     return "\n\n".join(out)
+
+
+def summarize_section_fragments(parts: list[str]) -> dict[str, object]:
+    """Create a compact, deterministic summary for section alignment."""
+    sentences: list[str] = []
+    for part in parts:
+        for sentence in _SENTENCE_SPLIT_RE.split(part or ""):
+            cleaned = " ".join(sentence.split())
+            if cleaned:
+                sentences.append(cleaned)
+
+    if not sentences:
+        return {
+            "summary_text": "",
+            "obligations": [],
+            "numbers": [],
+            "sentence_count": 0,
+        }
+
+    scored: list[tuple[int, int]] = []
+    for idx, sentence in enumerate(sentences):
+        score = 0
+        if _SUMMARY_OBLIGATION_RE.search(sentence):
+            score += 2
+        if _SUMMARY_DURATION_RE.search(sentence) or _SUMMARY_NUMBER_RE.search(sentence):
+            score += 1
+        scored.append((score, idx))
+
+    selected: list[int]
+    if any(score > 0 for score, _ in scored):
+        top = sorted(scored, key=lambda item: (-item[0], item[1]))[:6]
+        selected = sorted(idx for _, idx in top)
+    else:
+        selected = list(range(min(2, len(sentences))))
+
+    summary_text = " ".join(sentences[idx] for idx in selected).strip()
+    obligations: list[str] = []
+    for idx in selected:
+        meaning = extract_clause_meaning(sentences[idx])
+        if meaning.obligation:
+            obligations.append(meaning.obligation)
+    numbers = sorted(set(_SUMMARY_NUMBER_RE.findall(summary_text)))
+
+    return {
+        "summary_text": summary_text,
+        "obligations": obligations,
+        "numbers": numbers,
+        "sentence_count": len(selected),
+    }

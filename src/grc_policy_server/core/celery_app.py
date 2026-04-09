@@ -32,6 +32,7 @@ celery_app.conf.update(
     imports=(
         "grc_policy_server.tasks.upload_v2",
         "grc_policy_server.tasks.compare_v2",
+        "grc_policy_server.tasks.backfill_section_summaries",
     ),
     task_serializer="json",
     result_serializer="json",

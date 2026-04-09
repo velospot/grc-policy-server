@@ -109,6 +109,22 @@ def test_prompt_summarize_changes_uses_canonical_diffs_json():
     assert 'Differences JSON:\n[{"a":1,"b":2}]' in prompt
 
 
+def test_key_difference_severity_alias_defaults_from_change_severity():
+    diff = KeyDifference(
+        changeType="MODIFIED",
+        section="Access Control",
+        doc1Content="Old",
+        doc2Content="New",
+        impact="High",
+        changeSeverity="medium",
+        doc1Reference=DocumentReference(section="Access Control", page=1, sourceText="Old"),
+        doc2Reference=DocumentReference(section="Access Control", page=1, sourceText="New"),
+    )
+
+    assert diff.severity == "medium"
+    assert "changeSeverity" not in diff.model_dump()
+
+
 @pytest.mark.anyio
 async def test_detect_language_deterministic_german():
     client = OllamaClient()

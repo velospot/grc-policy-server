@@ -6,6 +6,8 @@ from dataclasses import replace
 from grc_policy_server.services.comparision.policy_semantics import (
     clean_policy_text,
     ends_with_terminal_punctuation,
+    extract_clause_meaning,
+    is_non_semantic_content,
     is_noise_text,
     starts_with_lowercase,
 )
@@ -16,6 +18,30 @@ _AUXILIARY_TITLE_RE = re.compile(
     r"^\s*(table of contents|contents|index|glossary|list of figures|list of tables)\s*$",
     re.IGNORECASE,
 )
+_CAPTION_ONLY_RE = re.compile(
+    r"^(?:table|tbl\.?|figure|fig\.?)\s*[a-z]?\d+(?:[\.-]\d+)*\s*[:\-]?\s*\w+",
+    re.IGNORECASE,
+)
+_OBLIGATION_HINT_RE = re.compile(
+    r"\b(shall|must|required|should|may|muss|müssen|soll|sollen|darf|doit|doivent|"
+    r"devrait|peut|obligatoire|requis|exig[eé])\b",
+    re.IGNORECASE,
+)
+_ROLE_HINT_RE = re.compile(
+    r"\b(committee|officer|team|owner|responsible|administrator|admin|manager|"
+    r"custodian|compliance|risk|security|audit)\b",
+    re.IGNORECASE,
+)
+_REG_HINT_RE = re.compile(
+    r"\b(gdpr|rgpd|dsgvo|iso\s?\d+|hipaa|sox|pci|nist|ai\s+act|eu\s+ai\s+act)\b",
+    re.IGNORECASE,
+)
+_DURATION_HINT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(day|days|week|weeks|month|months|year|years|"
+    r"hour|hours|minute|minutes|second|seconds|%|percent)\b",
+    re.IGNORECASE,
+)
+_NUMBER_HINT_RE = re.compile(r"\b\d{1,4}\b")
 
 
 def looks_like_auxiliary(text: str, section_title: str) -> bool:
@@ -55,13 +81,26 @@ def preprocess_parsed_chunks(parsed_chunks: list[ParsedChunk]) -> list[ParsedChu
             clean_source = chunk.text
         clean_text = clean_policy_text(clean_source)
         if chunk.chunk_type in {"clause", "table"} and (
-            not clean_text or is_noise_text(clean_text)
+            not clean_text
+            or is_noise_text(clean_text)
+            or is_non_semantic_content(clean_text)
         ):
             continue
 
         metadata = dict(chunk.metadata)
         metadata["clean_text"] = clean_text
-        metadata["canonical_text"] = normalize_for_comparison(clean_source)
+        comparison_text = normalize_for_comparison(clean_text)
+        metadata["canonical_text"] = comparison_text
+        metadata["comparison_text"] = comparison_text
+        metadata["comparison_profile"] = (
+            "table_semantic" if chunk.chunk_type == "table" else "paragraph_semantic"
+        )
+        metadata["low_priority"] = _is_caption_like(clean_text)
+        importance_score, importance_label = _importance_score(
+            clean_text, chunk.chunk_type
+        )
+        metadata["importance_score"] = importance_score
+        metadata["importance_label"] = importance_label
         if chunk.chunk_type == "table" and chunk.markdown_text:
             metadata["table_markdown"] = chunk.markdown_text
         current = replace(chunk, metadata=metadata)
@@ -73,6 +112,40 @@ def preprocess_parsed_chunks(parsed_chunks: list[ParsedChunk]) -> list[ParsedChu
         processed.append(current)
 
     return processed
+
+
+def _is_caption_like(text: str) -> bool:
+    """Detect low-signal caption-only blocks ("Table 3: Risk Matrix")."""
+    cleaned = (text or "").strip()
+    if not cleaned or len(cleaned.split()) > 12:
+        return False
+    return bool(_CAPTION_ONLY_RE.match(cleaned))
+
+
+def _importance_score(text: str, chunk_type: str) -> tuple[float, str]:
+    """Heuristic importance score to prioritize meaningful clauses for comparison."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return 0.0, "low"
+
+    score = 0.5 if chunk_type == "table" else 0.1
+
+    meaning = extract_clause_meaning(cleaned)
+    if meaning.obligation or _OBLIGATION_HINT_RE.search(cleaned):
+        score += 0.4
+    if _DURATION_HINT_RE.search(cleaned) or _NUMBER_HINT_RE.search(cleaned):
+        score += 0.15
+    if _ROLE_HINT_RE.search(cleaned):
+        score += 0.15
+    if _REG_HINT_RE.search(cleaned):
+        score += 0.1
+
+    score = min(score, 1.0)
+    if score >= 0.65:
+        return score, "high"
+    if score >= 0.35:
+        return score, "medium"
+    return score, "low"
 
 
 def _should_merge(previous: ParsedChunk, current: ParsedChunk) -> bool:

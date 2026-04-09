@@ -46,6 +46,31 @@ class HierarchyNode:
     lineage_ids: list[str]
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @classmethod
+    def from_graph_record(cls, record: dict[str, Any]) -> "HierarchyNode":
+        return cls(
+            node_id=str(record.get("node_id") or ""),
+            stable_id=str(record.get("stable_id") or ""),
+            content_hash=str(record.get("content_hash") or ""),
+            document_id=str(record.get("document_id") or ""),
+            document_stable_id=str(record.get("document_stable_id") or ""),
+            node_type=str(record.get("node_type") or "clause"),  # type: ignore[arg-type]
+            parent_id=record.get("parent_id"),
+            title=record.get("title"),
+            text=str(record.get("text") or ""),
+            section_path=str(record.get("section_path") or "Unknown Section"),
+            section_titles=list(record.get("section_titles") or []),
+            page_number=record.get("page_number"),
+            ordinal=int(record.get("ordinal") or 0),
+            indexable=bool(record.get("indexable", False)),
+            excluded_from_index=bool(record.get("excluded_from_index", False)),
+            exclusion_reason=record.get("exclusion_reason"),
+            source=str(record.get("source") or "docling"),
+            lineage=list(record.get("lineage") or []),
+            lineage_ids=list(record.get("lineage_ids") or []),
+            metadata=dict(record.get("metadata") or {}),
+        )
+
     @property
     def chunk_id(self) -> str:
         return self.node_id
@@ -66,6 +91,7 @@ class HierarchyNode:
             "section_path": self.section_path or "Unknown Section",
             "text": self.text,
             "clean_text": clean_text,
+            "comparison_text": str(self.metadata.get("comparison_text") or ""),
             "chunk_index": self.ordinal,
             "page_number": self.page_number,
             "indexable": self.indexable,
@@ -81,6 +107,14 @@ class HierarchyNode:
             "condition": str(self.metadata.get("condition") or ""),
             "markdown_text": str(self.metadata.get("markdown_text") or ""),
             "canonical_text": str(self.metadata.get("canonical_text") or ""),
+            "comparison_profile": str(
+                self.metadata.get("comparison_profile") or ""
+            ),
+            "importance_score": float(self.metadata.get("importance_score") or 0.0),
+            "importance_label": str(self.metadata.get("importance_label") or ""),
+            "low_priority": bool(self.metadata.get("low_priority", False)),
+            "detected_language": str(self.metadata.get("detected_language") or ""),
+            "section_summary": str(self.metadata.get("summary_text") or ""),
             # Table structure for structural comparison
             "table_num_rows": table_structure.get("num_rows", 0) if table_structure else 0,
             "table_num_cols": table_structure.get("num_cols", 0) if table_structure else 0,

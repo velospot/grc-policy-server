@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import List, Optional
 
 from grc_policy_server.core.logging import logging
@@ -39,9 +41,17 @@ from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
 
+# Caption row: a table row 0 whose single spanning cell is "Table N …" / "Figure N …"
+_CAPTION_ROW_RE = re.compile(r"^(?:table|tbl\.?|figure|fig\.?)\s*\d", re.IGNORECASE)
+# Reference-only tokens: table/figure/section numbers inline in text
+_REF_TOKEN_RE = re.compile(
+    r"\b(?:table|tbl\.?|figure|fig\.?|section|sec\.?|clause|annex|appendix)\s*[\d][\d.\-]*\b",
+    re.IGNORECASE,
+)
+
 
 def severity_from_distance(distance: Optional[float], change_type: str) -> str:
-    """changeSeverity is the *inverse* of matchScore (distance = 1 − matchScore).
+    """Severity is the inverse of matchScore (distance = 1 − matchScore).
 
     matchScore ≈ 1.0  →  distance ≈ 0.0  →  "low"   (barely changed)
     matchScore ≈ 0.5  →  distance ≈ 0.5  →  "medium"
@@ -176,6 +186,12 @@ class RealDiffEngine:
             else:
                 doc1_content = self._short(str(match.left.get("text") or ""))
                 doc2_content = self._short(str(match.right.get("text") or ""))
+            severity = self._compute_severity(
+                match.distance,
+                "MODIFIED",
+                match.left,
+                match.right,
+            )
 
             diffs.append(
                 KeyDifference(
@@ -193,7 +209,7 @@ class RealDiffEngine:
                         obligation_change=meaning_change,
                         node_type=node_type,
                     ),
-                    changeSeverity=severity_from_distance(match.distance, "MODIFIED"),
+                    changeSeverity=severity,
                     doc1Reference=left_ref,
                     doc2Reference=right_ref,
                     nodeType=node_type,
@@ -311,6 +327,204 @@ class RealDiffEngine:
             accuracyMetrics=accuracy_metrics,
         )
 
+    # ------------------------------------------------------------------ #
+    #  Caption-row helpers                                                #
+    # ------------------------------------------------------------------ #
+
+    def _has_caption_row(self, node: dict) -> bool:
+        """Return True when a table's row 0 is a caption embedded as a table cell.
+
+        Detected when row 0 contains exactly one cell that spans all (or all-but-one)
+        columns and whose text matches the "Table N" / "Figure N" pattern.
+        """
+        cells = node.get("table_cells") or []
+        num_cols = int(node.get("table_num_cols") or 0)
+        if not cells or num_cols == 0:
+            return False
+        row0_cells = [c for c in cells if int(c.get("row", -1)) == 0]
+        if len(row0_cells) != 1:
+            return False
+        cell = row0_cells[0]
+        col_span = int(cell.get("col_span", 1))
+        text = str(cell.get("text") or "").strip()
+        return col_span >= max(1, num_cols - 1) and bool(_CAPTION_ROW_RE.match(text))
+
+    def _normalize_cells_for_comparison(self, node: dict) -> list[dict]:
+        """Return table cells with any caption row stripped and rows re-indexed."""
+        cells = node.get("table_cells") or []
+        if not cells or not self._has_caption_row(node):
+            return cells
+        result = []
+        for c in cells:
+            row = int(c.get("row", 0))
+            if row == 0:
+                continue
+            result.append({**c, "row": row - 1})
+        return result
+
+    # ------------------------------------------------------------------ #
+    #  Reference-only change detection                                    #
+    # ------------------------------------------------------------------ #
+
+    def _is_reference_only_change(self, left_text: str, right_text: str) -> bool:
+        """Return True when the two texts differ only in table/figure/section reference numbers.
+
+        Example: "See Table 2.1 for details." vs "See Table 1 for details."
+        Both collapse to "See REF for details." → identical → reference-only.
+        """
+        if not left_text or not right_text:
+            return False
+        left_norm = _REF_TOKEN_RE.sub("REF", left_text.lower())
+        right_norm = _REF_TOKEN_RE.sub("REF", right_text.lower())
+        left_norm = re.sub(r"\s+", " ", left_norm).strip()
+        right_norm = re.sub(r"\s+", " ", right_norm).strip()
+        return left_norm == right_norm
+
+    # ------------------------------------------------------------------ #
+    #  Severity computation                                               #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _normalize_cell_for_severity(text: str) -> str:
+        """Normalise cell text for semantic equality testing.
+
+        Strips trailing punctuation, collapses whitespace, and lowercases so
+        that cosmetic differences like "Temperature:" vs "temperature" are
+        treated as identical.
+        """
+        t = text.strip().lower()
+        t = re.sub(r"[\s]+", " ", t)
+        t = t.rstrip(":.,;-")
+        return t
+
+    def _table_severity(self, left: dict, right: dict) -> str:
+        """Severity for MODIFIED table pairs using cell-content overlap.
+
+        Rules (per spec):
+          low    – punctuation / spacing / caption placement only; cell meaning unchanged
+          medium – some cells changed; thresholds or descriptions partly updated
+          high   – rows/cols added/removed with compliance significance; obligations altered
+        """
+        left_cells = self._normalize_cells_for_comparison(left)
+        right_cells = self._normalize_cells_for_comparison(right)
+
+        if not left_cells or not right_cells:
+            # No cell data – fall back to markdown/text similarity
+            left_text = str(left.get("markdown_text") or left.get("text") or "")
+            right_text = str(right.get("markdown_text") or right.get("text") or "")
+            if not left_text or not right_text:
+                return "high"
+            ratio = SequenceMatcher(None, left_text, right_text).ratio()
+            if ratio > 0.85:
+                return "low"
+            if ratio > 0.50:
+                return "medium"
+            return "high"
+
+        _norm = self._normalize_cell_for_severity
+        left_cell_map = {
+            (int(c.get("row", 0)), int(c.get("col", 0))): _norm(str(c.get("text", "")))
+            for c in left_cells
+        }
+        right_cell_map = {
+            (int(c.get("row", 0)), int(c.get("col", 0))): _norm(str(c.get("text", "")))
+            for c in right_cells
+        }
+
+        all_positions = set(left_cell_map.keys()) | set(right_cell_map.keys())
+        if not all_positions:
+            return "medium"
+
+        # Use fuzzy matching so cosmetic differences (spacing around °, hyphens,
+        # unicode punctuation) don't prevent a cell from counting as "matching".
+        fuzzy_match_count = 0
+        exact_match_count = 0
+        for pos in all_positions:
+            lv = left_cell_map.get(pos, "")
+            rv = right_cell_map.get(pos, "")
+            if lv == rv and lv:
+                exact_match_count += 1
+                fuzzy_match_count += 1
+            elif lv and rv:
+                ratio = SequenceMatcher(None, lv, rv).ratio()
+                if ratio >= 0.85:
+                    fuzzy_match_count += 1
+
+        cell_overlap = fuzzy_match_count / len(all_positions)
+        exact_overlap = exact_match_count / len(all_positions)
+
+        # Adjusted dimensions (caption rows excluded)
+        left_rows_adj = max(
+            0,
+            (left.get("table_num_rows") or 0)
+            - (1 if self._has_caption_row(left) else 0),
+        )
+        right_rows_adj = max(
+            0,
+            (right.get("table_num_rows") or 0)
+            - (1 if self._has_caption_row(right) else 0),
+        )
+        dims_match = left_rows_adj == right_rows_adj and (
+            left.get("table_num_cols") or 0
+        ) == (right.get("table_num_cols") or 0)
+
+        # Low: dims match and nearly all cells are semantically the same
+        if dims_match and cell_overlap >= 0.85:
+            return "low"
+        # Medium: majority of cell meaning preserved
+        if cell_overlap >= 0.50:
+            return "medium"
+        return "high"
+
+    def _compute_severity(
+        self,
+        distance: Optional[float],
+        change_type: str,
+        left: dict | None = None,
+        right: dict | None = None,
+    ) -> str:
+        """Node-aware severity computation.
+
+        For ADDED/REMOVED the answer is always "high".
+        For MODIFIED tables, use cell-content overlap (not raw vector distance).
+        For MODIFIED text clauses, check for reference-only changes first, then
+        fall back to semantic drift thresholds.
+
+        Thresholds (per spec):
+          low    – ≤ 35 % semantic drift, or reference/formatting only
+          medium – 35 %–60 % semantic drift
+          high   – > 60 % semantic drift
+        """
+        if change_type in ("ADDED", "REMOVED"):
+            return "high"
+
+        node_type = (
+            (left or {}).get("node_type") or (right or {}).get("node_type") or "clause"
+        )
+
+        if node_type == "table" and left and right:
+            return self._table_severity(left, right)
+
+        # Reference-only changes → always low
+        if left and right:
+            left_text = str(left.get("text") or "")
+            right_text = str(right.get("text") or "")
+            if (
+                left_text
+                and right_text
+                and self._is_reference_only_change(left_text, right_text)
+            ):
+                return "low"
+
+        # Semantic drift thresholds
+        if distance is None:
+            return "high"
+        if distance > 0.60:
+            return "high"
+        if distance > 0.35:
+            return "medium"
+        return "low"
+
     def _meaning_change(self, left: dict, right: dict, language: str = "") -> str:
         if left.get("node_type") == "table" or right.get("node_type") == "table":
             return self._table_meaning_change(left, right)
@@ -321,19 +535,31 @@ class RealDiffEngine:
         ).obligation_change
 
     def _table_meaning_change(self, left: dict, right: dict) -> str:
-        """Detect structural/content differences in tables."""
-        left_rows = left.get("table_num_rows", 0)
+        """Detect structural/content differences in tables.
+
+        Caption rows are stripped before comparison so a table where the caption
+        is embedded as row 0 is treated identically to one where it is external.
+        """
+        left_cells = self._normalize_cells_for_comparison(left)
+        right_cells = self._normalize_cells_for_comparison(right)
+
+        # Caption-adjusted row counts
+        left_rows = max(
+            0,
+            (left.get("table_num_rows") or 0)
+            - (1 if self._has_caption_row(left) else 0),
+        )
         left_cols = left.get("table_num_cols", 0)
-        right_rows = right.get("table_num_rows", 0)
+        right_rows = max(
+            0,
+            (right.get("table_num_rows") or 0)
+            - (1 if self._has_caption_row(right) else 0),
+        )
         right_cols = right.get("table_num_cols", 0)
 
         # Dimension change = structural modification
         if left_rows != right_rows or left_cols != right_cols:
             return "modified"
-
-        # Check cell content differences
-        left_cells = left.get("table_cells") or []
-        right_cells = right.get("table_cells") or []
 
         left_cell_map = {
             (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).strip().lower()
@@ -354,9 +580,14 @@ class RealDiffEngine:
 
     def _format_table_content(self, node: dict) -> str:
         """Format table content for display in diffs."""
-        title = node.get("title") or ""
+        title = node.get("title") or node.get("table_normalized_caption") or ""
         num_rows = node.get("table_num_rows", 0)
         num_cols = node.get("table_num_cols", 0)
+
+        # Subtract caption row from displayed count so both docs show the same
+        # number when one embeds its caption as a row and the other does not.
+        if self._has_caption_row(node):
+            num_rows = max(0, (num_rows or 0) - 1)
 
         if num_rows and num_cols:
             table_desc = f"Table ({num_rows} rows × {num_cols} cols)"
@@ -822,11 +1053,23 @@ class RealDiffEngine:
         return None
 
     def _extract_table_changes(self, left: dict, right: dict) -> List[ChangeDetail]:
-        """Extract cell-level changes between two tables."""
+        """Extract cell-level changes between two tables.
+
+        Caption rows are stripped and rows re-indexed before comparison so that
+        a table with an embedded caption does not appear to have an extra row.
+        """
         changes: List[ChangeDetail] = []
 
-        left_rows = left.get("table_num_rows", 0)
-        right_rows = right.get("table_num_rows", 0)
+        left_rows = max(
+            0,
+            (left.get("table_num_rows") or 0)
+            - (1 if self._has_caption_row(left) else 0),
+        )
+        right_rows = max(
+            0,
+            (right.get("table_num_rows") or 0)
+            - (1 if self._has_caption_row(right) else 0),
+        )
 
         # Dimension changes
         if left_rows != right_rows:
@@ -846,9 +1089,9 @@ class RealDiffEngine:
                     )
                 )
 
-        # Cell-level changes
-        left_cells = left.get("table_cells") or []
-        right_cells = right.get("table_cells") or []
+        # Cell-level changes using caption-normalised cells
+        left_cells = self._normalize_cells_for_comparison(left)
+        right_cells = self._normalize_cells_for_comparison(right)
 
         left_cell_map = {
             (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).strip()
