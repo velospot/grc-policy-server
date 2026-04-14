@@ -4,8 +4,9 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -121,6 +122,13 @@ class Settings(BaseSettings):
     mongodb_database: str = "grc_policy_server"
     mongodb_collection: str = "documents"
 
+    postgres_host: str = "postgres"
+    postgres_port: int = 5432
+    postgres_user: str = "grc_admin"
+    postgres_password: str = "grc_admin"
+    postgres_db: str = "grc_db"
+    database_url: str | None = None
+
     neo4j_uri: str = "bolt://neo4j:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
@@ -146,6 +154,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("OLLAMA_EMBED_MODEL", "OLLAMA_EMBEDDING_MODEL"),
     )
     ollama_timeout_sec: float = 180.0
+    opik_enabled: bool = False
+    opik_url_override: str = "http://localhost:5173/api"
+    opik_project_name: str = "grc-policy-server"
+    opik_workspace: str = "default"
 
     @property
     def ollama_generation_model(self) -> str:
@@ -189,6 +201,20 @@ class Settings(BaseSettings):
     ocr_fallback_render_dpi: int = 180
     ocr_fallback_languages: str = "eng+deu+fra+spa"
     ocr_fallback_page_segmentation_mode: int = 6
+
+    @model_validator(mode="after")
+    def populate_database_url(self) -> "Settings":
+        if not _is_nullish_env_value(self.database_url):
+            return self
+
+        user = quote(self.postgres_user, safe="")
+        password = quote(self.postgres_password, safe="")
+        database = quote(self.postgres_db, safe="")
+        self.database_url = (
+            f"postgresql://{user}:{password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{database}"
+        )
+        return self
 
     def as_env_items(self) -> Mapping[str, Any]:
         values = self.model_dump()

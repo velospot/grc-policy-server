@@ -14,25 +14,24 @@ from grc_policy_server.models.schemas import (
     KeyDifference,
     SectionAccuracyMetrics,
 )
-from grc_policy_server.services.comparision.clause_matcher import (
+from grc_policy_server.services.comparison.clause_matcher import (
     ClauseMatch,
-    ClauseMatcher,
     MatchThresholds,
 )
-from grc_policy_server.services.comparision.diff_postprocessor import (
-    build_section_alignment_maps,
-    filter_key_differences,
-    find_unchanged_section_pairs,
-    random_diff_subset,
-)
-from grc_policy_server.services.comparision.policy_semantics import (
+from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
+from grc_policy_server.services.comparison.diff_postprocessor import random_diff_subset
+from grc_policy_server.services.comparison.policy_semantics import (
     ClauseMeaning,
     clean_policy_text,
     compare_clause_meaning,
     extract_clause_meaning,
     is_non_semantic_content,
 )
-from grc_policy_server.services.comparision.real_diff_engine import severity_from_distance
+from grc_policy_server.services.comparison.real_diff_engine import (
+    RealDiffEngine,
+    severity_from_distance,
+)
+from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
@@ -47,27 +46,18 @@ def impact_from(
     obligation_change: str = "unchanged",
     node_type: str = "clause",
 ) -> str:
-    if change_type == "ADDED":
+    """Map change signals to an impact label.  Only High / Medium / Low are produced."""
+    if change_type in ("ADDED", "REMOVED"):
         return "High"
-    if change_type == "REMOVED":
-        return "High"
-    if obligation_change == "weakened":
-        return "Critical"
-    if obligation_change == "strengthened":
-        return "High"
-    # For tables, "modified" means structural/content changes detected
-    if obligation_change == "modified" and node_type == "table":
-        # Tables with detected changes should be at least Medium impact
-        if distance is not None and distance > 0.15:
-            return "High"
+    if obligation_change in ("weakened", "strengthened"):
         return "Medium"
+    if obligation_change == "modified" and node_type == "table":
+        return "High" if distance is not None and distance > 0.15 else "Medium"
     if distance is None:
         return "High"
-    if distance > 0.45:
-        return "Critical"
-    if distance > 0.35:
+    if distance > 0.60:
         return "High"
-    if distance > 0.25:
+    if distance > 0.35:
         return "Medium"
     return "Low"
 
@@ -77,6 +67,8 @@ class RealDiffEngineStream:
     weaviate: WeaviateClient
     neo4j: Neo4jClient | None
     llm: OllamaClient
+    canonical_store: CanonicalDocumentStore | None = None
+    trace_store: ComparisonTraceStore | None = None
     thresholds: MatchThresholds = MatchThresholds()
     topk: int = 5
 
@@ -86,116 +78,42 @@ class RealDiffEngineStream:
         doc2: Document,
         force_re_extract: bool = False,
     ) -> AsyncIterator[Dict]:
-        yield {"type": "progress", "stage": "load_chunks"}
-
-        left_nodes = self.weaviate.fetch_chunks_by_document(doc1.id)
-        right_nodes = self.weaviate.fetch_chunks_by_document(doc2.id)
-
-        # Detect language from first document's text for better LLM accuracy
-        language = await self._detect_document_language(left_nodes)
-
-        left_nodes = await self._enrich_nodes_with_semantics(
-            left_nodes, force_re_extract=force_re_extract, language=language
+        yield {"type": "progress", "stage": "load_canonical_nodes"}
+        engine = RealDiffEngine(
+            weaviate=self.weaviate,
+            neo4j=self.neo4j,
+            llm=self.llm,
+            canonical_store=self.canonical_store,
+            trace_store=self.trace_store,
+            thresholds=self.thresholds,
+            topk=self.topk,
         )
-        right_nodes = await self._enrich_nodes_with_semantics(
-            right_nodes, force_re_extract=force_re_extract, language=language
+        result = await engine.compare(
+            doc1,
+            doc2,
+            force_re_extract=force_re_extract,
         )
 
         yield {
             "type": "progress",
-            "stage": "chunks_loaded",
-            "doc1_chunks": len(left_nodes),
-            "doc2_chunks": len(right_nodes),
+            "stage": "structured_change_records_ready",
+            "diffs": len(result.keyDifferences),
         }
-        yield {"type": "progress", "stage": "matching_start"}
 
-        matcher = ClauseMatcher(
-            search_fn=self.weaviate.search_section_in_document,
-            thresholds=self.thresholds,
-            topk=self.topk,
-            language=language,
-        )
-        matching = matcher.match(
-            left_nodes=left_nodes,
-            right_nodes=right_nodes,
-            target_document_id=doc2.id,
-        )
-        left_to_right, right_to_left = build_section_alignment_maps(
-            matching.section_matches
-        )
-        unchanged_section_pairs = find_unchanged_section_pairs(
-            section_matches=matching.section_matches,
-            left_nodes=left_nodes,
-            right_nodes=right_nodes,
-        )
-
-        yield {"type": "progress", "stage": "classification_start"}
-
-        streamed_diffs: List[KeyDifference] = []
-        for match in matching.matches:
-            if self._is_non_semantic_node(match.left) and self._is_non_semantic_node(
-                match.right
-            ):
-                continue
-            obligation_change = self._meaning_change(match.left, match.right, language)
-            if (
-                match.distance <= self.thresholds.unchanged_distance
-                and obligation_change == "unchanged"
-            ):
-                continue
-            diff = await self._make_modified(
-                match.left,
-                match.right,
-                match.distance,
-                obligation_change=obligation_change,
-            )
-            streamed_diffs.append(diff)
-
-        for left_node in matching.removed:
-            if self._is_non_semantic_node(left_node):
-                continue
-            diff = await self._make_removed(left_node)
-            streamed_diffs.append(diff)
-
-        for right_node in matching.added:
-            if self._is_non_semantic_node(right_node):
-                continue
-            diff = await self._make_added(right_node)
-            streamed_diffs.append(diff)
-
-        streamed_diffs = filter_key_differences(
-            streamed_diffs,
-            unchanged_section_pairs=unchanged_section_pairs,
-            left_to_right=left_to_right,
-            right_to_left=right_to_left,
-        )
-
-        await self._populate_markdown_diff_summaries(streamed_diffs, language=language)
-
-        for diff in streamed_diffs:
+        for diff in result.keyDifferences:
             yield {"type": "diff", "item": diff.model_dump()}
 
         yield {"type": "progress", "stage": "finalizing"}
-
-        summary = await self._two_step_summary(
-            doc1_name=doc1.name, doc2_name=doc2.name, diffs=streamed_diffs, language=language
-        )
-
-        action_plan = self._action_plan(streamed_diffs)
-        followups = await self._followups(
-            doc1_name=doc1.name,
-            doc2_name=doc2.name,
-            diffs=streamed_diffs,
-            language=language,
-        )
-        accuracy_metrics = self._compute_accuracy_metrics(matching.matches)
-
         yield {
             "type": "done",
-            "summary": summary,
-            "actionPlan": [action.model_dump() for action in action_plan],
-            "followUpQuestions": followups,
-            "accuracyMetrics": accuracy_metrics.model_dump(),
+            "summary": result.summary,
+            "actionPlan": [action.model_dump() for action in result.actionPlan],
+            "followUpQuestions": result.followUpQuestions,
+            "accuracyMetrics": (
+                result.accuracyMetrics.model_dump()
+                if result.accuracyMetrics is not None
+                else None
+            ),
         }
 
     async def _make_modified(
@@ -233,7 +151,7 @@ class RealDiffEngineStream:
                 obligation_change=obligation_change,
                 node_type=node_type,
             ),
-            severity=severity_from_distance(dist, "MODIFIED"),
+            changeSeverity=severity_from_distance(dist, "MODIFIED"),
             doc1Reference=left_ref,
             doc2Reference=right_ref,
             nodeType=node_type,
@@ -259,7 +177,7 @@ class RealDiffEngineStream:
             doc1Content=doc1_content,
             doc2Content=None,
             impact=impact_from("REMOVED", None),
-            severity="high",
+            changeSeverity="high",
             doc1Reference=left_ref,
             doc2Reference=None,
             nodeType=node_type,
@@ -287,7 +205,7 @@ class RealDiffEngineStream:
             doc1Content=None,
             doc2Content=doc2_content,
             impact=impact_from("ADDED", None),
-            severity="high",
+            changeSeverity="high",
             doc1Reference=None,
             doc2Reference=right_ref,
             nodeType=node_type,
@@ -472,12 +390,12 @@ class RealDiffEngineStream:
     def _action_plan(self, diffs: List[KeyDifference]) -> List[ActionItem]:
         actions: List[ActionItem] = []
         for diff in diffs:
-            if diff.impact in ("Critical", "High"):
+            if diff.impact == "High":
                 actions.append(
                     ActionItem(
-                        priority="Immediate" if diff.impact == "Critical" else "High",
+                        priority="High",
                         action=f"Assess controls impacted by {diff.changeType.lower()} changes in {diff.section}",
-                        timeline="30 days" if diff.impact == "Critical" else "60 days",
+                        timeline="60 days",
                         owner="Compliance Team",
                     )
                 )

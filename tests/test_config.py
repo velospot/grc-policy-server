@@ -8,6 +8,12 @@ def clear_runtime_env(monkeypatch) -> None:
         "PORT",
         "UPLOAD_ROOT",
         "WEAVIATE_URL",
+        "POSTGRES_HOST",
+        "POSTGRES_PORT",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "POSTGRES_DB",
+        "DATABASE_URL",
         "OLLAMA_CHAT_MODEL",
         "OLLAMA_GENERATION_MODEL",
         "OLLAMA_EMBED_MODEL",
@@ -62,6 +68,41 @@ def test_process_environment_overrides_dotenv(tmp_path, monkeypatch):
     settings = Settings(_env_file=env_file)
 
     assert settings.port == 9100
+
+
+def test_database_url_is_derived_from_postgres_settings(tmp_path, monkeypatch):
+    clear_runtime_env(monkeypatch)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "POSTGRES_HOST=localhost\n"
+        "POSTGRES_PORT=55432\n"
+        "POSTGRES_USER=grc_admin\n"
+        "POSTGRES_PASSWORD=grc_admin\n"
+        "POSTGRES_DB=grc_db\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(_env_file=env_file)
+
+    assert settings.database_url == (
+        "postgresql://grc_admin:grc_admin@localhost:55432/grc_db"
+    )
+
+
+def test_explicit_database_url_overrides_derived_value(tmp_path, monkeypatch):
+    clear_runtime_env(monkeypatch)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "POSTGRES_HOST=postgres\n"
+        "DATABASE_URL=postgresql://custom:secret@db.example:5433/custom_db\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(_env_file=env_file)
+
+    assert settings.database_url == "postgresql://custom:secret@db.example:5433/custom_db"
 
 
 def test_as_env_items_uses_effective_runtime_values(tmp_path, monkeypatch):

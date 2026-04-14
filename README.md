@@ -180,6 +180,7 @@ Key runtime variables (all available in `.env.example`):
 - `API_BEARER_TOKEN`
 - `CORS_ALLOW_ORIGINS`, `CORS_ALLOW_METHODS`, `CORS_ALLOW_HEADERS`, `CORS_ALLOW_CREDENTIALS`
 - `UPLOAD_ROOT`
+- `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `DATABASE_URL`
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `CELERY_DEFAULT_QUEUE`
 - `CELERY_TASK_TIMEOUT_SEC`, `CELERY_TASK_SOFT_TIME_LIMIT_SEC`, `CELERY_TASK_HARD_TIME_LIMIT_SEC`
 - `CELERY_WORKER_PING_TIMEOUT_SEC`, `CELERY_ENFORCE_WORKER_PING`, `CELERY_WORKER_CONCURRENCY`, `CELERY_WORKER_POOL`
@@ -190,6 +191,7 @@ Key runtime variables (all available in `.env.example`):
 - `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
 - `WEAVIATE_URL`, `WEAVIATE_COLLECTION`, `WEAVIATE_EMBEDDED`
 - `OLLAMA_URL`, `OLLAMA_CHAT_MODEL`, `OLLAMA_EMBED_MODEL`, `OLLAMA_TIMEOUT_SEC`
+- `OPIK_ENABLED`, `OPIK_URL_OVERRIDE`, `OPIK_PROJECT_NAME`, `OPIK_WORKSPACE`
 - `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_COLLECTION`
 - `DOWNLOAD_TIMEOUT_SECONDS`, `MAX_DOWNLOAD_MB`, `EMBED_BATCH_SIZE`
 
@@ -268,45 +270,49 @@ make lint
 
 ## LLM Observability (Opik)
 
-The server and Celery workers are fully instrumented with [Opik 1.10.58](https://github.com/comet-ml/opik) for LLM tracing and accuracy monitoring.
+The server and Celery workers can send LLM traces to [Opik](https://github.com/comet-ml/opik). The compose integration pins Opik to `1.10.46` and pins its backing services instead of using floating `latest` tags.
 
 ### What is traced
 
-Every LLM operation is captured as a named span:
+When `OPIK_ENABLED=true`, Ollama LLM calls are captured as spans:
 
 | Span | Tags | Description |
 |------|------|-------------|
-| `extract_policy_meanings` | `llm`, `semantic-extraction` | Batch semantic clause extraction |
-| `summarize_diff` | `llm`, `summarization` | Single section diff summary |
-| `summarize_changes` | `llm`, `summarization` | Executive changes summary |
-| `summarize_explanations` | `llm`, `summarization` | Aggregated explanation summary |
-| `generate_followups` | `llm`, `generation` | Follow-up question generation |
-| `generate_markdown_diff_summary` | `llm`, `generation` | Markdown-formatted diff summary |
 | `ollama_generate` | `llm`, `ollama` | Raw Ollama `/api/generate` call (prompt + response) |
+| `ollama_embed` | `llm`, `ollama` | Raw Ollama `/api/embed` call (embedding input + response) |
 
-Workers initialize Opik automatically via the `worker_init` Celery signal, so traces from background jobs appear in the same project.
+These spans cover semantic extraction, change-record summarization, markdown diff summaries, follow-up generation, and any other code path that goes through `OllamaClient`.
 
 ### Accessing the Opik UI
 
-1. Start infrastructure (includes Opik):
+1. Start the main dependencies and Opik:
    ```bash
-   docker-compose up -d
+   docker compose -f docker-compose.yml -f docker-compose.opik.yml up -d
    ```
 2. Open **[http://localhost:5173](http://localhost:5173)** in your browser.
-3. Select the **`grc-policy-server`** project from the left sidebar.
+3. Enable tracing in `.env`:
+   ```bash
+   OPIK_ENABLED=true
+   OPIK_URL_OVERRIDE=http://localhost:5173/api
+   OPIK_PROJECT_NAME=grc-policy-server
+   OPIK_WORKSPACE=default
+   ```
+4. Restart the API and Celery workers so they pick up the Opik settings.
 
-You will see a trace list with latency, input prompts, model responses, and nested spans showing the full call chain for each request.
+You will see traces with prompt payloads, model responses, latency, and errors for the LLM calls made during ingestion and comparison.
 
 ### Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPIK_ENABLED` | `true` | Set to `false` to disable all tracing |
-| `OPIK_URL` | `http://localhost:5174` | Opik backend API URL (direct, bypasses nginx) |
+| `OPIK_ENABLED` | `false` | Set to `true` to enable SDK tracing |
+| `OPIK_URL_OVERRIDE` | `http://localhost:5173/api` | Opik API URL through the local frontend proxy |
 | `OPIK_PROJECT_NAME` | `grc-policy-server` | Project name in the Opik UI |
+| `OPIK_WORKSPACE` | `default` | Workspace used by the Opik SDK |
+| `OPIK_VERSION` | `1.10.46` | Opik backend/frontend/python-backend image version |
 
-When running the API or worker on the host (outside Docker), set `OPIK_URL=http://localhost:5174` in your `.env`.
-When running in Docker with the shared network, set `OPIK_URL=http://opik-backend:8080`.
+When running the API or worker on the host, use `OPIK_URL_OVERRIDE=http://localhost:5173/api`.
+When running the API or worker inside the same Docker network, use `OPIK_URL_OVERRIDE=http://opik-frontend:5173/api` or `http://opik-backend:8080`.
 
 ### Evaluating LLM accuracy
 
@@ -316,18 +322,58 @@ From the Opik UI you can:
 - Compare latency across runs to detect regressions.
 - Add manual annotations or automated evaluations against a golden dataset.
 
+## Docling JobKit
+
+[Docling JobKit](https://docling-project.github.io/docling/usage/jobkit/) is useful for scaling ingestion beyond interactive uploads. It does not replace the current Docling extraction path or the canonical PostgreSQL comparison store; it provides a job runner layer around Docling conversion.
+
+What it can enhance:
+
+- Run Docling conversion as distributed jobs with Kubeflow Pipelines, Ray, or a local runner.
+- Pull source documents from HTTP endpoints, S3, or Google Drive.
+- Export converted Docling outputs to targets such as S3.
+- Keep conversion options, OCR settings, source locations, and target locations in a job configuration file.
+
+How it fits this service:
+
+- Use JobKit for bulk import and conversion when documents come from object storage or shared drives.
+- Feed JobKit outputs into the same canonical ingestion flow: raw Docling JSON -> normalized node tree -> PostgreSQL canonical store -> Weaviate retrieval chunks.
+- Keep comparison unchanged: compare canonical nodes, not retrieval chunks.
+
 ## Infrastructure
 
 `docker-compose.yml` includes:
 
+- `postgres`
 - `redis`
 - `weaviate`
-- `opik` (MySQL + ClickHouse + backend + frontend)
+
+`docker-compose.opik.yml` adds the optional Opik observability stack:
+
+- `opik-backend`
+- `opik-frontend`
+- `opik-python-backend`
+- `opik-mysql`
+- `opik-clickhouse`
+- `opik-zookeeper`
+- `opik-redis`
+- `opik-minio`
 
 Start with:
 
 ```bash
-docker-compose up -d
+docker compose up -d
+```
+
+Start with Opik:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.opik.yml up -d
+```
+
+Stop the current stack:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.opik.yml down
 ```
 
 ## TODOs

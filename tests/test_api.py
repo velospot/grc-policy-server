@@ -24,7 +24,7 @@ from grc_policy_server.models.schemas import (
     DocumentReference,
     KeyDifference,
 )
-from grc_policy_server.respositories.documents import DocumentRepository
+from grc_policy_server.repositories.documents import DocumentRepository
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     UploadIngestionResult,
 )

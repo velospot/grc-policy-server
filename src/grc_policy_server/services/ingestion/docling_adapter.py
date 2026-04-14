@@ -37,6 +37,10 @@ class DoclingAdapter:
         pdf_options.do_ocr = auto_ocr
         pdf_options.do_table_structure = do_table_structure
         pdf_options.images_scale = 0.5
+        # pdf_options.do_formula_enrichment = True
+
+        # pdf_options.generate_table_images = False
+        # pdf_options.generate_page_images = True
         pdf_options.accelerator_options.device = settings.docling_accelerator_device
         pdf_options.accelerator_options.num_threads = (
             settings.docling_accelerator_threads

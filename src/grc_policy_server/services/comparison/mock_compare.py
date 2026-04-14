@@ -48,7 +48,7 @@ def generate_mock_comparison(doc1, doc2) -> ComparisonResult:
                 section="Data Privacy Requirements",
                 doc1Content="GDPR compliance baseline",
                 doc2Content="GDPR + AI Act compliance with enhanced data governance",
-                impact="Critical",
+                impact="High",
                 doc1Reference=DocumentReference(
                     section="Section 5.1",
                     page=78,

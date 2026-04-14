@@ -9,7 +9,8 @@ from typing import Any
 from uuid import uuid4
 
 from grc_policy_server.core.config import settings
-from grc_policy_server.services.comparision.policy_semantics import meaning_to_metadata
+from grc_policy_server.services.comparison.policy_semantics import meaning_to_metadata
+from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
 from grc_policy_server.services.ingestion.docling_chunker import (
@@ -50,12 +51,14 @@ class DocumentIngestionService:
         neo4j: Neo4jClient | None,
         llm: OllamaClient,
         upload_root: Path,
+        canonical_store: CanonicalDocumentStore | None = None,
     ):
         self.docling_adapter = docling_adapter
         self.weaviate = weaviate
         self.neo4j = neo4j
         self.llm = llm
         self.upload_root = upload_root
+        self.canonical_store = canonical_store
 
     async def ingest_upload(
         self,
@@ -94,9 +97,30 @@ class DocumentIngestionService:
             parsed_chunks=parsed_chunks,
             content_hash=content_hash,
         )
+        normalized_tree = {
+            "documentStableId": hierarchy.document_stable_id,
+            "documentFamily": hierarchy.document_family,
+            "contentHash": hierarchy.content_hash,
+            "metadata": {
+                **hierarchy.metadata,
+                "ocr": ocr_metadata,
+                "content_type": content_type,
+            },
+            "nodes": [node.to_graph_record() for node in hierarchy.nodes],
+        }
         vector_records = [node.to_vector_record() for node in hierarchy.indexable_nodes]
         if not vector_records:
             raise ValueError("No indexable text nodes produced from uploaded document")
+
+        if self.canonical_store is not None:
+            self.canonical_store.save_document(
+                document_id=document_id,
+                filename=filename,
+                content_hash=content_hash,
+                docling_json=doc_json,
+                hierarchy=normalized_tree,
+                metadata=normalized_tree["metadata"],
+            )
 
         self.weaviate.upsert_chunks(vector_records)
         if self.neo4j is not None:
@@ -118,14 +142,8 @@ class DocumentIngestionService:
             filename=filename,
             content=content,
             content_type=content_type,
-            docling_doc=doc_json,
-            hierarchy={
-                "documentStableId": hierarchy.document_stable_id,
-                "documentFamily": hierarchy.document_family,
-                "contentHash": hierarchy.content_hash,
-                "metadata": hierarchy.metadata,
-                "nodes": [node.to_graph_record() for node in hierarchy.nodes],
-            },
+            # docling_doc=doc_json,
+            hierarchy=normalized_tree,
             ocr_metadata=ocr_metadata,
             chunks_stored=len(vector_records),
         )
@@ -257,7 +275,7 @@ class DocumentIngestionService:
         filename: str,
         content: bytes,
         content_type: str | None,
-        docling_doc: dict[str, Any],
+        # docling_doc: dict[str, Any],
         hierarchy: dict[str, Any],
         ocr_metadata: dict[str, Any],
         chunks_stored: int,
@@ -270,7 +288,7 @@ class DocumentIngestionService:
         stored_file.write_bytes(content)
 
         timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        docling_filename = f"{filename}_{timestamp}.docling.json"
+        # docling_filename = f"{filename}_{timestamp}.docling.json"
 
         metadata = {
             "id": document_id,
@@ -289,10 +307,10 @@ class DocumentIngestionService:
             json.dumps(metadata, indent=2),
             encoding="utf-8",
         )
-        (target_dir / docling_filename).write_text(
-            json.dumps(docling_doc, indent=2),
-            encoding="utf-8",
-        )
+        # (target_dir / docling_filename).write_text(
+        #     json.dumps(docling_doc, indent=2),
+        #     encoding="utf-8",
+        # )
         (target_dir / "hierarchy.json").write_text(
             json.dumps(hierarchy, indent=2),
             encoding="utf-8",

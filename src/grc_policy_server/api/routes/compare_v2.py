@@ -12,14 +12,14 @@ from grc_policy_server.models.schemas import (
     CompareV2JobCreateResponse,
     CompareV2JobStatusResponse,
 )
-from grc_policy_server.services.comparision.compare_v2_dispatcher import (
+from grc_policy_server.services.comparison.compare_v2_dispatcher import (
     CeleryNotAvailableError,
     CeleryTaskFailureError,
     CeleryWorkerUnavailableError,
     CompareV2Dispatcher,
 )
-from grc_policy_server.services.comparision.compare_v2_models import CompareTaskPayload
-from grc_policy_server.services.comparision.comparison_cache import ComparisonCacheStore
+from grc_policy_server.services.comparison.compare_v2_models import CompareTaskPayload
+from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
 
 
 def _celery_exc_to_http(exc: Exception) -> HTTPException:

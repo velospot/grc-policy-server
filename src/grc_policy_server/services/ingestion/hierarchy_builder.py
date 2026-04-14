@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 from typing import Iterable
 
-from grc_policy_server.services.comparision.policy_semantics import extract_clause_meaning
+from grc_policy_server.services.comparison.policy_semantics import extract_clause_meaning
 from grc_policy_server.services.ingestion.hierarchy_models import (
     DocumentHierarchy,
     HierarchyNode,

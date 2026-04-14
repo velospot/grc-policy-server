@@ -11,7 +11,7 @@ from grc_policy_server.models.schemas import (
     ComparisonResult,
     KeyDifference,
 )
-from grc_policy_server.services.comparision.real_diff_engine_stream import (
+from grc_policy_server.services.comparison.real_diff_engine_stream import (
     RealDiffEngineStream,
 )
 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 
 from grc_policy_server.api.deps import get_diff_engine, require_api_bearer_token
 from grc_policy_server.models.schemas import CompareRequest, ComparisonResult
-from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 
 router = APIRouter(
     prefix="/compare",

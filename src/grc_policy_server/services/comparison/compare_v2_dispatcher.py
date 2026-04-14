@@ -4,8 +4,8 @@ from pathlib import Path
 
 from grc_policy_server.core.config import settings
 from grc_policy_server.models.schemas import ComparisonResult, CompareV2JobStatusResponse
-from grc_policy_server.services.comparision.compare_v2_models import CompareTaskPayload
-from grc_policy_server.services.comparision.comparison_cache import ComparisonCacheStore
+from grc_policy_server.services.comparison.compare_v2_models import CompareTaskPayload
+from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
 
 
 class CeleryNotAvailableError(RuntimeError):

@@ -7,9 +7,11 @@ from typing import Any
 
 from grc_policy_server.core.celery_app import celery_app
 from grc_policy_server.core.config import settings
-from grc_policy_server.services.comparision.compare_v2_models import CompareTaskPayload
-from grc_policy_server.services.comparision.comparison_cache import ComparisonCacheStore
-from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+from grc_policy_server.services.comparison.compare_v2_models import CompareTaskPayload
+from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
+from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
+from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
+from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient, Neo4jSettings
 from grc_policy_server.services.llm.ollama_client import OllamaClient, OllamaSettings
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
@@ -41,12 +43,21 @@ def _build_diff_engine() -> tuple[
             chat_model=settings.ollama_chat_model,
             embed_model=settings.ollama_embed_model,
             read_timeout_sec=settings.ollama_timeout_sec,
+            opik_enabled=settings.opik_enabled,
+            opik_url=settings.opik_url_override,
+            opik_project_name=settings.opik_project_name,
+            opik_workspace=settings.opik_workspace,
         )
     )
     engine = RealDiffEngine(
         weaviate=weaviate,
         neo4j=neo4j,
         llm=llm,
+        canonical_store=CanonicalDocumentStore(
+            database_url=settings.database_url,
+            upload_root=Path(settings.upload_root),
+        ),
+        trace_store=ComparisonTraceStore(upload_root=Path(settings.upload_root)),
     )
     return engine, weaviate, neo4j, llm
 

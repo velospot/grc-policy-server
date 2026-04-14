@@ -28,7 +28,7 @@ from grc_policy_server.models.schemas import (
     UploadV2JobCreateResponse,
     UploadV2JobStatusResponse,
 )
-from grc_policy_server.respositories.documents import DocumentRepository
+from grc_policy_server.repositories.documents import DocumentRepository
 from grc_policy_server.services.documents.mapper import to_document_response
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.ingestion.document_ingestion_service import (

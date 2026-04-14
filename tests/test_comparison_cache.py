@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from grc_policy_server.models.schemas import ComparisonResult
-from grc_policy_server.services.comparision.comparison_cache import ComparisonCacheStore
+from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
 
 
 def test_comparison_cache_round_trip(tmp_path: Path):

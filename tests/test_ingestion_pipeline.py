@@ -4,11 +4,11 @@ import json
 
 import pytest
 
-from grc_policy_server.services.comparision.clause_matcher import (
+from grc_policy_server.services.comparison.clause_matcher import (
     ClauseMatcher,
     MatchThresholds,
 )
-from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 from grc_policy_server.services.ingestion.hierarchy_builder import (
     build_document_hierarchy,
 )

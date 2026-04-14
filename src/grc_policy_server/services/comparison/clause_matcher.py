@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Callable
 
-from grc_policy_server.services.comparision.policy_semantics import (
+from grc_policy_server.services.comparison.policy_semantics import (
     ClauseMeaning,
     clean_policy_text,
     compare_clause_meaning,
@@ -14,6 +14,10 @@ from grc_policy_server.services.comparision.policy_semantics import (
     is_non_semantic_content,
     semantic_signature,
     token_overlap,
+)
+from grc_policy_server.services.documents.canonical_models import (
+    COMPARISON_NODE_TYPES,
+    TEXT_COMPARISON_NODE_TYPES,
 )
 from grc_policy_server.utils.hashing import normalize_whitespace
 
@@ -125,7 +129,7 @@ class ClauseMatcher:
         content_nodes = [
             node
             for node in nodes
-            if node.get("node_type") in {"clause", "table"}
+            if node.get("node_type") in COMPARISON_NODE_TYPES
             and not is_non_semantic_content(self._node_clean_text(node))
         ]
         if content_nodes:
@@ -136,7 +140,7 @@ class ClauseMatcher:
         clause_nodes = [
             node
             for node in nodes
-            if node.get("node_type") == "clause"
+            if node.get("node_type") in COMPARISON_NODE_TYPES
             and not is_non_semantic_content(self._node_clean_text(node))
         ]
         if clause_nodes:
@@ -369,6 +373,9 @@ class ClauseMatcher:
         )
         if not node_types:
             return
+        search_node_types = set(node_types)
+        if search_node_types & TEXT_COMPARISON_NODE_TYPES:
+            search_node_types.add("clause")
 
         candidate_edges: list[tuple[float, str, str, dict, dict]] = []
         for left_node in left_nodes:
@@ -383,12 +390,19 @@ class ClauseMatcher:
             query_text = self._node_clean_text(left_node)
             if not query_text:
                 continue
+            left_node_type = str(left_node.get("node_type") or "clause")
+            if left_node_type == "table":
+                query_node_types = ["table"]
+            else:
+                # text nodes must not pull in table results
+                non_table_types = sorted(search_node_types - {"table"})
+                query_node_types = non_table_types or sorted(search_node_types)
             matches = self.search_fn(
                 query_string=str(left_node.get("section_path") or ""),
                 query_text=query_text,
                 target_document_id=target_document_id,
                 limit=self.topk,
-                node_types=node_types,
+                node_types=query_node_types,
             )
             for candidate in matches:
                 right_id = str(candidate.get("chunk_id") or "")

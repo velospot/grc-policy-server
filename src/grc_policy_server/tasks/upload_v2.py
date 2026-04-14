@@ -9,6 +9,7 @@ from pathlib import Path
 from grc_policy_server.core.celery_app import celery_app
 from grc_policy_server.core.config import settings
 from grc_policy_server.models.schemas import UploadDocumentResponse, UploadDocumentsResponse
+from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient, Neo4jSettings
 from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
 from grc_policy_server.services.ingestion.document_ingestion_service import (
@@ -45,7 +46,15 @@ def _build_ingestion_service() -> tuple[
             chat_model=settings.ollama_chat_model,
             embed_model=settings.ollama_embed_model,
             read_timeout_sec=settings.ollama_timeout_sec,
+            opik_enabled=settings.opik_enabled,
+            opik_url=settings.opik_url_override,
+            opik_project_name=settings.opik_project_name,
+            opik_workspace=settings.opik_workspace,
         )
+    )
+    canonical_store = CanonicalDocumentStore(
+        database_url=settings.database_url,
+        upload_root=Path(settings.upload_root),
     )
     service = DocumentIngestionService(
         docling_adapter=docling_adapter,
@@ -53,6 +62,7 @@ def _build_ingestion_service() -> tuple[
         neo4j=neo4j,
         llm=llm,
         upload_root=Path(settings.upload_root),
+        canonical_store=canonical_store,
     )
     return service, weaviate, neo4j, llm
 

@@ -1,6 +1,6 @@
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class Document(BaseModel):
@@ -31,12 +31,17 @@ class ChangeDetail(BaseModel):
 
 
 class KeyDifference(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     changeType: Literal["ADDED", "REMOVED", "MODIFIED"]
     section: str
     doc1Content: str | None
     doc2Content: str | None
     impact: str
-    changeSeverity: Literal["low", "medium", "high"] = "medium"
+    changeSeverity: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        validation_alias=AliasChoices("changeSeverity", "severity"),
+    )
     doc1Reference: DocumentReference | None
     doc2Reference: DocumentReference | None
     nodeType: str = "clause"  # "clause" or "table"

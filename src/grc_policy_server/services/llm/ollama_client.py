@@ -14,11 +14,12 @@ import httpx
 
 from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import KeyDifference
-from grc_policy_server.services.comparision.policy_semantics import (
+from grc_policy_server.services.comparison.policy_semantics import (
     ClauseMeaning,
     extract_clause_meaning,
 )
 from grc_policy_server.services.llm.base import BaseLLM
+from grc_policy_server.services.observability import tracing
 from grc_policy_server.utils.hashing import normalize_whitespace
 
 logger = logging.getLogger(__name__)
@@ -222,7 +223,7 @@ SUMMARIZE_DIFF_PROMPTS = {
 PROMPT_SUMMARIZE_EXPLANATIONS_EN = """
 
 Task:
-1) Use the Explanation JSON entries as the only source of truth.
+1) Use the structured Change Record JSON entries as the only source of truth.
 2) Aggregate change explanations into concise points grouped by ADDED, MODIFIED, REMOVED.
 3) Omit groups with no entries.
 
@@ -244,14 +245,14 @@ Rules:
 Document A: {doc1_name}
 Document B: {doc2_name}
 
-Explanation JSON:
+Change Record JSON:
 {explanations}
 """.strip()
 
 PROMPT_SUMMARIZE_EXPLANATIONS_DE = """
 
 Aufgabe:
-1) Verwenden Sie das Explanation-JSON als einzige Quelle.
+1) Verwenden Sie das strukturierte Change-Record-JSON als einzige Quelle.
 2) Aggregieren Sie die Erklärungen in prägnante Punkte nach ADDED, MODIFIED, REMOVED.
 3) Lassen Sie Gruppen ohne Einträge weg.
 
@@ -273,7 +274,7 @@ Regeln:
 Dokument A: {doc1_name}
 Dokument B: {doc2_name}
 
-Explanation JSON:
+Change-Record-JSON:
 {explanations}
 """.strip()
 
@@ -281,7 +282,7 @@ PROMPT_SUMMARIZE_EXPLANATIONS_FR = """
 Vous êtes analyste conformité GRC.
 
 Tâche :
-1) Utiliser le JSON des explications comme seule source.
+1) Utiliser le JSON structuré des enregistrements de changement comme seule source.
 2) Agréger les explications en points concis par ADDED, MODIFIED, REMOVED.
 3) Omettre les groupes sans élément.
 
@@ -303,7 +304,7 @@ Règles :
 Document A : {doc1_name}
 Document B : {doc2_name}
 
-Explanation JSON :
+JSON des enregistrements de changement :
 {explanations}
 """.strip()
 
@@ -392,30 +393,31 @@ Format B — fenced diff block (sentence/line-level changes):
 """.strip()
 
 PROMPT_MARKDOWN_DIFF_TABLE = """
-Produce a brief semantic diff of table changes in markdown. Change type: {change_type}.
+Produce a concise semantic diff for a TABLE change. Change type: {change_type}.
 
 {source_block}
 
 Rules — follow strictly:
-- Semantic changes ONLY: changed cell values, added or removed rows/columns.
+- Identify EXACTLY what changed: which cells, rows, or columns, and what the old vs new values are.
+- State the compliance significance of the change (e.g. threshold tightened, scope expanded, control removed).
 - IGNORE cosmetic differences: whitespace, punctuation, capitalisation with identical meaning.
 - If no semantic change is detectable, output nothing at all.
-- Do NOT use standalone inline word/phrase bullets (~~phrase~~ or **phrase** alone).
-- No explanations or commentary.
+- No generic commentary like "the table was modified". Be specific.
 - Write in the same language as the source text.
 
-Output EXACTLY ONE of the following formats — never combine them:
+Output format — use one or both as needed:
 
-Format A — fenced diff block (for row-level additions or removals):
+Cell/row-level changes:
+- `<header> / Row <N>:` <span style="color:red">~~old value~~</span> → <span style="color:green">**new value**</span>
+
+Added/removed rows:
 ```diff
-- removed row content
-+ added row content
+- removed row: col1 | col2 | col3
++ added row: col1 | col2 | col3
 ```
 
-Format B — cell-level bullets (for in-place cell value changes):
-- `Row R, Col C:` <span style="color:red">~~old~~</span> → <span style="color:green">**new**</span>
-- Added row: <span style="color:green">**+ Row R: cell1 | cell2 | ...**</span>
-- Removed row: <span style="color:red">~~- Row R: cell1 | cell2 | ...~~</span>
+End with one sentence on compliance significance, e.g.:
+> This tightens the minimum password length requirement from 8 to 12 characters.
 """.strip()
 
 # Back-compat alias used by tests that import this name directly.
@@ -431,6 +433,10 @@ class OllamaSettings:
     read_timeout_sec: float = 300.0
     write_timeout_sec: float = 30.0
     max_retries: int = 2
+    opik_enabled: bool = False
+    opik_url: str = "http://localhost:5173/api"
+    opik_project_name: str = "grc-policy-server"
+    opik_workspace: str = "default"
 
     @property
     def timeout_sec(self) -> float:
@@ -452,6 +458,12 @@ class OllamaClient(BaseLLM):
     def __init__(self, settings: Optional[OllamaSettings] = None):
         self.settings = settings or OllamaSettings()
         self._meaning_cache: dict[str, dict[str, str]] = {}
+        tracing.configure(
+            enabled=self.settings.opik_enabled,
+            url=self.settings.opik_url,
+            project_name=self.settings.opik_project_name,
+            workspace=self.settings.opik_workspace,
+        )
         self._async_client = httpx.AsyncClient(
             base_url=self.settings.base_url,
             timeout=httpx.Timeout(
@@ -471,6 +483,16 @@ class OllamaClient(BaseLLM):
         )
 
     def embed(self, text: str) -> list[float]:
+        tracked = tracing.track(
+            name="ollama_embed",
+            type="llm",
+            tags=["llm", "ollama", "embedding"],
+            metadata={"model": self.settings.embed_model},
+            project_name=self.settings.opik_project_name,
+        )(self._embed_untraced)
+        return tracked(text)
+
+    def _embed_untraced(self, text: str) -> list[float]:
         payload = {
             "model": self.settings.embed_model,
             "input": text,
@@ -697,6 +719,8 @@ class OllamaClient(BaseLLM):
         change_type: str,
         doc1_source_text: str | None,
         doc2_source_text: str | None,
+        doc1_table_content: str | None = None,
+        doc2_table_content: str | None = None,
         language: str = "",
     ) -> str:
         prompt = self._prompt_markdown_diff_summary(
@@ -704,6 +728,8 @@ class OllamaClient(BaseLLM):
             change_type=change_type,
             doc1_source_text=doc1_source_text,
             doc2_source_text=doc2_source_text,
+            doc1_table_content=doc1_table_content,
+            doc2_table_content=doc2_table_content,
             language=language,
         )
         result = await self._generate_text(prompt, temperature=0)
@@ -878,17 +904,29 @@ class OllamaClient(BaseLLM):
         change_type: str,
         doc1_source_text: str | None,
         doc2_source_text: str | None,
+        doc1_table_content: str | None = None,
+        doc2_table_content: str | None = None,
         language: str = "",
     ) -> str:
-        if change_type == "ADDED":
-            source_block = f"Added content:\n{doc2_source_text or ''}"
-        elif change_type == "REMOVED":
-            source_block = f"Removed content:\n{doc1_source_text or ''}"
-        else:  # MODIFIED
-            source_block = (
-                f"Before:\n{doc1_source_text or ''}\n\n"
-                f"After:\n{doc2_source_text or ''}"
-            )
+        if node_type == "table":
+            left = doc1_table_content or doc1_source_text or ""
+            right = doc2_table_content or doc2_source_text or ""
+            if change_type == "ADDED":
+                source_block = f"Added table content:\n{right}"
+            elif change_type == "REMOVED":
+                source_block = f"Removed table content:\n{left}"
+            else:
+                source_block = f"Table before:\n{left}\n\nTable after:\n{right}"
+        else:
+            if change_type == "ADDED":
+                source_block = f"Added content:\n{doc2_source_text or ''}"
+            elif change_type == "REMOVED":
+                source_block = f"Removed content:\n{doc1_source_text or ''}"
+            else:  # MODIFIED
+                source_block = (
+                    f"Before:\n{doc1_source_text or ''}\n\n"
+                    f"After:\n{doc2_source_text or ''}"
+                )
         template = (
             PROMPT_MARKDOWN_DIFF_TABLE
             if node_type == "table"
@@ -930,9 +968,24 @@ class OllamaClient(BaseLLM):
                 {
                     "changeType": getattr(d, "changeType", None),
                     "section": key,
-                    "page": getattr(d, "page", None) or getattr(d, "pageNumber", None),
+                    "nodeType": d.nodeType,
+                    "impact": d.impact,
+                    "changeSeverity": d.changeSeverity,
                     "doc1Content": d.doc1Content,
                     "doc2Content": d.doc2Content,
+                    "changes": [
+                        change.model_dump(mode="json") for change in d.changes
+                    ],
+                    "doc1Citation": (
+                        d.doc1Reference.model_dump(mode="json")
+                        if d.doc1Reference
+                        else None
+                    ),
+                    "doc2Citation": (
+                        d.doc2Reference.model_dump(mode="json")
+                        if d.doc2Reference
+                        else None
+                    ),
                     "doc1SectionContent": " ".join(section_entry["doc1"]).strip(),
                     "doc2SectionContent": " ".join(section_entry["doc2"]).strip(),
                 }
@@ -1166,16 +1219,24 @@ Input JSON:
         }
 
     async def _generate_text(self, prompt: str, temperature=None) -> str:
-        temp = 0
-        if temperature is not None:
-            temp = temperature
+        temp = 0 if temperature is None else temperature
+        tracked = tracing.track(
+            name="ollama_generate",
+            type="llm",
+            tags=["llm", "ollama", "generation"],
+            metadata={"model": self.settings.chat_model, "temperature": temp},
+            project_name=self.settings.opik_project_name,
+        )(self._generate_text_untraced)
+        return await tracked(prompt, temp)
+
+    async def _generate_text_untraced(self, prompt: str, temperature: float) -> str:
         response = await self._post_json(
             "/api/generate",
             {
                 "model": self.settings.chat_model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": temp},
+                "options": {"temperature": temperature},
             },
         )
         text = str(response.get("response") or "").strip()

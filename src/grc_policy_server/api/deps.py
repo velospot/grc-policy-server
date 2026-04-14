@@ -9,19 +9,21 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import logging
-from grc_policy_server.respositories.documents import DocumentRepository
-from grc_policy_server.services.comparision.compare_v2_dispatcher import (
+from grc_policy_server.repositories.documents import DocumentRepository
+from grc_policy_server.services.comparison.compare_v2_dispatcher import (
     CompareV2Dispatcher,
 )
-from grc_policy_server.services.comparision.comparison_cache import ComparisonCacheStore
-from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
-from grc_policy_server.services.comparision.real_diff_engine_stream import (
+from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
+from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
+from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
+from grc_policy_server.services.comparison.real_diff_engine_stream import (
     RealDiffEngineStream,
 )
 from grc_policy_server.services.graph.graph_neo4j_client import (
     Neo4jClient,
     Neo4jSettings,
 )
+from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     DocumentIngestionService,
@@ -101,6 +103,10 @@ async def get_ollama_client() -> AsyncGenerator[OllamaClient, None]:
             chat_model=settings.ollama_chat_model,
             embed_model=settings.ollama_embed_model,
             read_timeout_sec=settings.ollama_timeout_sec,
+            opik_enabled=settings.opik_enabled,
+            opik_url=settings.opik_url_override,
+            opik_project_name=settings.opik_project_name,
+            opik_workspace=settings.opik_workspace,
         )
     )
     try:
@@ -116,15 +122,30 @@ def get_docling_adapter() -> DoclingAdapter:
     return DoclingAdapter()
 
 
+def get_canonical_document_store() -> CanonicalDocumentStore:
+    return CanonicalDocumentStore(
+        database_url=settings.database_url,
+        upload_root=Path(settings.upload_root),
+    )
+
+
+def get_comparison_trace_store() -> ComparisonTraceStore:
+    return ComparisonTraceStore(upload_root=Path(settings.upload_root))
+
+
 def get_diff_engine(
     weaviate: WeaviateClient = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: OllamaClient = Depends(get_ollama_client),
+    canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
+    trace_store: ComparisonTraceStore = Depends(get_comparison_trace_store),
 ) -> RealDiffEngine:
     return RealDiffEngine(
         weaviate=weaviate,
         neo4j=neo4j,
         llm=llm,
+        canonical_store=canonical_store,
+        trace_store=trace_store,
     )
 
 
@@ -132,11 +153,15 @@ def get_diff_engine_stream(
     weaviate: WeaviateClient = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: OllamaClient = Depends(get_ollama_client),
+    canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
+    trace_store: ComparisonTraceStore = Depends(get_comparison_trace_store),
 ) -> RealDiffEngineStream:
     return RealDiffEngineStream(
         weaviate=weaviate,
         neo4j=neo4j,
         llm=llm,
+        canonical_store=canonical_store,
+        trace_store=trace_store,
     )
 
 
@@ -149,6 +174,7 @@ def get_document_ingestion_service(
     weaviate: WeaviateClient = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: OllamaClient = Depends(get_ollama_client),
+    canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
 ) -> DocumentIngestionService:
     return DocumentIngestionService(
         docling_adapter=docling_adapter,
@@ -156,6 +182,7 @@ def get_document_ingestion_service(
         neo4j=neo4j,
         llm=llm,
         upload_root=Path(settings.upload_root),
+        canonical_store=canonical_store,
     )
 
 
@@ -164,6 +191,7 @@ def get_document_ingestion_service_factory(
     weaviate: WeaviateClient = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: OllamaClient = Depends(get_ollama_client),
+    canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
 ) -> Callable[[], DocumentIngestionService]:
     def _factory() -> DocumentIngestionService:
         return DocumentIngestionService(
@@ -172,6 +200,7 @@ def get_document_ingestion_service_factory(
             neo4j=neo4j,
             llm=llm,
             upload_root=Path(settings.upload_root),
+            canonical_store=canonical_store,
         )
 
     return _factory

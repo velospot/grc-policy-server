@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from grc_policy_server.services.comparision.policy_semantics import (
+from grc_policy_server.services.comparison.policy_semantics import (
     clean_policy_text,
     ends_with_terminal_punctuation,
     extract_clause_meaning,

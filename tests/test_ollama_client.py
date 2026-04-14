@@ -51,7 +51,10 @@ def test_compact_diffs_for_summary_concatenates_section_content():
     compact = client._compact_diffs_for_summary(diffs)
 
     assert len(compact) == 2
-    assert "impact" not in compact[0]
+    assert compact[0]["impact"] == "High"
+    assert compact[0]["changeSeverity"] == "medium"
+    assert compact[0]["doc1Citation"]["sourceText"] == "Admins must use MFA."
+    assert compact[0]["doc2Citation"]["sourceText"] == "Admins and vendors must use MFA."
     assert "Admins must use MFA." in compact[0]["doc1SectionContent"]
     assert (
         "Privileged accounts require manager approval."
@@ -109,7 +112,7 @@ def test_prompt_summarize_changes_uses_canonical_diffs_json():
     assert 'Differences JSON:\n[{"a":1,"b":2}]' in prompt
 
 
-def test_key_difference_severity_alias_defaults_from_change_severity():
+def test_key_difference_change_severity_field_accepts_old_severity_alias():
     diff = KeyDifference(
         changeType="MODIFIED",
         section="Access Control",
@@ -121,8 +124,9 @@ def test_key_difference_severity_alias_defaults_from_change_severity():
         doc2Reference=DocumentReference(section="Access Control", page=1, sourceText="New"),
     )
 
-    assert diff.severity == "medium"
-    assert "changeSeverity" not in diff.model_dump()
+    assert diff.changeSeverity == "medium"
+    assert diff.model_dump()["changeSeverity"] == "medium"
+    assert "severity" not in diff.model_dump()
 
 
 @pytest.mark.anyio
@@ -255,7 +259,7 @@ def test_prompt_markdown_diff_summary_table_uses_table_template():
     assert "| Admin | Full |" in prompt
     assert "| Admin | Read-only |" in prompt
     assert "Row" in prompt
-    assert "Col" in prompt
+    assert "col" in prompt.lower()
 
 
 def test_prompt_markdown_diff_summary_clause_has_no_table_instructions():
@@ -373,22 +377,17 @@ def test_clause_prompt_offers_diff_block_as_format_b():
 
 
 def test_table_prompt_contains_row_col_format():
-    assert "Row R, Col C" in PROMPT_MARKDOWN_DIFF_TABLE
+    assert "Row" in PROMPT_MARKDOWN_DIFF_TABLE
+    assert "col" in PROMPT_MARKDOWN_DIFF_TABLE.lower()
 
 
 def test_table_prompt_contains_diff_block_syntax():
     assert "```diff" in PROMPT_MARKDOWN_DIFF_TABLE
 
 
-def test_table_prompt_prohibits_standalone_inline_bullets():
-    """Table prompt must explicitly forbid standalone ~~phrase~~ / **phrase** bullets."""
-    assert "Do NOT use standalone inline word/phrase bullets" in PROMPT_MARKDOWN_DIFF_TABLE
-
-
-def test_table_prompt_exactly_one_format_never_combined():
-    """Table prompt must demand exactly one format, never combined."""
-    assert "EXACTLY ONE" in PROMPT_MARKDOWN_DIFF_TABLE
-    assert "never combine" in PROMPT_MARKDOWN_DIFF_TABLE
+def test_table_prompt_mentions_compliance_significance():
+    """New table prompt must mention compliance significance."""
+    assert "compliance significance" in PROMPT_MARKDOWN_DIFF_TABLE
 
 
 def test_table_prompt_preserves_source_language():
@@ -412,12 +411,12 @@ def test_prompt_markdown_diff_summary_alias_equals_clause_prompt():
 @pytest.mark.anyio
 async def test_populate_markdown_diff_summaries_sets_field():
     """_populate_markdown_diff_summaries assigns LLM result to each diff."""
-    from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+    from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 
     class _FakeLLM:
         async def generate_markdown_diff_summary(self, *, node_type, change_type,
                                                   doc1_source_text, doc2_source_text,
-                                                  language=""):
+                                                  language="", **kwargs):
             return f"diff:{change_type}:{node_type}"
 
     engine = RealDiffEngine.__new__(RealDiffEngine)
@@ -463,14 +462,14 @@ async def test_populate_markdown_diff_summaries_sets_field():
 @pytest.mark.anyio
 async def test_populate_markdown_diff_summaries_tolerates_llm_failure():
     """LLM failure for one diff must not prevent others from being populated."""
-    from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+    from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 
     call_count = 0
 
     class _FlakyLLM:
         async def generate_markdown_diff_summary(self, *, node_type, change_type,
                                                   doc1_source_text, doc2_source_text,
-                                                  language=""):
+                                                  language="", **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -510,14 +509,14 @@ async def test_populate_markdown_diff_summaries_tolerates_llm_failure():
 @pytest.mark.anyio
 async def test_populate_markdown_diff_summaries_uses_source_text_from_references():
     """LLM must receive sourceText from doc1Reference/doc2Reference."""
-    from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+    from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 
     captured: list[dict] = []
 
     class _CaptureLLM:
         async def generate_markdown_diff_summary(self, *, node_type, change_type,
                                                   doc1_source_text, doc2_source_text,
-                                                  language=""):
+                                                  language="", **kwargs):
             captured.append({
                 "node_type": node_type,
                 "change_type": change_type,
@@ -554,12 +553,12 @@ async def test_populate_markdown_diff_summaries_uses_source_text_from_references
 @pytest.mark.anyio
 async def test_populate_markdown_diff_summaries_stream_engine():
     """Same populate logic works in RealDiffEngineStream."""
-    from grc_policy_server.services.comparision.real_diff_engine_stream import RealDiffEngineStream
+    from grc_policy_server.services.comparison.real_diff_engine_stream import RealDiffEngineStream
 
     class _FakeLLM:
         async def generate_markdown_diff_summary(self, *, node_type, change_type,
                                                   doc1_source_text, doc2_source_text,
-                                                  language=""):
+                                                  language="", **kwargs):
             return f"stream:{change_type}"
 
     engine = RealDiffEngineStream.__new__(RealDiffEngineStream)
@@ -585,12 +584,12 @@ async def test_populate_markdown_diff_summaries_stream_engine():
 @pytest.mark.anyio
 async def test_populate_markdown_diff_summaries_empty_diffs_no_error():
     """Empty diff list must complete without error."""
-    from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+    from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 
     class _FakeLLM:
         async def generate_markdown_diff_summary(self, *, node_type, change_type,
                                                   doc1_source_text, doc2_source_text,
-                                                  language=""):
+                                                  language="", **kwargs):
             return "should not be called"
 
     engine = RealDiffEngine.__new__(RealDiffEngine)
@@ -602,14 +601,14 @@ async def test_populate_markdown_diff_summaries_empty_diffs_no_error():
 @pytest.mark.anyio
 async def test_populate_markdown_diff_summaries_passes_language():
     """language kwarg must be forwarded to each LLM call."""
-    from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+    from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 
     received_languages: list[str] = []
 
     class _LangCaptureLLM:
         async def generate_markdown_diff_summary(self, *, node_type, change_type,
                                                   doc1_source_text, doc2_source_text,
-                                                  language=""):
+                                                  language="", **kwargs):
             received_languages.append(language)
             return "diff"
 
@@ -696,12 +695,12 @@ async def test_generate_markdown_diff_summary_returns_empty_on_no_change():
 @pytest.mark.anyio
 async def test_populate_markdown_diff_summaries_sets_none_on_empty_result():
     """Empty string from LLM must leave markdownDiffSummary as None."""
-    from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+    from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 
     class _NoChangeLLM:
         async def generate_markdown_diff_summary(self, *, node_type, change_type,
                                                   doc1_source_text, doc2_source_text,
-                                                  language=""):
+                                                  language="", **kwargs):
             return ""  # signals no semantic change
 
     engine = RealDiffEngine.__new__(RealDiffEngine)

@@ -13,6 +13,8 @@ from grc_policy_server.api.routes import (
 )
 from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import log_runtime_environment, setup_logging
+from grc_policy_server.services.observability import tracing
+
 setup_logging(
     level=settings.log_level,
     service_name=settings.app_name,
@@ -24,6 +26,12 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     log_runtime_environment(settings.as_env_items(), logger_name=logger.name)
+    tracing.configure(
+        enabled=settings.opik_enabled,
+        url=settings.opik_url_override,
+        project_name=settings.opik_project_name,
+        workspace=settings.opik_workspace,
+    )
     yield
 
 

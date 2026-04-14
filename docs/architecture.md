@@ -17,7 +17,8 @@ Core building blocks:
 - Celery + Redis for asynchronous jobs
 - Docling + OCR fallback for document parsing
 - Ollama for language/semantic extraction and summarization
-- Weaviate for vector/hybrid retrieval
+- PostgreSQL canonical document store for raw Docling JSON and normalized nodes
+- Weaviate for vector/hybrid retrieval and semantic candidate search
 - Optional Neo4j for graph hierarchy
 - Filesystem-based upload metadata and comparison cache
 - Next.js frontend with job polling and notifications
@@ -61,6 +62,29 @@ Primary request classes:
 Target refinements:
 
 - Keep API + queue + workers model.
+- Keep Docling as the extraction source.
+- Keep PostgreSQL as the canonical comparison substrate:
+  - raw Docling JSON
+  - normalized document node tree
+  - stable node IDs, hierarchy, ordering, page anchors, and metadata
+- Keep Weaviate scoped to chat/retrieval and semantic candidate matching.
+- Compare canonical nodes, then emit structured change records before LLM summarization.
+- Send structured change records, not lossy "key diffs", to the LLM summary prompt:
+  - source/target node IDs
+  - exact before/after text
+  - alignment type and confidence
+  - requirement-verb and numeric changes
+  - table/cell changes
+  - impact and `changeSeverity`
+  - citations and heading context
+- Persist a compare loss-map trace for each job:
+  - raw extracted structure
+  - normalized node tree
+  - retrieval/index artifacts
+  - alignment results
+  - diff/change records
+  - exact LLM input payload
+  - final summary coverage
 - Move binary documents to object storage.
 - Move metadata and cache to central datastore.
 - Replace global mutex with resource-granular idempotency locks.

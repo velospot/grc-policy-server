@@ -1,0 +1,1922 @@
+from __future__ import annotations
+
+import asyncio
+import re
+from dataclasses import dataclass, field
+from difflib import SequenceMatcher
+from itertools import combinations
+from typing import List, Optional
+
+from grc_policy_server.core.logging import logging
+from grc_policy_server.models.schemas import (
+    ActionItem,
+    ChangeDetail,
+    ComparisonAccuracyMetrics,
+    ComparisonResult,
+    Document,
+    DocumentReference,
+    KeyDifference,
+    SectionAccuracyMetrics,
+)
+from grc_policy_server.services.comparison.clause_matcher import (
+    ClauseMatch,
+    ClauseMatcher,
+    ClauseMatchingResult,
+    MatchThresholds,
+)
+from grc_policy_server.services.comparison.change_records import (
+    ChangeRecord,
+    detect_numeric_changes,
+    detect_requirement_verb_change,
+    is_cosmetic_text_change,
+    is_formatting_only_change,
+    is_reference_number_only_change,
+)
+from grc_policy_server.services.comparison.severity_classifier import (
+    ClassificationContext,
+    SeverityClassifier,
+)
+from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
+from grc_policy_server.services.comparison.diff_postprocessor import random_diff_subset
+from grc_policy_server.services.comparison.policy_semantics import (
+    ClauseMeaning,
+    clean_policy_text,
+    compare_clause_meaning,
+    extract_clause_meaning,
+    is_non_semantic_content,
+)
+from grc_policy_server.services.documents.canonical_models import (
+    TEXT_COMPARISON_NODE_TYPES,
+)
+from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
+from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
+from grc_policy_server.services.llm.ollama_client import OllamaClient
+from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+
+logger = logging.getLogger(__name__)
+
+# Caption row: a table row 0 whose single spanning cell is "Table N …" / "Figure N …"
+_CAPTION_ROW_RE = re.compile(r"^(?:table|tbl\.?|figure|fig\.?)\s*\d", re.IGNORECASE)
+# Reference-only tokens: table/figure/section numbers inline in text
+_REF_TOKEN_RE = re.compile(
+    r"\b(?:table|tbl\.?|figure|fig\.?|section|sec\.?|clause|annex|appendix)\s*[\d][\d.\-]*\b",
+    re.IGNORECASE,
+)
+
+
+def severity_from_distance(distance: Optional[float], change_type: str) -> str:
+    """Severity is the inverse of matchScore (distance = 1 − matchScore).
+
+    matchScore ≈ 1.0  →  distance ≈ 0.0  →  "low"   (barely changed)
+    matchScore ≈ 0.5  →  distance ≈ 0.5  →  "medium"
+    matchScore ≈ 0.0  →  distance ≈ 1.0  →  "high"  (completely different)
+
+    ADDED / REMOVED nodes have no counterpart so they are always "high".
+    """
+    if change_type in ("ADDED", "REMOVED"):
+        return "high"
+    if distance is None:
+        return "high"
+    # distance > 0.60  →  matchScore < 0.40
+    if distance > 0.60:
+        return "high"
+    # distance > 0.35  →  matchScore < 0.65
+    if distance > 0.35:
+        return "medium"
+    # distance ≤ 0.35  →  matchScore ≥ 0.65
+    return "low"
+
+
+
+@dataclass
+class RealDiffEngine:
+    weaviate: WeaviateClient
+    neo4j: Neo4jClient | None
+    llm: OllamaClient
+    canonical_store: CanonicalDocumentStore | None = None
+    trace_store: ComparisonTraceStore | None = None
+    thresholds: MatchThresholds = MatchThresholds()
+    topk: int = 5
+    max_diffs: int = 40
+    severity_classifier: SeverityClassifier = field(default_factory=SeverityClassifier)
+
+    async def compare(
+        self,
+        doc1: Document,
+        doc2: Document,
+        force_re_extract: bool = False,
+    ) -> ComparisonResult:
+        left_nodes = self._load_comparison_nodes(doc1.id)
+        right_nodes = self._load_comparison_nodes(doc2.id)
+
+        # Detect language from first document's text for better LLM accuracy
+        language = await self._detect_document_language(left_nodes)
+        logger.info("detected document language=%s", language or "unknown")
+
+        left_nodes = await self._enrich_nodes_with_semantics(
+            left_nodes, force_re_extract=force_re_extract, language=language
+        )
+        right_nodes = await self._enrich_nodes_with_semantics(
+            right_nodes, force_re_extract=force_re_extract, language=language
+        )
+        logger.info(
+            "compare left_nodes=%s right_nodes=%s", len(left_nodes), len(right_nodes)
+        )
+
+        matcher = ClauseMatcher(
+            search_fn=self.weaviate.search_section_in_document,
+            thresholds=self.thresholds,
+            topk=self.topk,
+            language=language,
+        )
+        matching = matcher.match(
+            left_nodes=left_nodes,
+            right_nodes=right_nodes,
+            target_document_id=doc2.id,
+        )
+        matching = self._detect_moves(
+            matching,
+            matcher=matcher,
+        )
+        matching, grouped_alignments = self._detect_split_merge_alignments(
+            matching,
+            matcher=matcher,
+        )
+
+        change_records = self._build_change_records(matching, language=language)
+        for alignment_type, left_group, right_group, distance in grouped_alignments:
+            change_records.append(
+                self._change_record_for_pair(
+                    change_type="MODIFIED",
+                    alignment_type=alignment_type,
+                    left_nodes=left_group,
+                    right_nodes=right_group,
+                    distance=distance,
+                    meaning_change="modified",
+                )
+            )
+        diffs = [self._key_difference_from_record(record) for record in change_records]
+
+        paired = sorted(
+            zip(diffs, change_records),
+            key=lambda pair: (
+                ("High", "Medium", "Low").index(pair[0].impact)
+                if pair[0].impact in ("High", "Medium", "Low")
+                else 2
+            ),
+        )
+        diffs, change_records = (list(x) for x in zip(*paired)) if paired else ([], [])
+
+        llm_payload = self._change_records_llm_payload(
+            doc1=doc1,
+            doc2=doc2,
+            change_records=change_records,
+            language=language,
+        )
+
+        await self._populate_markdown_diff_summaries(diffs, change_records, language=language)
+
+        summary = await self._summary_from_change_records(
+            doc1_name=doc1.name,
+            doc2_name=doc2.name,
+            change_records=change_records,
+            key_differences=diffs,
+            llm_payload=llm_payload,
+            language=language,
+        )
+        follow_up_questions = await self._follow_ups(
+            doc1_name=doc1.name,
+            doc2_name=doc2.name,
+            diffs=diffs,
+            language=language,
+        )
+        accuracy_metrics = self._compute_accuracy_metrics(matching.matches)
+
+        self._save_compare_trace(
+            doc1=doc1,
+            doc2=doc2,
+            left_nodes=left_nodes,
+            right_nodes=right_nodes,
+            matching=matching,
+            grouped_alignments=grouped_alignments,
+            change_records=change_records,
+            diffs=diffs,
+            language=language,
+            llm_payload=llm_payload,
+            summary=summary,
+            follow_up_questions=follow_up_questions,
+        )
+
+        return ComparisonResult(
+            summary=summary,
+            keyDifferences=diffs,
+            actionPlan=self._action_plan(diffs),
+            followUpQuestions=follow_up_questions,
+            accuracyMetrics=accuracy_metrics,
+        )
+
+    def _load_comparison_nodes(self, document_id: str) -> list[dict]:
+        if self.canonical_store is not None:
+            canonical_nodes = self.canonical_store.load_comparison_nodes(document_id)
+            if canonical_nodes:
+                logger.info(
+                    "loaded canonical comparison nodes document_id=%s nodes=%s",
+                    document_id,
+                    len(canonical_nodes),
+                )
+                return canonical_nodes
+            raise ValueError(
+                "Canonical comparison nodes were not found for document "
+                f"{document_id}. Re-ingest the document before comparing."
+            )
+
+        logger.warning(
+            "canonical comparison nodes unavailable; falling back to Weaviate "
+            "document_id=%s",
+            document_id,
+        )
+        return self.weaviate.fetch_chunks_by_document(document_id)
+
+    def _detect_moves(
+        self,
+        matching: ClauseMatchingResult,
+        *,
+        matcher: ClauseMatcher,
+    ) -> ClauseMatchingResult:
+        if not matching.removed or not matching.added:
+            return matching
+
+        candidate_edges: list[tuple[float, float, str, str, dict, dict]] = []
+        for left_node in matching.removed:
+            left_id = str(left_node.get("chunk_id") or "")
+            if not left_id or self._is_non_semantic_node(left_node):
+                continue
+            for right_node in matching.added:
+                right_id = str(right_node.get("chunk_id") or "")
+                if not right_id or self._is_non_semantic_node(right_node):
+                    continue
+                if not self._node_types_compatible(left_node, right_node):
+                    continue
+
+                stable_id = str(left_node.get("stable_id") or "")
+                same_stable_id = stable_id and stable_id == str(
+                    right_node.get("stable_id") or ""
+                )
+                actual_score = matcher._clause_score(  # noqa: SLF001
+                    left_node,
+                    right_node,
+                )
+                ranking_score = 1.0 if same_stable_id else actual_score
+                if ranking_score < max(0.72, self.thresholds.min_clause_score):
+                    continue
+                candidate_edges.append(
+                    (
+                        ranking_score,
+                        actual_score,
+                        left_id,
+                        right_id,
+                        left_node,
+                        right_node,
+                    )
+                )
+
+        candidate_edges.sort(key=lambda item: item[0], reverse=True)
+        moved_matches: list[ClauseMatch] = []
+        moved_left: set[str] = set()
+        moved_right: set[str] = set()
+        for _, score, left_id, right_id, left_node, right_node in candidate_edges:
+            if left_id in moved_left or right_id in moved_right:
+                continue
+            moved_matches.append(
+                ClauseMatch(
+                    distance=1.0 - score,
+                    matched_by="moved",
+                    left=left_node,
+                    right=right_node,
+                )
+            )
+            moved_left.add(left_id)
+            moved_right.add(right_id)
+
+        if not moved_matches:
+            return matching
+
+        return ClauseMatchingResult(
+            matches=[*matching.matches, *moved_matches],
+            removed=[
+                node
+                for node in matching.removed
+                if str(node.get("chunk_id") or "") not in moved_left
+            ],
+            added=[
+                node
+                for node in matching.added
+                if str(node.get("chunk_id") or "") not in moved_right
+            ],
+            section_matches=matching.section_matches,
+        )
+
+    def _detect_split_merge_alignments(
+        self,
+        matching: ClauseMatchingResult,
+        *,
+        matcher: ClauseMatcher,
+    ) -> tuple[ClauseMatchingResult, list[tuple[str, list[dict], list[dict], float]]]:
+        alignments: list[tuple[str, list[dict], list[dict], float]] = []
+        consumed_left: set[str] = set()
+        consumed_right: set[str] = set()
+
+        for left_node in matching.removed:
+            left_id = str(left_node.get("chunk_id") or "")
+            if not left_id or left_id in consumed_left:
+                continue
+            candidates = [
+                node
+                for node in matching.added
+                if str(node.get("chunk_id") or "") not in consumed_right
+                and self._node_types_compatible(left_node, node)
+            ]
+            split = self._best_group_alignment(
+                source_node=left_node,
+                candidates=candidates,
+                matcher=matcher,
+                source_on_left=True,
+            )
+            if split is None:
+                continue
+            right_group, distance = split
+            alignments.append(("split", [left_node], right_group, distance))
+            consumed_left.add(left_id)
+            consumed_right.update(str(node.get("chunk_id") or "") for node in right_group)
+
+        for right_node in matching.added:
+            right_id = str(right_node.get("chunk_id") or "")
+            if not right_id or right_id in consumed_right:
+                continue
+            candidates = [
+                node
+                for node in matching.removed
+                if str(node.get("chunk_id") or "") not in consumed_left
+                and self._node_types_compatible(node, right_node)
+            ]
+            merge = self._best_group_alignment(
+                source_node=right_node,
+                candidates=candidates,
+                matcher=matcher,
+                source_on_left=False,
+            )
+            if merge is None:
+                continue
+            left_group, distance = merge
+            alignments.append(("merged", left_group, [right_node], distance))
+            consumed_right.add(right_id)
+            consumed_left.update(str(node.get("chunk_id") or "") for node in left_group)
+
+        if not alignments:
+            return matching, []
+
+        return (
+            ClauseMatchingResult(
+                matches=matching.matches,
+                removed=[
+                    node
+                    for node in matching.removed
+                    if str(node.get("chunk_id") or "") not in consumed_left
+                ],
+                added=[
+                    node
+                    for node in matching.added
+                    if str(node.get("chunk_id") or "") not in consumed_right
+                ],
+                section_matches=matching.section_matches,
+            ),
+            alignments,
+        )
+
+    def _best_group_alignment(
+        self,
+        *,
+        source_node: dict,
+        candidates: list[dict],
+        matcher: ClauseMatcher,
+        source_on_left: bool,
+    ) -> tuple[list[dict], float] | None:
+        if len(candidates) < 2:
+            return None
+        scored = sorted(
+            [
+                (
+                    (
+                        matcher._clause_score(source_node, candidate)  # noqa: SLF001
+                        if source_on_left
+                        else matcher._clause_score(candidate, source_node)  # noqa: SLF001
+                    ),
+                    candidate,
+                )
+                for candidate in candidates
+            ],
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        top_candidates = [candidate for _, candidate in scored[:6]]
+        best_score = 0.0
+        best_group: list[dict] = []
+        for group_size in (2, 3):
+            for group in combinations(top_candidates, group_size):
+                combined = self._combined_node(list(group))
+                score = (
+                    matcher._clause_score(source_node, combined)  # noqa: SLF001
+                    if source_on_left
+                    else matcher._clause_score(combined, source_node)  # noqa: SLF001
+                )
+                if score > best_score:
+                    best_score = score
+                    best_group = list(group)
+        if best_score < 0.68:
+            return None
+        return best_group, 1.0 - best_score
+
+    def _build_change_records(
+        self,
+        matching: ClauseMatchingResult,
+        *,
+        language: str,
+    ) -> list[ChangeRecord]:
+        records: list[ChangeRecord] = []
+        for match in matching.matches:
+            if self._is_non_semantic_node(match.left) and self._is_non_semantic_node(
+                match.right
+            ):
+                continue
+            alignment_type = self._alignment_type(match)
+            meaning_change = self._meaning_change(match.left, match.right, language)
+            cosmetic_change = is_cosmetic_text_change(
+                self._source_text(match.left),
+                self._source_text(match.right),
+            )
+            if (
+                alignment_type != "moved"
+                and match.distance <= self.thresholds.unchanged_distance
+                and meaning_change == "unchanged"
+                and not cosmetic_change
+            ):
+                continue
+            records.append(
+                self._change_record_for_pair(
+                    change_type="MODIFIED",
+                    alignment_type=alignment_type,
+                    left_nodes=[match.left],
+                    right_nodes=[match.right],
+                    distance=match.distance,
+                    meaning_change=meaning_change,
+                )
+            )
+
+        for left_node in matching.removed:
+            if self._is_non_semantic_node(left_node):
+                continue
+            records.append(
+                self._change_record_for_pair(
+                    change_type="REMOVED",
+                    alignment_type="removed",
+                    left_nodes=[left_node],
+                    right_nodes=[],
+                    distance=None,
+                    meaning_change="removed",
+                )
+            )
+
+        for right_node in matching.added:
+            if self._is_non_semantic_node(right_node):
+                continue
+            records.append(
+                self._change_record_for_pair(
+                    change_type="ADDED",
+                    alignment_type="added",
+                    left_nodes=[],
+                    right_nodes=[right_node],
+                    distance=None,
+                    meaning_change="added",
+                )
+            )
+        return records
+
+    def _change_record_for_pair(
+        self,
+        *,
+        change_type: str,
+        alignment_type: str,
+        left_nodes: list[dict],
+        right_nodes: list[dict],
+        distance: float | None,
+        meaning_change: str,
+    ) -> ChangeRecord:
+        left = self._combined_node(left_nodes) if len(left_nodes) > 1 else (
+            left_nodes[0] if left_nodes else None
+        )
+        right = self._combined_node(right_nodes) if len(right_nodes) > 1 else (
+            right_nodes[0] if right_nodes else None
+        )
+        node_type = str((left or right or {}).get("node_type") or "paragraph")
+        left_ref = self._citation_from_neo4j_or_fallback(left) if left else None
+        right_ref = self._citation_from_neo4j_or_fallback(right) if right else None
+        doc1_content = self._display_content(left) if left else None
+        doc2_content = self._display_content(right) if right else None
+        changes = self._record_changes(
+            change_type=change_type,
+            alignment_type=alignment_type,
+            left=left,
+            right=right,
+            node_type=node_type,
+            doc1_content=doc1_content,
+            doc2_content=doc2_content,
+        )
+        left_src = self._source_text(left)
+        right_src = self._source_text(right)
+        numeric_changes = detect_numeric_changes(left_src, right_src)
+        requirement_verb_change = detect_requirement_verb_change(left_src, right_src)
+        cosmetic_change = is_cosmetic_text_change(left_src, right_src)
+        ref_num_only = (
+            bool(numeric_changes)
+            and is_reference_number_only_change(left_src, right_src)
+        )
+        formatting_only = is_formatting_only_change(left_src, right_src)
+        table_changes = [
+            change.model_dump(mode="json")
+            for change in changes
+            if node_type == "table"
+        ]
+        classification = self.severity_classifier.classify(
+            ClassificationContext(
+                change_type=change_type,  # type: ignore[arg-type]
+                alignment_type=alignment_type,
+                node_type=node_type,
+                distance=distance,
+                meaning_change=meaning_change,
+                numeric_changes=numeric_changes,
+                requirement_verb_change=requirement_verb_change,
+                table_changes=table_changes,
+                cosmetic_change=cosmetic_change,
+                reference_number_only_change=ref_num_only,
+                formatting_only_change=formatting_only,
+            )
+        )
+        significance = classification.severity
+        impact = classification.impact
+        severity = classification.severity
+        reasons = classification.reasons
+        section = (
+            (left_ref.section if left_ref else None)
+            or (right_ref.section if right_ref else None)
+            or str((left or right or {}).get("section_path") or "Unknown Section")
+        )
+        confidence = 0.0 if distance is None else max(0.0, min(1.0, 1.0 - distance))
+        if change_type in {"ADDED", "REMOVED"}:
+            confidence = 1.0
+        return ChangeRecord(
+            change_id=self._change_id(change_type, left_nodes, right_nodes),
+            change_type=change_type,  # type: ignore[arg-type]
+            alignment_type=alignment_type,
+            left_nodes=left_nodes,
+            right_nodes=right_nodes,
+            distance=distance,
+            confidence=round(confidence, 4),
+            node_type=node_type,
+            section=section,
+            doc1_content=doc1_content,
+            doc2_content=doc2_content,
+            doc1_reference=left_ref,
+            doc2_reference=right_ref,
+            changes=changes,
+            meaning_change=meaning_change,
+            numeric_changes=numeric_changes,
+            requirement_verb_change=requirement_verb_change,
+            table_changes=table_changes,
+            significance=significance,
+            impact=impact,
+            severity=severity,
+            significance_reasons=reasons,
+        )
+
+    def _record_changes(
+        self,
+        *,
+        change_type: str,
+        alignment_type: str,
+        left: dict | None,
+        right: dict | None,
+        node_type: str,
+        doc1_content: str | None,
+        doc2_content: str | None,
+    ) -> list[ChangeDetail]:
+        if change_type == "ADDED":
+            return [ChangeDetail(type="added", text=str(self._source_text(right) or doc2_content or ""))]
+        if change_type == "REMOVED":
+            return [ChangeDetail(type="removed", text=str(self._source_text(left) or doc1_content or ""))]
+
+        if alignment_type in {"split", "merged"}:
+            label = (
+                "Node split into multiple nodes"
+                if alignment_type == "split"
+                else "Multiple nodes merged into one node"
+            )
+            return [
+                ChangeDetail(
+                    type="modified",
+                    text=label,
+                    oldValue=str(self._source_text(left) or doc1_content or ""),
+                    newValue=str(self._source_text(right) or doc2_content or ""),
+                    location="structure",
+                )
+            ]
+
+        changes = self._extract_changes(left or {}, right or {}, node_type)
+        if alignment_type == "moved" and left and right:
+            old_section = str(left.get("section_path") or "Unknown Section")
+            new_section = str(right.get("section_path") or "Unknown Section")
+            if old_section != new_section:
+                changes.insert(
+                    0,
+                    ChangeDetail(
+                        type="modified",
+                        text="Node moved between sections",
+                        oldValue=old_section,
+                        newValue=new_section,
+                        location="section",
+                    ),
+                )
+        return changes
+
+    def _key_difference_from_record(self, record: ChangeRecord) -> KeyDifference:
+        return KeyDifference(
+            changeType=record.change_type,
+            section=record.section,
+            doc1Content=record.doc1_content,
+            doc2Content=record.doc2_content,
+            impact=record.impact,
+            changeSeverity=record.severity,
+            doc1Reference=record.doc1_reference,
+            doc2Reference=record.doc2_reference,
+            nodeType=record.node_type,
+            changes=record.changes,
+        )
+
+    def _alignment_type(self, match: ClauseMatch) -> str:
+        if match.matched_by == "moved":
+            return "moved"
+        left_section = str(match.left.get("section_path") or "")
+        right_section = str(match.right.get("section_path") or "")
+        if left_section and right_section and left_section != right_section:
+            return "moved"
+        return match.matched_by
+
+    def _display_content(self, node: dict | None) -> str:
+        if not node:
+            return ""
+        if node.get("node_type") == "table":
+            return self._format_table_content(node)
+        return self._short(str(node.get("text") or ""))
+
+    def _source_text(self, node: dict | None) -> str:
+        if not node:
+            return ""
+        return self._reference_source_text(node)
+
+    def _comparison_text(self, node: dict) -> str:
+        return str(
+            node.get("comparison_text")
+            or node.get("canonical_text")
+            or node.get("clean_text")
+            or clean_policy_text(str(node.get("text") or ""))
+        ).strip()
+
+    def _combined_node(self, nodes: list[dict]) -> dict:
+        if not nodes:
+            return {}
+        ordered = sorted(nodes, key=self._node_sort_key)
+        first = dict(ordered[0])
+        texts = [str(node.get("text") or "").strip() for node in ordered]
+        clean_texts = [
+            self._comparison_text(node)
+            for node in ordered
+            if self._comparison_text(node)
+        ]
+        first["chunk_id"] = ",".join(str(node.get("chunk_id") or "") for node in ordered)
+        first["node_id"] = first["chunk_id"]
+        first["text"] = "\n\n".join(text for text in texts if text)
+        first["clean_text"] = " ".join(clean_texts)
+        first["canonical_text"] = first["clean_text"]
+        first["comparison_text"] = first["clean_text"]
+        first["node_type"] = (
+            str(first.get("node_type") or "paragraph")
+            if len({str(node.get("node_type") or "") for node in ordered}) == 1
+            else "paragraph"
+        )
+        first["combined_node_ids"] = [
+            str(node.get("chunk_id") or "") for node in ordered
+        ]
+        return first
+
+    @staticmethod
+    def _node_sort_key(node: dict) -> tuple[int, int]:
+        page = node.get("page_number")
+        if page is None:
+            page = node.get("page")
+        order = node.get("order_index")
+        if order is None:
+            order = node.get("chunk_index")
+        return (int(page or 0), int(order or 0))
+
+    def _node_types_compatible(self, left: dict, right: dict) -> bool:
+        left_type = str(left.get("node_type") or "paragraph")
+        right_type = str(right.get("node_type") or "paragraph")
+        if left_type == right_type:
+            return True
+        return left_type in TEXT_COMPARISON_NODE_TYPES and right_type in TEXT_COMPARISON_NODE_TYPES
+
+    @staticmethod
+    def _change_id(
+        change_type: str,
+        left_nodes: list[dict],
+        right_nodes: list[dict],
+    ) -> str:
+        left_ids = ",".join(str(node.get("chunk_id") or "") for node in left_nodes)
+        right_ids = ",".join(str(node.get("chunk_id") or "") for node in right_nodes)
+        return f"{change_type}:{left_ids}:{right_ids}"
+
+    def _save_compare_trace(
+        self,
+        *,
+        doc1: Document,
+        doc2: Document,
+        left_nodes: list[dict],
+        right_nodes: list[dict],
+        matching: ClauseMatchingResult,
+        grouped_alignments: list[tuple[str, list[dict], list[dict], float]],
+        change_records: list[ChangeRecord],
+        diffs: list[KeyDifference],
+        language: str,
+        llm_payload: dict,
+        summary: str,
+        follow_up_questions: list[str],
+    ) -> None:
+        if self.trace_store is None:
+            return
+        left_artifacts = self._load_debug_artifacts(doc1.id)
+        right_artifacts = self._load_debug_artifacts(doc2.id)
+        payload = {
+            "doc1Id": doc1.id,
+            "doc2Id": doc2.id,
+            "language": language,
+            "checkpoints": {
+                "rawExtractedStructure": {
+                    "doc1": self._raw_extraction_summary(left_artifacts),
+                    "doc2": self._raw_extraction_summary(right_artifacts),
+                },
+                "normalizedNodeTree": {
+                    "doc1NodeCounts": self._node_counts(left_nodes),
+                    "doc2NodeCounts": self._node_counts(right_nodes),
+                    "doc1Nodes": len(left_nodes),
+                    "doc2Nodes": len(right_nodes),
+                    "doc1HierarchyDepth": self._hierarchy_depth(left_nodes),
+                    "doc2HierarchyDepth": self._hierarchy_depth(right_nodes),
+                    "doc1SectionLabels": self._section_labels(left_nodes),
+                    "doc2SectionLabels": self._section_labels(right_nodes),
+                    "doc1NodeOrdering": self._node_ordering(left_nodes),
+                    "doc2NodeOrdering": self._node_ordering(right_nodes),
+                    "doc1DroppedOrMergedBlocks": self._dropped_or_merged_blocks(
+                        left_artifacts
+                    ),
+                    "doc2DroppedOrMergedBlocks": self._dropped_or_merged_blocks(
+                        right_artifacts
+                    ),
+                },
+                "retrievalArtifacts": {
+                    "doc1": self._retrieval_artifact_summary(left_artifacts, left_nodes),
+                    "doc2": self._retrieval_artifact_summary(right_artifacts, right_nodes),
+                },
+                "alignmentResults": {
+                    "matchedNodes": len(matching.matches),
+                    "unmatchedLeft": len(matching.removed),
+                    "unmatchedRight": len(matching.added),
+                    "lowConfidenceMatches": sum(
+                        1
+                        for match in matching.matches
+                        if match.distance > self.thresholds.max_match_distance
+                    ),
+                    "sectionMatches": matching.section_matches,
+                    "matchTypes": self._match_type_counts(matching.matches),
+                    "splitsDetected": sum(
+                        1
+                        for alignment_type, *_ in grouped_alignments
+                        if alignment_type == "split"
+                    ),
+                    "mergesDetected": sum(
+                        1
+                        for alignment_type, *_ in grouped_alignments
+                        if alignment_type == "merged"
+                    ),
+                },
+                "diffRecords": {
+                    "changeCounts": self._change_type_counts(change_records),
+                    "numericChanges": sum(
+                        len(record.numeric_changes) for record in change_records
+                    ),
+                    "tableChanges": sum(
+                        len(record.table_changes) for record in change_records
+                    ),
+                    "movedClauses": sum(
+                        1
+                        for record in change_records
+                        if record.alignment_type == "moved"
+                    ),
+                    "confidenceDistribution": [
+                        record.confidence for record in change_records
+                    ],
+                    "changeRecords": [
+                        record.to_trace_payload() for record in change_records
+                    ],
+                },
+                "llmInputPayload": llm_payload,
+                "finalSummary": {
+                    "summary": summary,
+                    "referencedChangeRecordIds": llm_payload.get(
+                        "includedChangeRecordIds",
+                        [],
+                    ),
+                    "omittedChangeRecordIds": llm_payload.get(
+                        "omittedChangeRecordIds",
+                        [],
+                    ),
+                    "citationCoverage": self._citation_coverage(diffs),
+                    "followUpQuestions": follow_up_questions,
+                },
+            },
+        }
+        self.trace_store.save_trace(doc1_id=doc1.id, doc2_id=doc2.id, payload=payload)
+
+    def _change_records_llm_payload(
+        self,
+        *,
+        doc1: Document,
+        doc2: Document,
+        change_records: list[ChangeRecord],
+        language: str,
+    ) -> dict:
+        record_payloads = [record.to_llm_payload() for record in change_records]
+        grouped = self._group_records_by_chapter(record_payloads)
+        payload = {
+            "promptVersion": "structured-change-records-v2",
+            "documentMetadata": {
+                "doc1": doc1.model_dump(mode="json"),
+                "doc2": doc2.model_dump(mode="json"),
+            },
+            "comparisonObjective": (
+                "Summarize factual policy changes from canonical document nodes. "
+                "Do not use retrieval chunks as comparison evidence."
+            ),
+            "mode": "general",
+            "language": language or "unknown",
+            "includedChangeRecordIds": [
+                str(record.get("changeId") or "") for record in record_payloads
+            ],
+            "omittedChangeRecordIds": [],
+            "groupedChangeRecordsByChapter": grouped,
+            "changeRecords": record_payloads,
+            "unresolvedAlignments": [
+                record
+                for record in record_payloads
+                if float(record.get("confidence") or 0.0) < 0.5
+            ],
+        }
+        payload_json = self._json_for_trace(payload)
+        payload["tokenCounts"] = {
+            "estimatedPayloadTokens": max(1, len(payload_json) // 4),
+            "changeRecords": len(record_payloads),
+        }
+        return payload
+
+    @staticmethod
+    def _group_records_by_chapter(record_payloads: list[dict]) -> list[dict]:
+        grouped: dict[str, list[dict]] = {}
+        for record in record_payloads:
+            section = str(record.get("section") or "Unknown Section")
+            chapter = section.split(" / ", 1)[0] or "Unknown Section"
+            grouped.setdefault(chapter, []).append(record)
+        return [
+            {"chapter": chapter, "changeRecords": records}
+            for chapter, records in grouped.items()
+        ]
+
+    def _load_debug_artifacts(self, document_id: str) -> dict:
+        loader = getattr(self.canonical_store, "load_debug_artifacts", None)
+        if not callable(loader):
+            return {}
+        try:
+            loaded = loader(document_id)
+        except Exception:
+            logger.exception("failed to load compare debug artifacts document_id=%s", document_id)
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _raw_extraction_summary(self, artifacts: dict) -> dict:
+        raw_docling = artifacts.get("rawDoclingJson")
+        hierarchy = self._artifact_hierarchy(artifacts)
+        nodes = hierarchy.get("nodes") if isinstance(hierarchy, dict) else []
+        node_list = [node for node in nodes if isinstance(node, dict)]
+        return {
+            "rawDoclingStored": raw_docling is not None,
+            "rawDoclingPath": artifacts.get("rawDoclingPath"),
+            "normalizedTreePath": artifacts.get("normalizedTreePath"),
+            "hierarchyPath": artifacts.get("hierarchyPath"),
+            "extractedHeadings": [
+                str(node.get("title") or node.get("section_path") or "")
+                for node in node_list
+                if str(node.get("node_type") or "") == "section"
+            ],
+            "blockOrder": [
+                {
+                    "nodeId": str(node.get("node_id") or ""),
+                    "nodeType": str(node.get("node_type") or ""),
+                    "page": node.get("page_number") or node.get("page_from"),
+                    "order": node.get("ordinal") or node.get("order_index"),
+                }
+                for node in node_list
+            ],
+            "tablesFound": sum(
+                1 for node in node_list if str(node.get("node_type") or "") == "table"
+            ),
+            "listsFound": sum(1 for node in node_list if self._looks_like_list_node(node)),
+            "pageAnchors": sorted(
+                {
+                    int(page)
+                    for node in node_list
+                    for page in [node.get("page_number") or node.get("page_from")]
+                    if page is not None
+                }
+            ),
+        }
+
+    @staticmethod
+    def _artifact_hierarchy(artifacts: dict) -> dict:
+        hierarchy = artifacts.get("hierarchyJson")
+        if isinstance(hierarchy, dict):
+            return hierarchy
+        normalized = artifacts.get("normalizedTreeJson")
+        return normalized if isinstance(normalized, dict) else {}
+
+    @staticmethod
+    def _looks_like_list_node(node: dict) -> bool:
+        if str(node.get("node_type") or "") == "list_item":
+            return True
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        labels = " ".join(str(label).lower() for label in metadata.get("source_labels") or [])
+        return "list" in labels or "bullet" in labels
+
+    @staticmethod
+    def _hierarchy_depth(nodes: list[dict]) -> int:
+        return max((len(node.get("heading_path") or node.get("lineage") or []) for node in nodes), default=0)
+
+    @staticmethod
+    def _section_labels(nodes: list[dict]) -> list[str]:
+        return sorted(
+            {
+                str(node.get("section_label") or "")
+                for node in nodes
+                if str(node.get("section_label") or "").strip()
+            }
+        )
+
+    def _node_ordering(self, nodes: list[dict]) -> list[dict]:
+        return [
+            {
+                "nodeId": str(node.get("node_id") or node.get("chunk_id") or ""),
+                "nodeType": str(node.get("node_type") or ""),
+                "section": str(node.get("section_path") or ""),
+                "page": node.get("page_number") or node.get("page"),
+                "order": node.get("order_index") or node.get("chunk_index"),
+            }
+            for node in sorted(nodes, key=self._node_sort_key)
+        ]
+
+    @staticmethod
+    def _dropped_or_merged_blocks(artifacts: dict) -> dict:
+        hierarchy = RealDiffEngine._artifact_hierarchy(artifacts)
+        metadata = hierarchy.get("metadata") if isinstance(hierarchy, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        return {
+            "excludedNodes": int(metadata.get("excluded_nodes") or 0),
+            "ocrNodes": int(metadata.get("ocr_nodes") or 0),
+            "reportedNodeCounts": metadata.get("node_counts") or {},
+        }
+
+    def _retrieval_artifact_summary(self, artifacts: dict, nodes: list[dict]) -> dict:
+        normalized = artifacts.get("normalizedTreeJson")
+        retrieval = normalized.get("retrievalArtifacts") if isinstance(normalized, dict) else None
+        if isinstance(retrieval, dict):
+            return retrieval
+
+        hierarchy = self._artifact_hierarchy(artifacts)
+        hierarchy_nodes = hierarchy.get("nodes") if isinstance(hierarchy, dict) else []
+        mapping = []
+        if isinstance(hierarchy_nodes, list):
+            mapping = [
+                {
+                    "chunkId": str(node.get("node_id") or ""),
+                    "canonicalNodeId": str(node.get("node_id") or ""),
+                    "parentId": node.get("parent_id"),
+                    "nodeType": node.get("node_type"),
+                    "sectionPath": node.get("section_path"),
+                    "page": node.get("page_number"),
+                }
+                for node in hierarchy_nodes
+                if isinstance(node, dict) and bool(node.get("indexable", False))
+            ]
+
+        if not mapping:
+            mapping = [
+                {
+                    "chunkId": str(node.get("chunk_id") or node.get("node_id") or ""),
+                    "canonicalNodeId": str(node.get("canonical_node_id") or node.get("node_id") or ""),
+                    "parentId": node.get("parent_id"),
+                    "nodeType": node.get("node_type"),
+                    "sectionPath": node.get("section_path"),
+                    "page": node.get("page_number"),
+                }
+                for node in nodes
+            ]
+        return {
+            "retrievalChunkCount": len(mapping),
+            "chunkToNodeMapping": mapping,
+        }
+
+    @staticmethod
+    def _citation_coverage(diffs: list[KeyDifference]) -> dict:
+        total = len(diffs)
+        if total == 0:
+            return {
+                "totalChanges": 0,
+                "changesWithAnyCitation": 0,
+                "changesWithBothCitations": 0,
+                "coverageRatio": 1.0,
+            }
+        with_any = sum(1 for diff in diffs if diff.doc1Reference or diff.doc2Reference)
+        with_both = sum(1 for diff in diffs if diff.doc1Reference and diff.doc2Reference)
+        return {
+            "totalChanges": total,
+            "changesWithAnyCitation": with_any,
+            "changesWithBothCitations": with_both,
+            "coverageRatio": round(with_any / total, 4),
+        }
+
+    @staticmethod
+    def _json_for_trace(payload: dict) -> str:
+        try:
+            import json
+
+            return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            return str(payload)
+
+    @staticmethod
+    def _node_counts(nodes: list[dict]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for node in nodes:
+            node_type = str(node.get("node_type") or "unknown")
+            counts[node_type] = counts.get(node_type, 0) + 1
+        return counts
+
+    @staticmethod
+    def _match_type_counts(matches: list[ClauseMatch]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for match in matches:
+            counts[match.matched_by] = counts.get(match.matched_by, 0) + 1
+        return counts
+
+    @staticmethod
+    def _change_type_counts(records: list[ChangeRecord]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for record in records:
+            counts[record.change_type] = counts.get(record.change_type, 0) + 1
+        return counts
+
+    # ------------------------------------------------------------------ #
+    #  Caption-row helpers                                                #
+    # ------------------------------------------------------------------ #
+
+    def _has_caption_row(self, node: dict) -> bool:
+        """Return True when a table's row 0 is a caption embedded as a table cell.
+
+        Detected when row 0 contains exactly one cell that spans all (or all-but-one)
+        columns and whose text matches the "Table N" / "Figure N" pattern.
+        """
+        cells = node.get("table_cells") or []
+        num_cols = int(node.get("table_num_cols") or 0)
+        if not cells or num_cols == 0:
+            return False
+        row0_cells = [c for c in cells if int(c.get("row", -1)) == 0]
+        if len(row0_cells) != 1:
+            return False
+        cell = row0_cells[0]
+        col_span = int(cell.get("col_span", 1))
+        text = str(cell.get("text") or "").strip()
+        return col_span >= max(1, num_cols - 1) and bool(_CAPTION_ROW_RE.match(text))
+
+    def _normalize_cells_for_comparison(self, node: dict) -> list[dict]:
+        """Return table cells with any caption row stripped and rows re-indexed."""
+        cells = node.get("table_cells") or []
+        if not cells or not self._has_caption_row(node):
+            return cells
+        result = []
+        for c in cells:
+            row = int(c.get("row", 0))
+            if row == 0:
+                continue
+            result.append({**c, "row": row - 1})
+        return result
+
+    # ------------------------------------------------------------------ #
+    #  Reference-only change detection                                    #
+    # ------------------------------------------------------------------ #
+
+    def _is_reference_only_change(self, left_text: str, right_text: str) -> bool:
+        """Return True when the two texts differ only in table/figure/section reference numbers.
+
+        Example: "See Table 2.1 for details." vs "See Table 1 for details."
+        Both collapse to "See REF for details." → identical → reference-only.
+        """
+        if not left_text or not right_text:
+            return False
+        left_norm = _REF_TOKEN_RE.sub("REF", left_text.lower())
+        right_norm = _REF_TOKEN_RE.sub("REF", right_text.lower())
+        left_norm = re.sub(r"\s+", " ", left_norm).strip()
+        right_norm = re.sub(r"\s+", " ", right_norm).strip()
+        return left_norm == right_norm
+
+    # ------------------------------------------------------------------ #
+    #  Severity computation                                               #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _normalize_cell_for_severity(text: str) -> str:
+        """Normalise cell text for semantic equality testing.
+
+        Strips formatting characters (hyphens, newlines, semicolons), collapses
+        whitespace, and lowercases so that cosmetic differences like
+        "Temperature:" vs "temperature" or "value;\n" vs "value" are identical.
+        """
+        t = text.strip().lower()
+        # Strip formatting chars that carry no semantic weight
+        t = re.sub(r"[-–—\n\r;]", " ", t)
+        t = re.sub(r"\s+", " ", t).strip()
+        t = t.rstrip(":.,")
+        return t
+
+    def _table_content_bag(self, node: dict) -> frozenset[str]:
+        """Return the set of normalised non-empty cell texts (position-independent)."""
+        cells = self._normalize_cells_for_comparison(node)
+        _norm = self._normalize_cell_for_severity
+        return frozenset(
+            v
+            for c in cells
+            if (v := _norm(str(c.get("text", "")))) != ""
+        )
+
+    @staticmethod
+    def _table_jaccard(left_bag: frozenset[str], right_bag: frozenset[str]) -> float:
+        """Jaccard similarity of two cell-content bags."""
+        if not left_bag and not right_bag:
+            return 1.0
+        intersection = len(left_bag & right_bag)
+        union = len(left_bag | right_bag)
+        return intersection / union if union else 1.0
+
+    def _table_severity(self, left: dict, right: dict) -> str:
+        """Severity for MODIFIED table pairs — content-set (Jaccard) primary, position-overlap secondary.
+
+        Rules:
+          low    – Jaccard ≥ 0.90 OR position overlap ≥ 0.85 (caption/formatting only)
+          medium – Jaccard ≥ 0.60 OR position overlap ≥ 0.50
+          high   – everything else
+        """
+        left_cells = self._normalize_cells_for_comparison(left)
+        right_cells = self._normalize_cells_for_comparison(right)
+
+        if not left_cells or not right_cells:
+            # No cell data – fall back to markdown/text similarity
+            left_text = str(left.get("markdown_text") or left.get("text") or "")
+            right_text = str(right.get("markdown_text") or right.get("text") or "")
+            if not left_text or not right_text:
+                return "high"
+            ratio = SequenceMatcher(None, left_text, right_text).ratio()
+            if ratio >= 0.90:
+                return "low"
+            if ratio >= 0.60:
+                return "medium"
+            return "high"
+
+        left_bag = self._table_content_bag(left)
+        right_bag = self._table_content_bag(right)
+        jaccard = self._table_jaccard(left_bag, right_bag)
+
+        # Rule 1: content-set nearly identical → low regardless of position/dimensions
+        if jaccard >= 0.90:
+            return "low"
+
+        # Rule 2: fall back to position-based overlap for medium/high boundary
+        _norm = self._normalize_cell_for_severity
+        left_cell_map = {
+            (int(c.get("row", 0)), int(c.get("col", 0))): _norm(str(c.get("text", "")))
+            for c in left_cells
+        }
+        right_cell_map = {
+            (int(c.get("row", 0)), int(c.get("col", 0))): _norm(str(c.get("text", "")))
+            for c in right_cells
+        }
+        all_positions = set(left_cell_map.keys()) | set(right_cell_map.keys())
+        if all_positions:
+            fuzzy_match_count = 0
+            for pos in all_positions:
+                lv = left_cell_map.get(pos, "")
+                rv = right_cell_map.get(pos, "")
+                if lv == rv and lv:
+                    fuzzy_match_count += 1
+                elif lv and rv and SequenceMatcher(None, lv, rv).ratio() >= 0.85:
+                    fuzzy_match_count += 1
+            position_overlap = fuzzy_match_count / len(all_positions)
+        else:
+            position_overlap = 0.0
+
+        if position_overlap >= 0.85:
+            return "low"
+        if jaccard >= 0.60 or position_overlap >= 0.50:
+            return "medium"
+        return "high"
+
+    def _meaning_change(self, left: dict, right: dict, language: str = "") -> str:
+        if left.get("node_type") == "table" or right.get("node_type") == "table":
+            return self._table_meaning_change(left, right)
+        left_src = self._source_text(left)
+        right_src = self._source_text(right)
+        # Formatting-only changes (newlines, hyphens, semicolons) carry no semantic weight.
+        if is_formatting_only_change(left_src, right_src):
+            return "unchanged"
+        comparison = compare_clause_meaning(
+            self._node_meaning(left),
+            self._node_meaning(right),
+            language,
+        )
+        if comparison.obligation_change != "unchanged":
+            return comparison.obligation_change
+        if comparison.score < 0.75 and not is_cosmetic_text_change(left_src, right_src):
+            return "changed"
+        return "unchanged"
+
+    def _table_meaning_change(self, left: dict, right: dict) -> str:
+        """Detect structural/content differences in tables.
+
+        Caption rows are stripped before comparison so a table where the caption
+        is embedded as row 0 is treated identically to one where it is external.
+
+        Uses content-set (Jaccard) similarity — when ≥ 90% of cell content is shared
+        between documents (regardless of position/dimension), the meaning is unchanged.
+        This handles cases where caption-as-row or minor structural reordering causes
+        apparent dimension mismatches without actual semantic difference.
+        """
+        left_bag = self._table_content_bag(left)
+        right_bag = self._table_content_bag(right)
+
+        # Content-set nearly identical → semantically unchanged
+        if self._table_jaccard(left_bag, right_bag) >= 0.90:
+            return "unchanged"
+
+        return "modified"
+
+    def _format_table_content(self, node: dict) -> str:
+        """Format table content for display in diffs."""
+        title = node.get("title") or node.get("table_normalized_caption") or ""
+        num_rows = node.get("table_num_rows", 0)
+        num_cols = node.get("table_num_cols", 0)
+
+        # Subtract caption row from displayed count so both docs show the same
+        # number when one embeds its caption as a row and the other does not.
+        if self._has_caption_row(node):
+            num_rows = max(0, (num_rows or 0) - 1)
+
+        if num_rows and num_cols:
+            table_desc = f"Table ({num_rows} rows × {num_cols} cols)"
+            if title:
+                table_desc = f"{title}: {table_desc}"
+            return table_desc
+
+        # Fallback to markdown or text
+        markdown = node.get("markdown_text") or ""
+        if markdown:
+            lines = markdown.strip().split("\n")[:4]
+            return "\n".join(lines) + ("..." if len(markdown.split("\n")) > 4 else "")
+
+        return self._short(str(node.get("text") or ""), n=120)
+
+    async def _enrich_nodes_with_semantics(
+        self,
+        nodes: list[dict],
+        force_re_extract: bool = False,
+        language: str = "",
+    ) -> list[dict]:
+        enriched = [dict(node) for node in nodes]
+        indexes: list[int] = []
+        texts: list[str] = []
+        markdown_texts: list[str] = []
+
+        for index, node in enumerate(enriched):
+            if not node.get("clean_text"):
+                node["clean_text"] = clean_policy_text(str(node.get("text") or ""))
+            if node.get("node_type") not in TEXT_COMPARISON_NODE_TYPES:
+                continue
+            # Skip if already has semantics, unless force_re_extract is True
+            if not force_re_extract and any(
+                node.get(field)
+                for field in ("obligation", "subject", "action", "object", "condition")
+            ):
+                continue
+            text = str(node.get("text") or "").strip()
+            if not text:
+                continue
+            indexes.append(index)
+            texts.append(text)
+            # Use markdown if available, otherwise fall back to plain text
+            markdown_texts.append(str(node.get("markdown_text") or text))
+
+        if not texts:
+            return enriched
+
+        try:
+            extracted = await self.llm.extract_policy_meanings(
+                texts=texts,
+                markdown_texts=markdown_texts,
+                language=language,
+            )
+        except TypeError:
+            # Backward compatibility with older stubs/fakes in unit tests.
+            extracted = await self.llm.extract_policy_meanings(texts=texts)  # type: ignore[call-arg]
+
+        for index, meaning in zip(
+            indexes,
+            extracted,
+            strict=False,
+        ):
+            for field, value in meaning.items():
+                enriched[index][field] = str(value or "")
+
+        return enriched
+
+    async def _detect_document_language(self, nodes: list[dict]) -> str:
+        """Detect language from first few chunks of text."""
+        sample_texts = []
+        for node in nodes[:5]:
+            text = str(node.get("text") or "").strip()
+            if text:
+                sample_texts.append(text)
+            if len(" ".join(sample_texts)) > 500:
+                break
+        if not sample_texts:
+            return ""
+        sample = " ".join(sample_texts)[:500]
+        return await self.llm.detect_language(sample)
+
+    def _node_meaning(self, node: dict) -> ClauseMeaning:
+        obligation = str(node.get("obligation") or "")
+        subject = str(node.get("subject") or "")
+        action = str(node.get("action") or "")
+        obj = str(node.get("object") or "")
+        condition = str(node.get("condition") or "")
+        if obligation or subject or action or obj or condition:
+            return ClauseMeaning(obligation, subject, action, obj, condition)
+        return extract_clause_meaning(str(node.get("text") or ""))
+
+    def _citation_from_neo4j_or_fallback(self, chunk: dict) -> DocumentReference:
+        chunk_id = chunk.get("chunk_id")
+        if chunk_id and self.neo4j is not None:
+            citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
+            if citation:
+                source_text = self._reference_source_text(chunk) or str(
+                    citation.get("sourceText") or ""
+                )
+                citation["sourceText"] = source_text
+                return DocumentReference(**citation)
+        page = chunk.get("page_number")
+        if page is None:
+            page = chunk.get("page")
+        source_text = self._reference_source_text(chunk)
+        return DocumentReference(
+            section=str(chunk.get("section_path") or "Unknown Section"),
+            page=int(page or 0),
+            lineStart=chunk.get("line_start"),
+            lineEnd=chunk.get("line_end"),
+            sourceText=source_text,
+        )
+
+    def _reference_source_text(self, chunk: dict) -> str:
+        if chunk.get("node_type") == "table":
+            markdown = str(chunk.get("markdown_text") or "").strip()
+            if markdown:
+                return markdown
+        return str(chunk.get("text") or "")
+
+    def _is_non_semantic_node(self, node: dict) -> bool:
+        """Return True if the node's content has no semantic diff value."""
+        text = str(
+            node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))
+        ).strip()
+        return is_non_semantic_content(text)
+
+    def _short(self, text: str, n: int = 90) -> str:
+        t = " ".join((text or "").split())
+        return t if len(t) <= n else t[:n] + "..."
+
+    def _action_plan(self, diffs: List[KeyDifference]) -> List[ActionItem]:
+        actions: List[ActionItem] = []
+        for diff in diffs:
+            if diff.impact == "High":
+                actions.append(
+                    ActionItem(
+                        priority="High",
+                        action=f"Assess compliance impact of {diff.changeType.lower()} items in {diff.section}",
+                        timeline="60 days",
+                        owner="Compliance Team",
+                    )
+                )
+        return actions[:5]
+
+    async def _follow_ups(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        diffs: List[KeyDifference],
+        language: str,
+    ) -> List[str]:
+        sampled_diffs = random_diff_subset(diffs, max_items=10)
+        if not sampled_diffs:
+            return [
+                "Are there any material compliance requirement changes between these versions?",
+                "Which sections require immediate policy updates?",
+            ]
+
+        try:
+            questions = await self.llm.generate_followups(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                key_differences=sampled_diffs,
+                max_questions=4,
+                language=language,
+            )
+            questions = [question.strip() for question in questions if question.strip()]
+            if questions:
+                return questions[:4]
+        except Exception:
+            logger.exception("failed to generate LLM follow-up questions")
+
+        return [
+            f"What controls or evidence must be updated for {diff.section}?"
+            for diff in sampled_diffs[:4]
+        ]
+
+    async def _two_step_summary(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        key_differences: List[KeyDifference],
+        language: str,
+    ) -> str:
+        if not key_differences:
+            return "No material differences were detected."
+
+        explanations = await self._explain_differences(
+            key_differences, language=language
+        )
+
+        summarize_explanations = getattr(self.llm, "summarize_explanations", None)
+        if callable(summarize_explanations):
+            try:
+                return await self.llm.summarize_explanations(
+                    doc1_name=doc1_name,
+                    doc2_name=doc2_name,
+                    explanations=explanations,
+                    language=language,
+                )
+            except Exception:
+                logger.exception("failed two-step summary aggregation, falling back")
+
+        return await self.llm.summarize_changes(
+            doc1_name=doc1_name,
+            doc2_name=doc2_name,
+            key_differences=key_differences,
+            language=language,
+        )
+
+    async def _summary_from_change_records(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        change_records: list[ChangeRecord],
+        key_differences: list[KeyDifference],
+        llm_payload: dict,
+        language: str,
+    ) -> str:
+        if not change_records:
+            return "No material differences were detected."
+
+        summarize_change_records = getattr(self.llm, "summarize_change_records", None)
+        if callable(summarize_change_records):
+            try:
+                return await summarize_change_records(
+                    doc1_name=doc1_name,
+                    doc2_name=doc2_name,
+                    change_record_payload=llm_payload,
+                    language=language,
+                )
+            except Exception:
+                logger.exception(
+                    "failed structured change-record summary, falling back"
+                )
+
+        return await self._two_step_summary(
+            doc1_name=doc1_name,
+            doc2_name=doc2_name,
+            key_differences=key_differences,
+            language=language,
+        )
+
+    async def _explain_differences(
+        self,
+        key_differences: List[KeyDifference],
+        *,
+        language: str,
+    ) -> list[dict[str, str]]:
+        capped = key_differences[: self.max_diffs]
+        tasks = [
+            self.llm.summarize_diff(
+                old_text=self._diff_text(diff.doc1Reference, diff.doc1Content),
+                new_text=self._diff_text(diff.doc2Reference, diff.doc2Content),
+                section=diff.section,
+                language=language,
+            )
+            for diff in capped
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        explanations: list[dict[str, str]] = []
+        for diff, result in zip(capped, results, strict=False):
+            if isinstance(result, Exception):
+                explanation = (
+                    f"{diff.changeType} change in {diff.section}: "
+                    "content changed based on canonical comparison."
+                )
+            else:
+                explanation = str(result or "").strip()
+            explanations.append(
+                {
+                    "changeType": diff.changeType,
+                    "section": diff.section,
+                    "nodeType": diff.nodeType,
+                    "impact": diff.impact,
+                    "changeSeverity": diff.changeSeverity,
+                    "changes": [
+                        change.model_dump(mode="json") for change in diff.changes
+                    ],
+                    "doc1Content": diff.doc1Content or "",
+                    "doc2Content": diff.doc2Content or "",
+                    "doc1Citation": (
+                        diff.doc1Reference.model_dump(mode="json")
+                        if diff.doc1Reference
+                        else None
+                    ),
+                    "doc2Citation": (
+                        diff.doc2Reference.model_dump(mode="json")
+                        if diff.doc2Reference
+                        else None
+                    ),
+                    "explanation": explanation,
+                }
+            )
+        return explanations
+
+    def _diff_text(
+        self,
+        reference: DocumentReference | None,
+        fallback: str | None,
+    ) -> str:
+        if reference and reference.sourceText:
+            return reference.sourceText
+        return str(fallback or "")
+
+    def _section_accuracy_metrics(
+        self, matches: list[ClauseMatch]
+    ) -> list[SectionAccuracyMetrics]:
+        sections: dict[str, list[float]] = {}
+        for match in matches:
+            section = str(
+                match.right.get("section_path")
+                or match.left.get("section_path")
+                or "Unknown Section"
+            )
+            sections.setdefault(section, []).append(match.distance)
+
+        metrics: list[SectionAccuracyMetrics] = []
+        for section, distances in sections.items():
+            count = len(distances)
+            avg_distance = sum(distances) / count
+            avg_score = 1.0 - avg_distance
+            high = sum(1 for d in distances if d <= self.thresholds.unchanged_distance)
+            med = sum(
+                1
+                for d in distances
+                if self.thresholds.unchanged_distance
+                < d
+                <= self.thresholds.max_match_distance
+            )
+            low = count - high - med
+            confidence = (high * 1.0 + med * 0.7 + low * 0.3) / count
+
+            metrics.append(
+                SectionAccuracyMetrics(
+                    section=section,
+                    avg_match_distance=round(avg_distance, 4),
+                    avg_match_score=round(avg_score, 4),
+                    match_count=count,
+                    confidence=round(confidence, 4),
+                )
+            )
+
+        return sorted(metrics, key=lambda m: m.section)
+
+    def _compute_accuracy_metrics(
+        self, matches: list[ClauseMatch]
+    ) -> ComparisonAccuracyMetrics:
+        """Confidence levels based on match distance:
+        - High: distance <= 0.20 (very similar clauses)
+        - Medium: distance <= 0.35 (reasonably similar)
+        - Low: distance > 0.35 (weak match)
+        """
+        if not matches:
+            return ComparisonAccuracyMetrics(
+                avg_match_distance=0.0,
+                avg_match_score=None,
+                high_confidence_matches=0,
+                medium_confidence_matches=0,
+                low_confidence_matches=0,
+                total_matches=0,
+                overall_confidence=0.0,
+                confidence_breakdown={
+                    "stable_id": 0,
+                    "section_stable_id": 0,
+                    "section_alignment": 0,
+                    "vector_search": 0,
+                },
+                section_metrics=[],
+            )
+
+        distances = [m.distance for m in matches]
+        avg_distance = sum(distances) / len(distances)
+        avg_score = 1.0 - avg_distance
+
+        high_conf = sum(1 for d in distances if d <= self.thresholds.unchanged_distance)
+        medium_conf = sum(
+            1
+            for d in distances
+            if self.thresholds.unchanged_distance
+            < d
+            <= self.thresholds.max_match_distance
+        )
+        low_conf = sum(1 for d in distances if d > self.thresholds.max_match_distance)
+
+        breakdown: dict[str, int] = {}
+        for m in matches:
+            breakdown[m.matched_by] = breakdown.get(m.matched_by, 0) + 1
+
+        weighted_confidence = (
+            high_conf * 1.0 + medium_conf * 0.7 + low_conf * 0.3
+        ) / len(matches)
+
+        return ComparisonAccuracyMetrics(
+            avg_match_distance=round(avg_distance, 4),
+            avg_match_score=round(avg_score, 4),
+            high_confidence_matches=high_conf,
+            medium_confidence_matches=medium_conf,
+            low_confidence_matches=low_conf,
+            total_matches=len(matches),
+            overall_confidence=round(weighted_confidence, 4),
+            confidence_breakdown=breakdown,
+            section_metrics=self._section_accuracy_metrics(matches),
+        )
+
+    def _table_content_for_llm(self, node: dict | None) -> str | None:
+        """Return the best available text representation of a table node for LLM prompts."""
+        if not node:
+            return None
+        # Prefer markdown (human-readable structure), fall back to normalized text projection
+        return (
+            str(node.get("markdown_text") or "").strip()
+            or str(node.get("normalized_table_text") or "").strip()
+            or str(node.get("comparison_text") or "").strip()
+            or None
+        )
+
+    async def _populate_markdown_diff_summaries(
+        self,
+        diffs: List[KeyDifference],
+        change_records: list[ChangeRecord] | None = None,
+        *,
+        language: str = "",
+    ) -> None:
+        """Generate markdownDiffSummary for every diff in parallel via LLM."""
+        _records: list[ChangeRecord | None] = list(change_records or [])
+        tasks = []
+        for i, diff in enumerate(diffs):
+            record: ChangeRecord | None = _records[i] if i < len(_records) else None
+            left_node = record.left_nodes[0] if (record and record.left_nodes) else None
+            right_node = record.right_nodes[0] if (record and record.right_nodes) else None
+            is_table = diff.nodeType == "table"
+            tasks.append(
+                self.llm.generate_markdown_diff_summary(
+                    node_type=diff.nodeType,
+                    change_type=diff.changeType,
+                    doc1_source_text=(
+                        diff.doc1Reference.sourceText if diff.doc1Reference else None
+                    ),
+                    doc2_source_text=(
+                        diff.doc2Reference.sourceText if diff.doc2Reference else None
+                    ),
+                    doc1_table_content=self._table_content_for_llm(left_node) if is_table else None,
+                    doc2_table_content=self._table_content_for_llm(right_node) if is_table else None,
+                    language=language,
+                )
+            )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for diff, result in zip(diffs, results, strict=False):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "markdownDiffSummary generation failed for section=%s: %s",
+                    diff.section,
+                    result,
+                )
+            else:
+                diff.markdownDiffSummary = str(result or "").strip() or None
+
+    def _extract_changes(
+        self, left: dict, right: dict, node_type: str
+    ) -> List[ChangeDetail]:
+        """Extract specific changes between two nodes for UI highlighting."""
+        if node_type == "table":
+            return self._extract_table_changes(left, right)
+        return self._extract_text_changes(left, right)
+
+    def _extract_text_changes(self, left: dict, right: dict) -> List[ChangeDetail]:
+        """Extract line-level changes between two text chunks."""
+        changes: List[ChangeDetail] = []
+        left_text = str(left.get("text") or "")
+        right_text = str(right.get("text") or "")
+
+        # Split into lines/items (handle bullet points)
+        left_lines = [
+            line.strip()
+            for line in left_text.replace(" - ", "\n- ").split("\n")
+            if line.strip()
+        ]
+        right_lines = [
+            r.strip()
+            for r in right_text.replace(" - ", "\n- ").split("\n")
+            if r.strip()
+        ]
+
+        left_set = set(left_lines)
+        right_set = set(right_lines)
+
+        # Find removed lines
+        for line in left_lines:
+            if line not in right_set:
+                # Check if it was modified (similar line exists)
+                modified_match = self._find_similar_line(line, right_lines)
+                if modified_match:
+                    changes.append(
+                        ChangeDetail(
+                            type="modified",
+                            text=line,
+                            oldValue=line,
+                            newValue=modified_match,
+                        )
+                    )
+                else:
+                    changes.append(
+                        ChangeDetail(
+                            type="removed",
+                            text=line,
+                        )
+                    )
+
+        # Find added lines (excluding those already matched as modified)
+        modified_new_values = {c.newValue for c in changes if c.type == "modified"}
+        for line in right_lines:
+            if line not in left_set and line not in modified_new_values:
+                changes.append(
+                    ChangeDetail(
+                        type="added",
+                        text=line,
+                    )
+                )
+
+        return changes
+
+    def _find_similar_line(self, line: str, candidates: list[str]) -> str | None:
+        """Find a similar line in candidates (for detecting modifications)."""
+        from difflib import SequenceMatcher
+
+        line_lower = line.lower()
+        for candidate in candidates:
+            ratio = SequenceMatcher(None, line_lower, candidate.lower()).ratio()
+            if ratio > 0.6:  # More than 60% similar
+                return candidate
+        return None
+
+    def _extract_table_changes(self, left: dict, right: dict) -> List[ChangeDetail]:
+        """Extract cell-level changes between two tables.
+
+        Caption rows are stripped and rows re-indexed before comparison so that
+        a table with an embedded caption does not appear to have an extra row.
+        """
+        changes: List[ChangeDetail] = []
+
+        left_rows = max(
+            0,
+            (left.get("table_num_rows") or 0)
+            - (1 if self._has_caption_row(left) else 0),
+        )
+        right_rows = max(
+            0,
+            (right.get("table_num_rows") or 0)
+            - (1 if self._has_caption_row(right) else 0),
+        )
+
+        # Dimension changes
+        if left_rows != right_rows:
+            if right_rows > left_rows:
+                changes.append(
+                    ChangeDetail(
+                        type="added",
+                        text=f"{right_rows - left_rows} row(s) added",
+                        location=f"Rows {left_rows + 1}-{right_rows}",
+                    )
+                )
+            else:
+                changes.append(
+                    ChangeDetail(
+                        type="removed",
+                        text=f"{left_rows - right_rows} row(s) removed",
+                    )
+                )
+
+        # Cell-level changes using caption-normalised cells
+        left_cells = self._normalize_cells_for_comparison(left)
+        right_cells = self._normalize_cells_for_comparison(right)
+
+        left_cell_map = {
+            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).strip()
+            for c in left_cells
+        }
+        right_cell_map = {
+            (c.get("row", 0), c.get("col", 0)): str(c.get("text", "")).strip()
+            for c in right_cells
+        }
+
+        # Find modified cells (same position, different content)
+        for pos, left_val in left_cell_map.items():
+            right_val = right_cell_map.get(pos)
+            if right_val is not None and left_val != right_val:
+                row, col = pos
+                changes.append(
+                    ChangeDetail(
+                        type="modified",
+                        text="Cell changed",
+                        oldValue=left_val,
+                        newValue=right_val,
+                        location=f"Row {row + 1}, Col {col + 1}",
+                    )
+                )
+
+        # Find cells in new rows
+        for pos, right_val in right_cell_map.items():
+            if pos not in left_cell_map and right_val:
+                row, col = pos
+                if row >= left_rows:  # New row
+                    changes.append(
+                        ChangeDetail(
+                            type="added",
+                            text=right_val,
+                            location=f"Row {row + 1}, Col {col + 1}",
+                        )
+                    )
+
+        return changes
