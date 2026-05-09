@@ -196,3 +196,47 @@ class HybridSearchDocumentResult(BaseModel):
 class HybridSearchResponse(BaseModel):
     query: str
     results: List[HybridSearchDocumentResult]
+
+
+# ---------------------------------------------------------------------------
+# Storage provider configs + remote ingestion
+# ---------------------------------------------------------------------------
+
+
+StorageProviderType = Literal["s3", "azure_blob", "gdrive"]
+
+
+class StorageProviderConfigCreateRequest(BaseModel):
+    providerType: StorageProviderType
+    name: str
+    config: dict = Field(default_factory=dict)
+    secrets: dict = Field(default_factory=dict)
+
+
+class StorageProviderConfigUpdateRequest(BaseModel):
+    name: str | None = None
+    config: dict | None = None
+    secrets: dict | None = None
+
+
+class StorageProviderConfig(BaseModel):
+    providerId: str
+    providerType: StorageProviderType
+    name: str
+    config: dict = Field(default_factory=dict)
+    createdAt: str
+    updatedAt: str
+
+
+class StorageProviderListResponse(BaseModel):
+    providers: List[StorageProviderConfig]
+
+
+class IngestSource(BaseModel):
+    uri: str
+    filename: str | None = None
+    providerId: str | None = None
+
+
+class IngestSourcesRequest(BaseModel):
+    sources: List[IngestSource]

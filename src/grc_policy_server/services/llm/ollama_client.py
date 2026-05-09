@@ -5,8 +5,6 @@ import asyncio
 import json
 import random
 import re
-import time
-
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -473,16 +471,8 @@ class OllamaClient(BaseLLM):
                 pool=self.settings.connect_timeout_sec,
             ),
         )
-        self._sync_client = httpx.Client(
-            timeout=httpx.Timeout(
-                connect=self.settings.connect_timeout_sec,
-                read=self.settings.read_timeout_sec,
-                write=self.settings.write_timeout_sec,
-                pool=self.settings.connect_timeout_sec,
-            ),
-        )
 
-    def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str) -> list[float]:
         tracked = tracing.track(
             name="ollama_embed",
             type="llm",
@@ -490,14 +480,14 @@ class OllamaClient(BaseLLM):
             metadata={"model": self.settings.embed_model},
             project_name=self.settings.opik_project_name,
         )(self._embed_untraced)
-        return tracked(text)
+        return await tracked(text)
 
-    def _embed_untraced(self, text: str) -> list[float]:
+    async def _embed_untraced(self, text: str) -> list[float]:
         payload = {
             "model": self.settings.embed_model,
             "input": text,
         }
-        response = self._post_json_sync("/api/embed", payload)
+        response = await self._post_json("/api/embed", payload)
         embeddings = response.get("embeddings")
         if isinstance(embeddings, list) and embeddings:
             first = embeddings[0]
@@ -741,15 +731,17 @@ class OllamaClient(BaseLLM):
 
     def close(self) -> None:
         """Sync best-effort close. Use aclose() in async contexts."""
-        self._sync_client.close()
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._async_client.aclose())
         except RuntimeError:
-            asyncio.run(self._async_client.aclose())
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(self._async_client.aclose())
+            finally:
+                loop.close()
 
     async def aclose(self) -> None:
-        self._sync_client.close()
         await self._async_client.aclose()
 
     def _language_hint(self, language: str) -> str:
@@ -767,36 +759,12 @@ class OllamaClient(BaseLLM):
     # HTTP helpers
     # -------------------------
 
-    def _post_json_sync(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.settings.base_url}{path}"
-        last_exc: Exception | None = None
-        for attempt in range(self.settings.max_retries + 1):
-            if attempt > 0:
-                time.sleep(random.uniform(0.1, 0.5))
-            try:
-                response = self._sync_client.post(url, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                if not isinstance(data, dict):
-                    raise RuntimeError(f"Ollama response is not JSON object: {data}")
-                return data
-            except httpx.TimeoutException as exc:
-                last_exc = exc
-                logger.warning(
-                    "Ollama sync timeout on attempt %d/%d: %s",
-                    attempt + 1,
-                    self.settings.max_retries + 1,
-                    path,
-                )
-        raise RuntimeError(
-            f"Ollama request timed out after {self.settings.max_retries + 1} attempts"
-        ) from last_exc
-
     async def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         last_exc: Exception | None = None
         for attempt in range(self.settings.max_retries + 1):
             if attempt > 0:
-                await asyncio.sleep(random.uniform(0.1, 0.5))
+                backoff = min(2.0 ** attempt, 30.0)
+                await asyncio.sleep(random.uniform(backoff * 0.75, backoff * 1.25))
             try:
                 r = await self._async_client.post(path, json=payload)
                 r.raise_for_status()

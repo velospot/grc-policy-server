@@ -9,6 +9,7 @@ from grc_policy_server.api.routes import (
     compare_v2,
     documents,
     health,
+    storage_providers,
     with_summary,
 )
 from grc_policy_server.core.config import settings
@@ -48,6 +49,7 @@ app = FastAPI(
         {"name": "health", "description": "Service availability checks"},
         {"name": "documents", "description": "Document management endpoints"},
         {"name": "compare", "description": "Document comparison endpoints"},
+        {"name": "storage", "description": "Storage provider configuration endpoints"},
     ],
 )
 
@@ -69,6 +71,7 @@ app.include_router(documents.router)
 app.include_router(compare.router)
 app.include_router(with_summary.router)
 app.include_router(compare_v2.router)
+app.include_router(storage_providers.router)
 
 
 def run() -> None:

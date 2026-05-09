@@ -7,7 +7,6 @@ from typing import Any, Literal
 from grc_policy_server.models.schemas import ChangeDetail, DocumentReference
 from grc_policy_server.services.comparison.severity_classifier import (
     ClassificationContext,
-    ClassificationResult,
     SeverityClassifier,
 )
 

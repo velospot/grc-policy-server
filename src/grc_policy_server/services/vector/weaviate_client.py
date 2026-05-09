@@ -134,20 +134,32 @@ class WeaviateClient:
     def _ensure_schema(self) -> None:
         name = self.collection_name
         if not self.client.collections.exists(name):
+            source_properties = [
+                "clean_text",
+                "text",
+                "section_path",
+                "markdown_text",
+                "title",
+            ]
+            vectorizer = (settings.weaviate_vectorizer or "ollama").strip().lower()
+
+            if vectorizer == "huggingface":
+                vector_config = Configure.Vectors.text2vec_huggingface(
+                    endpoint_url=settings.weaviate_huggingface_endpoint_url,
+                    model=settings.weaviate_huggingface_model,
+                    source_properties=source_properties,
+                )
+            else:
+                vector_config = Configure.Vectors.text2vec_ollama(
+                    api_endpoint=settings.ollama_embedding_url,
+                    model=settings.ollama_embed_model,
+                    source_properties=source_properties,
+                )
+
             self.client.collections.create(
                 name=name,
                 properties=self._schema_properties(),
-                vector_config=Configure.Vectors.text2vec_ollama(
-                    api_endpoint=settings.ollama_embedding_url,
-                    model=settings.ollama_embed_model,
-                    source_properties=[
-                        "clean_text",
-                        "text",
-                        "section_path",
-                        "mark_down",
-                        "title",
-                    ],
-                ),
+                vector_config=vector_config,
             )
             return
 

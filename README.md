@@ -5,6 +5,7 @@ FastAPI service for GRC policy ingestion and policy comparison.
 ## Features
 
 - Upload one or many policy documents in one request (`POST /documents/upload`).
+- Ingest documents from remote sources (HTTP/S, S3, Azure Blob, Google Drive) (`POST /documents/ingest/sources`).
 - Upload via Celery workers (`POST /documents/upload/v2`) with production-oriented queue settings.
 - Download a stored PDF (default or filename-specific) (`GET /documents/{document_id}/download`).
 - Delete one or many documents and their Weaviate chunks (`POST /documents/delete`).
@@ -25,9 +26,10 @@ Entry point: `src/grc_policy_server/main.py`
 2. `FastAPI(...)` app is created with OpenAPI metadata.
 3. Routers are registered:
    - `health.router` (`/health`)
-   - `documents.router` (`/documents`, `/documents/{document_id}/download`, `/documents/upload`, `/documents/upload/v2`, `/documents/upload/v2/{job_id}`, `/documents/delete`, `/documents/search/hybrid`)
+   - `documents.router` (`/documents`, `/documents/{document_id}/download`, `/documents/upload`, `/documents/ingest/sources`, `/documents/upload/v2`, `/documents/upload/v2/{job_id}`, `/documents/delete`, `/documents/search/hybrid`)
    - `compare.router` (`/compare`)
    - `with_summary.router` (`/compare/with-summary`)
+   - `storage_providers.router` (`/storage/providers`)
 4. `run()` starts Uvicorn with configured `host`, `port`, `log_level`, and `debug` reload mode.
 5. Request handling is lock-free at the app level so independent requests can run concurrently.
 
@@ -52,6 +54,10 @@ In Swagger (`/docs`), use the `Authorize` button and paste the token value (with
   - Uploads one or more documents in a single request.
   - Use multipart form-data and repeat the `file` field for batch upload.
   - Returns per-file ingestion status.
+
+- `POST /documents/ingest/sources`
+  - Ingests one or more documents from remote URIs (for example `https://...`, `s3://...`, `azblob://...`, Google Drive share links).
+  - Optional `providerId` can be supplied per source to use stored credentials/config.
 
 - `POST /documents/upload/v2`
   - Same multipart request contract as `POST /documents/upload`.
@@ -79,6 +85,9 @@ In Swagger (`/docs`), use the `Authorize` button and paste the token value (with
 
 - `POST /compare/with-summary`
   - Runs streamed comparison and returns summarized result payload.
+
+- `GET /storage/providers`, `POST /storage/providers`, `PUT /storage/providers/{provider_id}`, `DELETE /storage/providers/{provider_id}`
+  - Create/list/update/delete storage provider configurations (used by `/documents/ingest/sources`).
 
 ## Upload API contract
 
@@ -190,7 +199,9 @@ Key runtime variables (all available in `.env.example`):
 - `DOCLING_ACCELERATOR_DEVICE`, `DOCLING_ACCELERATOR_THREADS`, `DOCLING_CUDA_USE_FLASH_ATTENTION2`
 - `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
 - `WEAVIATE_URL`, `WEAVIATE_COLLECTION`, `WEAVIATE_EMBEDDED`
+- `WEAVIATE_VECTORIZER`, `WEAVIATE_HUGGINGFACE_MODEL`, `WEAVIATE_HUGGINGFACE_ENDPOINT_URL`
 - `OLLAMA_URL`, `OLLAMA_CHAT_MODEL`, `OLLAMA_EMBED_MODEL`, `OLLAMA_TIMEOUT_SEC`
+- `LLM_PRIMARY_PROVIDER`, `VLLM_CHAT_URL`, `VLLM_EMBED_URL`, `VLLM_CHAT_MODEL`, `VLLM_EMBED_MODEL`, `VLLM_TIMEOUT_SEC`
 - `OPIK_ENABLED`, `OPIK_URL_OVERRIDE`, `OPIK_PROJECT_NAME`, `OPIK_WORKSPACE`
 - `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_COLLECTION`
 - `DOWNLOAD_TIMEOUT_SECONDS`, `MAX_DOWNLOAD_MB`, `EMBED_BATCH_SIZE`

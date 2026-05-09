@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ from grc_policy_server.services.ingestion.ocr_fallback import build_ocr_fallback
 from grc_policy_server.services.ingestion.policy_preprocessor import (
     preprocess_parsed_chunks,
 )
-from grc_policy_server.services.llm.ollama_client import OllamaClient
+from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 from grc_policy_server.utils.hashing import sha256_hex
 
@@ -49,7 +50,7 @@ class DocumentIngestionService:
         docling_adapter: DoclingAdapter,
         weaviate: WeaviateClient,
         neo4j: Neo4jClient | None,
-        llm: OllamaClient,
+        llm: BaseLLM,
         upload_root: Path,
         canonical_store: CanonicalDocumentStore | None = None,
     ):
@@ -69,19 +70,25 @@ class DocumentIngestionService:
     ) -> UploadIngestionResult:
         """Convert an uploaded document, store chunks, and persist upload metadata."""
         document_id = str(uuid4())
-        dl_doc = self.docling_adapter.convert_bytes(
+        # Docling conversion is CPU/GPU-heavy; run it off the event loop so uploads
+        # (and remote source ingestion) can handle multi-document requests without
+        # head-of-line blocking.
+        dl_doc = await asyncio.to_thread(
+            self.docling_adapter.convert_bytes,
             filename=filename,
             content=content,
             auto_ocr=True,
             force_full_page_ocr=False,
             do_table_structure=True,
         )
-        doc_json = dl_doc.export_to_dict()
+        doc_json = await asyncio.to_thread(dl_doc.export_to_dict)
         content_hash = sha256_hex(content)
 
-        raw_chunks = chunk_document(dl_doc, merge_list_items=True)
+        raw_chunks = await asyncio.to_thread(
+            chunk_document, dl_doc, merge_list_items=True
+        )
         # Pass doc_json (dict) instead of dl_doc for better table extraction
-        parsed_chunks = parse_docling_chunks(doc_json, raw_chunks)
+        parsed_chunks = await asyncio.to_thread(parse_docling_chunks, doc_json, raw_chunks)
         parsed_chunks, ocr_metadata = self._apply_ocr_fallback(
             filename=filename,
             content=content,
@@ -198,7 +205,7 @@ class DocumentIngestionService:
             metadata = dict(chunk.metadata)
             metadata.update(meaning_to_metadata(chunk.text))
             metadata.update({key: str(value or "") for key, value in meaning.items()})
-            metadata["semantic_source"] = "ollama"
+            metadata["semantic_source"] = "llm"
             metadata["detected_language"] = language
             enriched[chunk_index] = replace(chunk, metadata=metadata)
         return enriched

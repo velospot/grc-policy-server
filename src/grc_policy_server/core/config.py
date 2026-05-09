@@ -142,6 +142,9 @@ class Settings(BaseSettings):
     weaviate_grpc_host: str | None = None
     weaviate_grpc_port: int | None = None
     weaviate_grpc_secure: bool | None = None
+    weaviate_vectorizer: str = "huggingface"  # "huggingface" | "ollama"
+    weaviate_huggingface_endpoint_url: str | None = None
+    weaviate_huggingface_model: str = "Qwen/Qwen3-Embedding-0.6B"
 
     ollama_url: str = "http://localhost:11434"
     ollama_embedding_url: str = "http://localhost:11434"
@@ -154,6 +157,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("OLLAMA_EMBED_MODEL", "OLLAMA_EMBEDDING_MODEL"),
     )
     ollama_timeout_sec: float = 180.0
+
+    llm_primary_provider: str = "vllm"  # "vllm" | "ollama"
+    vllm_enabled: bool = True
+    vllm_chat_url: str = "http://localhost:8001"
+    vllm_embed_url: str = "http://localhost:8001"
+    vllm_api_key: str | None = None
+    vllm_chat_model: str = "ibm-granite/granite-3.3-8b-instruct"
+    vllm_embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
+    vllm_connect_timeout_sec: float = 2.0
+    vllm_timeout_sec: float = 180.0
+    vllm_max_retries: int = 1
+
     opik_enabled: bool = False
     opik_url_override: str = "http://localhost:5173/api"
     opik_project_name: str = "grc-policy-server"

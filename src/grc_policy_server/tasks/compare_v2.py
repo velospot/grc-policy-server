@@ -13,7 +13,8 @@ from grc_policy_server.services.comparison.comparison_trace import ComparisonTra
 from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient, Neo4jSettings
-from grc_policy_server.services.llm.ollama_client import OllamaClient, OllamaSettings
+from grc_policy_server.services.llm.base import BaseLLM
+from grc_policy_server.services.llm.factory import build_llm
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ def _build_diff_engine() -> tuple[
     RealDiffEngine,
     WeaviateClient,
     Neo4jClient | None,
-    OllamaClient,
+    BaseLLM,
 ]:
     weaviate = WeaviateClient()
     neo4j: Neo4jClient | None = None
@@ -37,18 +38,7 @@ def _build_diff_engine() -> tuple[
             )
         )
 
-    llm = OllamaClient(
-        OllamaSettings(
-            base_url=settings.ollama_url,
-            chat_model=settings.ollama_chat_model,
-            embed_model=settings.ollama_embed_model,
-            read_timeout_sec=settings.ollama_timeout_sec,
-            opik_enabled=settings.opik_enabled,
-            opik_url=settings.opik_url_override,
-            opik_project_name=settings.opik_project_name,
-            opik_workspace=settings.opik_workspace,
-        )
-    )
+    llm = build_llm()
     engine = RealDiffEngine(
         weaviate=weaviate,
         neo4j=neo4j,
@@ -96,7 +86,7 @@ async def _compare_payload(payload: CompareTaskPayload) -> dict[str, Any]:
         try:
             await llm.aclose()
         except Exception:
-            logger.exception("failed to close Ollama client in compare_v2 task")
+            logger.exception("failed to close LLM client in compare_v2 task")
 
 
 @celery_app.task(name="grc_policy_server.tasks.compare_v2")

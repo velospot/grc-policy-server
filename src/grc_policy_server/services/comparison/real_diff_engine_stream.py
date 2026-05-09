@@ -33,7 +33,7 @@ from grc_policy_server.services.comparison.real_diff_engine import (
 )
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
-from grc_policy_server.services.llm.ollama_client import OllamaClient
+from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ def impact_from(
 class RealDiffEngineStream:
     weaviate: WeaviateClient
     neo4j: Neo4jClient | None
-    llm: OllamaClient
+    llm: BaseLLM
     canonical_store: CanonicalDocumentStore | None = None
     trace_store: ComparisonTraceStore | None = None
     thresholds: MatchThresholds = MatchThresholds()
@@ -444,17 +444,15 @@ class RealDiffEngineStream:
             return "No material differences were detected."
 
         explanations = await self._explain_differences(diffs, language=language)
-        summarize_explanations = getattr(self.llm, "summarize_explanations", None)
-        if callable(summarize_explanations):
-            try:
-                return await summarize_explanations(
-                    doc1_name=doc1_name,
-                    doc2_name=doc2_name,
-                    explanations=explanations,
-                    language=language,
-                )
-            except Exception:
-                logger.exception("failed two-step summary aggregation, falling back")
+        try:
+            return await self.llm.summarize_explanations(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                explanations=explanations,
+                language=language,
+            )
+        except Exception:
+            logger.exception("failed two-step summary aggregation, falling back")
 
         return await self.llm.summarize_changes(
             doc1_name=doc1_name,
@@ -610,21 +608,26 @@ class RealDiffEngineStream:
         self, diffs: List[KeyDifference], *, language: str = ""
     ) -> None:
         """Generate markdownDiffSummary for every diff in parallel via LLM."""
-        tasks = [
-            self.llm.generate_markdown_diff_summary(
-                node_type=diff.nodeType,
-                change_type=diff.changeType,
-                doc1_source_text=(
-                    diff.doc1Reference.sourceText if diff.doc1Reference else None
-                ),
-                doc2_source_text=(
-                    diff.doc2Reference.sourceText if diff.doc2Reference else None
-                ),
-                language=language,
-            )
-            for diff in diffs
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        sem = asyncio.Semaphore(4)
+
+        async def _generate_one(diff: KeyDifference) -> str:
+            async with sem:
+                return await self.llm.generate_markdown_diff_summary(
+                    node_type=diff.nodeType,
+                    change_type=diff.changeType,
+                    doc1_source_text=(
+                        diff.doc1Reference.sourceText if diff.doc1Reference else None
+                    ),
+                    doc2_source_text=(
+                        diff.doc2Reference.sourceText if diff.doc2Reference else None
+                    ),
+                    language=language,
+                )
+
+        results = await asyncio.gather(
+            *[_generate_one(diff) for diff in diffs],
+            return_exceptions=True,
+        )
         for diff, result in zip(diffs, results, strict=False):
             if isinstance(result, Exception):
                 logger.warning(

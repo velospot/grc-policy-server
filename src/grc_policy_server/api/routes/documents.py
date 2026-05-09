@@ -10,6 +10,7 @@ from grc_policy_server.api.deps import (
     get_document_ingestion_service_factory,
     get_document_repository,
     get_neo4j_client,
+    get_storage_provider_store,
     get_upload_v2_dispatcher,
     get_weaviate_client,
     require_api_bearer_token,
@@ -23,6 +24,7 @@ from grc_policy_server.models.schemas import (
     HybridSearchDocumentResult,
     HybridSearchRequest,
     HybridSearchResponse,
+    IngestSourcesRequest,
     UploadDocumentResponse,
     UploadDocumentsResponse,
     UploadV2JobCreateResponse,
@@ -41,6 +43,11 @@ from grc_policy_server.services.ingestion.upload_v2_dispatcher import (
     UploadV2Dispatcher,
 )
 from grc_policy_server.services.ingestion.upload_v2_models import UploadTaskFilePayload
+from grc_policy_server.services.storage.source_resolver import (
+    resolve_ingest_uri,
+    resolve_provider,
+)
+from grc_policy_server.services.storage.storage_provider_store import StorageProviderStore
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
@@ -180,6 +187,127 @@ async def upload(
             UploadDocumentResponse(
                 filename=upload_file.filename,
                 contentType=upload_file.content_type,
+                accepted=True,
+                documentId=result.document_id,
+                chunksStored=result.chunks_stored,
+            )
+        )
+
+    accepted_count = sum(1 for result in results if result.accepted)
+    return UploadDocumentsResponse(
+        acceptedCount=accepted_count,
+        rejectedCount=len(results) - accepted_count,
+        results=results,
+    )
+
+
+@router.post(
+    "/ingest/sources",
+    response_model=UploadDocumentsResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ingest one or more documents from remote sources (URLs, S3, etc.)",
+)
+async def ingest_sources(
+    payload: IngestSourcesRequest,
+    ingestion_service_factory: Callable[[], DocumentIngestionService] = Depends(
+        get_document_ingestion_service_factory
+    ),
+    provider_store: StorageProviderStore = Depends(get_storage_provider_store),
+):
+    if not payload.sources:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No sources were provided",
+        )
+
+    ingestion_service = ingestion_service_factory()
+    results: list[UploadDocumentResponse] = []
+
+    for source in payload.sources:
+        uri = (source.uri or "").strip()
+        if not uri:
+            results.append(
+                UploadDocumentResponse(
+                    filename=source.filename or "<missing>",
+                    contentType=None,
+                    accepted=False,
+                    error="Missing source uri",
+                )
+            )
+            continue
+
+        try:
+            provider = await resolve_provider(provider_store, source.providerId)
+            downloaded = await resolve_ingest_uri(
+                uri=uri,
+                filename_hint=source.filename,
+                provider=provider,
+            )
+        except ValueError as exc:
+            results.append(
+                UploadDocumentResponse(
+                    filename=source.filename or uri,
+                    contentType=None,
+                    accepted=False,
+                    error=str(exc),
+                )
+            )
+            continue
+        except Exception:
+            logger.exception("failed to download ingest source uri=%s", uri)
+            results.append(
+                UploadDocumentResponse(
+                    filename=source.filename or uri,
+                    contentType=None,
+                    accepted=False,
+                    error="Failed to download document source",
+                )
+            )
+            continue
+
+        if not downloaded.content:
+            results.append(
+                UploadDocumentResponse(
+                    filename=downloaded.filename,
+                    contentType=None,
+                    accepted=False,
+                    error="Downloaded source is empty",
+                )
+            )
+            continue
+
+        try:
+            result = await ingestion_service.ingest_upload(
+                filename=downloaded.filename,
+                content=downloaded.content,
+                content_type=None,
+            )
+        except ValueError as exc:
+            results.append(
+                UploadDocumentResponse(
+                    filename=downloaded.filename,
+                    contentType=None,
+                    accepted=False,
+                    error=str(exc),
+                )
+            )
+            continue
+        except Exception:
+            logger.exception("failed to ingest source uri=%s", uri)
+            results.append(
+                UploadDocumentResponse(
+                    filename=downloaded.filename,
+                    contentType=None,
+                    accepted=False,
+                    error="Failed to ingest document source",
+                )
+            )
+            continue
+
+        results.append(
+            UploadDocumentResponse(
+                filename=downloaded.filename,
+                contentType=None,
                 accepted=True,
                 documentId=result.document_id,
                 chunksStored=result.chunks_stored,

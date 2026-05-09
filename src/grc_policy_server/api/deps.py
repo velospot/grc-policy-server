@@ -29,7 +29,12 @@ from grc_policy_server.services.ingestion.document_ingestion_service import (
     DocumentIngestionService,
 )
 from grc_policy_server.services.ingestion.upload_v2_dispatcher import UploadV2Dispatcher
+from grc_policy_server.services.llm.base import BaseLLM
+from grc_policy_server.services.llm.factory import build_llm
 from grc_policy_server.services.llm.ollama_client import OllamaClient, OllamaSettings
+from grc_policy_server.services.storage.storage_provider_store import (
+    StorageProviderStore,
+)
 from grc_policy_server.services.vector.weaviate_client import (
     WeaviateClient,
 )
@@ -118,6 +123,17 @@ async def get_ollama_client() -> AsyncGenerator[OllamaClient, None]:
             logger.exception("failed to close Ollama client")
 
 
+async def get_llm_client() -> AsyncGenerator[BaseLLM, None]:
+    client = build_llm()
+    try:
+        yield client
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            logger.exception("failed to close LLM client")
+
+
 def get_docling_adapter() -> DoclingAdapter:
     return DoclingAdapter()
 
@@ -133,10 +149,17 @@ def get_comparison_trace_store() -> ComparisonTraceStore:
     return ComparisonTraceStore(upload_root=Path(settings.upload_root))
 
 
+def get_storage_provider_store() -> StorageProviderStore:
+    return StorageProviderStore(
+        database_url=settings.database_url,
+        upload_root=Path(settings.upload_root),
+    )
+
+
 def get_diff_engine(
     weaviate: WeaviateClient = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
-    llm: OllamaClient = Depends(get_ollama_client),
+    llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
     trace_store: ComparisonTraceStore = Depends(get_comparison_trace_store),
 ) -> RealDiffEngine:
@@ -152,7 +175,7 @@ def get_diff_engine(
 def get_diff_engine_stream(
     weaviate: WeaviateClient = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
-    llm: OllamaClient = Depends(get_ollama_client),
+    llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
     trace_store: ComparisonTraceStore = Depends(get_comparison_trace_store),
 ) -> RealDiffEngineStream:
@@ -173,7 +196,7 @@ def get_document_ingestion_service(
     docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
     weaviate: WeaviateClient = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
-    llm: OllamaClient = Depends(get_ollama_client),
+    llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
 ) -> DocumentIngestionService:
     return DocumentIngestionService(
@@ -190,7 +213,7 @@ def get_document_ingestion_service_factory(
     docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
     weaviate: WeaviateClient = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
-    llm: OllamaClient = Depends(get_ollama_client),
+    llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
 ) -> Callable[[], DocumentIngestionService]:
     def _factory() -> DocumentIngestionService:

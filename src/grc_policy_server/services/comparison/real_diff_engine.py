@@ -50,7 +50,7 @@ from grc_policy_server.services.documents.canonical_models import (
 )
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
-from grc_policy_server.services.llm.ollama_client import OllamaClient
+from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ def severity_from_distance(distance: Optional[float], change_type: str) -> str:
 class RealDiffEngine:
     weaviate: WeaviateClient
     neo4j: Neo4jClient | None
-    llm: OllamaClient
+    llm: BaseLLM
     canonical_store: CanonicalDocumentStore | None = None
     trace_store: ComparisonTraceStore | None = None
     thresholds: MatchThresholds = MatchThresholds()
@@ -1350,23 +1350,19 @@ class RealDiffEngine:
         if not texts:
             return enriched
 
-        try:
-            extracted = await self.llm.extract_policy_meanings(
-                texts=texts,
-                markdown_texts=markdown_texts,
-                language=language,
-            )
-        except TypeError:
-            # Backward compatibility with older stubs/fakes in unit tests.
-            extracted = await self.llm.extract_policy_meanings(texts=texts)  # type: ignore[call-arg]
+        extracted = await self.llm.extract_policy_meanings(
+            texts=texts,
+            markdown_texts=markdown_texts,
+            language=language,
+        )
 
         for index, meaning in zip(
             indexes,
             extracted,
             strict=False,
         ):
-            for field, value in meaning.items():
-                enriched[index][field] = str(value or "")
+            for field_name, value in meaning.items():
+                enriched[index][field_name] = str(value or "")
 
         return enriched
 
@@ -1497,17 +1493,15 @@ class RealDiffEngine:
             key_differences, language=language
         )
 
-        summarize_explanations = getattr(self.llm, "summarize_explanations", None)
-        if callable(summarize_explanations):
-            try:
-                return await self.llm.summarize_explanations(
-                    doc1_name=doc1_name,
-                    doc2_name=doc2_name,
-                    explanations=explanations,
-                    language=language,
-                )
-            except Exception:
-                logger.exception("failed two-step summary aggregation, falling back")
+        try:
+            return await self.llm.summarize_explanations(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                explanations=explanations,
+                language=language,
+            )
+        except Exception:
+            logger.exception("failed two-step summary aggregation, falling back")
 
         return await self.llm.summarize_changes(
             doc1_name=doc1_name,
@@ -1734,14 +1728,15 @@ class RealDiffEngine:
     ) -> None:
         """Generate markdownDiffSummary for every diff in parallel via LLM."""
         _records: list[ChangeRecord | None] = list(change_records or [])
-        tasks = []
-        for i, diff in enumerate(diffs):
+        sem = asyncio.Semaphore(4)
+
+        async def _generate_one(diff: KeyDifference, i: int):
             record: ChangeRecord | None = _records[i] if i < len(_records) else None
             left_node = record.left_nodes[0] if (record and record.left_nodes) else None
             right_node = record.right_nodes[0] if (record and record.right_nodes) else None
             is_table = diff.nodeType == "table"
-            tasks.append(
-                self.llm.generate_markdown_diff_summary(
+            async with sem:
+                return await self.llm.generate_markdown_diff_summary(
                     node_type=diff.nodeType,
                     change_type=diff.changeType,
                     doc1_source_text=(
@@ -1754,8 +1749,11 @@ class RealDiffEngine:
                     doc2_table_content=self._table_content_for_llm(right_node) if is_table else None,
                     language=language,
                 )
-            )
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        results = await asyncio.gather(
+            *[_generate_one(diff, i) for i, diff in enumerate(diffs)],
+            return_exceptions=True,
+        )
         for diff, result in zip(diffs, results, strict=False):
             if isinstance(result, Exception):
                 logger.warning(

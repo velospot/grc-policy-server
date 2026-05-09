@@ -72,7 +72,9 @@ services:
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
       PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
       ENABLE_API_BASED_MODULES: "true"
-      ENABLE_MODULES: "text2vec-ollama,generative-ollama"
+      ENABLE_MODULES: "text2vec-huggingface,text2vec-ollama,generative-ollama"
+      DEFAULT_VECTORIZER_MODULE: "text2vec-huggingface"
+      HUGGINGFACE_APIKEY: ${HUGGINGFACE_APIKEY:-}
       CLUSTER_HOSTNAME: "node1"
 networks:
   grc_shared_net:

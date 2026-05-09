@@ -11,8 +11,8 @@ tracing.configure(
 )
 
 # Ensure tasks are registered when Celery imports this module.
-import grc_policy_server.tasks.upload_v2  # noqa: F401
-import grc_policy_server.tasks.compare_v2  # noqa: F401
-import grc_policy_server.tasks.backfill_section_summaries  # noqa: F401
+import grc_policy_server.tasks.upload_v2  # noqa: F401, E402
+import grc_policy_server.tasks.compare_v2  # noqa: F401, E402
+import grc_policy_server.tasks.backfill_section_summaries  # noqa: F401, E402
 
 __all__ = ["celery_app"]
