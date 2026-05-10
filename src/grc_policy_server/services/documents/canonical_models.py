@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from grc_policy_server.utils.hashing import normalize_for_comparison
@@ -12,6 +12,9 @@ _SECTION_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _NOTE_LABEL_RE = re.compile(r"\b(note|example|warning|caution)\b", re.IGNORECASE)
+# Matches "Tabelle 5", "Table 12", "Tabelle 5a" — used to detect numbered table captions
+# that Docling embeds into heading_path entries.
+_TABLE_CAPTION_NUM_RE = re.compile(r"\bTabell?e\s+(\d+[A-Za-z]?)\b", re.IGNORECASE)
 _GLOSSARY_TERM_RE = re.compile(
     r"^\s*[\"'“”‘’]?([^:\"'“”‘’\-–—]{2,80})[\"'“”‘’]?\s*[:\-–—]\s*(.+)$",
     re.DOTALL,
@@ -223,11 +226,113 @@ def canonical_nodes_from_hierarchy(
     nodes = hierarchy.get("nodes") if isinstance(hierarchy, dict) else None
     if not isinstance(nodes, list):
         return []
-    return [
+    built = [
         CanonicalNode.from_hierarchy_record(node, version_id=version_id)
         for node in nodes
         if isinstance(node, dict)
     ]
+    return merge_page_split_tables(built)
+
+
+def merge_page_split_tables(nodes: list[CanonicalNode]) -> list[CanonicalNode]:
+    """Merge consecutive table nodes that are a single logical table split across pages.
+
+    Detected when adjacent table siblings share the same heading_path, have the same
+    column count, and appear on consecutive pages.  The merged node spans page_from
+    of the first segment through page_to of the last; cells are re-indexed so row
+    numbers are contiguous across the combined table.
+    """
+    result: list[CanonicalNode] = []
+    i = 0
+    while i < len(nodes):
+        node = nodes[i]
+        if node.node_type != "table":
+            result.append(node)
+            i += 1
+            continue
+
+        run = [node]
+        while i + len(run) < len(nodes):
+            nxt = nodes[i + len(run)]
+            if _is_split_continuation(run[-1], nxt):
+                run.append(nxt)
+            else:
+                break
+
+        result.append(_merge_table_run(run) if len(run) > 1 else node)
+        i += len(run)
+    return result
+
+
+def _is_split_continuation(prev: CanonicalNode, nxt: CanonicalNode) -> bool:
+    if nxt.node_type != "table":
+        return False
+    # Primary: identical heading_path.  Fallback: same numbered caption ("Tabelle N")
+    # even when the continuation segment's heading_path omits the caption text.
+    same_path = prev.heading_path == nxt.heading_path
+    if not same_path:
+        prev_num = _caption_number_from_path(prev.heading_path)
+        nxt_num = _caption_number_from_path(nxt.heading_path)
+        if not prev_num or prev_num != nxt_num:
+            return False
+    prev_page = prev.page_to if prev.page_to is not None else prev.page_from
+    nxt_page = nxt.page_from
+    if prev_page is None or nxt_page is None or nxt_page != prev_page + 1:
+        return False
+    prev_cols = (prev.metadata.get("table_structure") or {}).get("num_cols", -1)
+    nxt_cols = (nxt.metadata.get("table_structure") or {}).get("num_cols", -1)
+    # Require matching column count; -1 means unknown → don't merge
+    return prev_cols == nxt_cols and prev_cols > 0
+
+
+def _caption_number_from_path(heading_path: list[str]) -> str | None:
+    """Return the first 'Tabelle N' number found anywhere in the heading path, or None."""
+    for heading in heading_path:
+        m = _TABLE_CAPTION_NUM_RE.search(heading)
+        if m:
+            return m.group(1).lower()
+    return None
+
+
+def _merge_table_run(run: list[CanonicalNode]) -> CanonicalNode:
+    first, last = run[0], run[-1]
+
+    merged_cells: list[dict[str, Any]] = []
+    row_offset = 0
+    total_rows = 0
+    for seg in run:
+        ts = (seg.metadata.get("table_structure") or {})
+        rows_in_seg = int(ts.get("num_rows") or 0)
+        for cell in (ts.get("cells") or []):
+            merged_cells.append({**cell, "row": int(cell.get("row", 0)) + row_offset})
+        row_offset += rows_in_seg
+        total_rows += rows_in_seg
+
+    merged_meta: dict[str, Any] = dict(first.metadata)
+    merged_meta["table_structure"] = {
+        **(first.metadata.get("table_structure") or {}),
+        "num_rows": total_rows,
+        "cells": merged_cells,
+    }
+    merged_meta["page_split_merged"] = True
+    merged_meta["page_split_count"] = len(run)
+
+    # Row fingerprints: combine across segments (order matters for column-hash matching)
+    combined_fps: list[str] = []
+    for seg in run:
+        combined_fps.extend(seg.metadata.get("table_row_fingerprints") or [])
+    merged_meta["table_row_fingerprints"] = combined_fps
+
+    combined_text = "\n".join(seg.raw_text for seg in run)
+    combined_norm = "\n".join(seg.normalized_text for seg in run)
+
+    return replace(
+        first,
+        page_to=last.page_to,
+        raw_text=combined_text,
+        normalized_text=combined_norm,
+        metadata=merged_meta,
+    )
 
 
 def _canonical_node_type(record: dict[str, Any], metadata: dict[str, Any]) -> str:

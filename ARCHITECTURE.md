@@ -26,8 +26,11 @@ flowchart LR
     Worker --> Ingest
     Worker --> Compare
 
-    Ingest --> Docling["Docling + OCR Fallback"]
-    Ingest --> LLM["Ollama (language + semantic extraction)"]
+    Ingest --> Extract["Extraction Layer"]
+    Extract --> OPD["OpenDataLoader (primary — PDFs)"]
+    Extract --> Docling["Docling + OCR Fallback (non-PDF / fallback)"]
+    OPD -->|hybrid mode| HybridSvc["OPD Hybrid Sidecar\n(docling backend — complex pages)"]
+    Ingest --> LLM["vLLM / Ollama (language + semantic extraction)"]
     Ingest --> Vector["Weaviate (chunk vectors + hybrid search)"]
     Ingest --> Graph["Neo4j (optional hierarchy graph)"]
     Ingest --> FS["Local Filesystem (uploads + metadata)"]
@@ -51,13 +54,20 @@ flowchart LR
     API --> Queue["Celery + Redis"]
     Queue --> Worker["Celery Worker"]
 
-    Ingest --> Docling["Docling/OCR"]
-    Ingest --> Ollama["Ollama"]
-    Ingest --> Weaviate["Weaviate"]
-    Ingest --> Neo4j["Neo4j (optional)"]
-    Ingest --> Files["Upload Storage"]
+    Ingest --> OPDAdapter["OPD Adapter\n(opendataloader_adapter.py)"]
+    Ingest --> DoclingAdapter["Docling Adapter\n(fallback / non-PDF)"]
+    OPDAdapter --> OPDJar["OpenDataLoader JAR\n(XY-Cut++ reading order)"]
+    OPDAdapter -->|hybrid_url set| HybridSvc["OPD Hybrid Sidecar\n(docling-fast backend)"]
+    OPDAdapter --> Chunker["OPD Chunker\n(opendataloader_chunker.py)"]
+    DoclingAdapter --> DoclingLib["Docling + OCR Fallback"]
+    Chunker --> ParsedChunk["ParsedChunk boundary"]
+    DoclingLib --> ParsedChunk
+    ParsedChunk --> LLM["vLLM / Ollama"]
+    ParsedChunk --> Weaviate["Weaviate"]
+    ParsedChunk --> Neo4j["Neo4j (optional)"]
+    ParsedChunk --> Files["Upload Storage + PostgreSQL"]
 
-    Compare --> Ollama
+    Compare --> LLM
     Compare --> Weaviate
     Compare --> Neo4j
     Compare --> Cache["Comparison Cache"]
@@ -104,26 +114,40 @@ flowchart TB
         Worker["Worker Pods/VMs"]
     end
 
-    subgraph Data["Data/AI"]
+    subgraph AI["AI / LLM"]
+        vLLM["vLLM (primary)"]
+        Ollama["Ollama (fallback)"]
+    end
+
+    subgraph Data["Data"]
         Redis["Redis"]
         Weaviate["Weaviate"]
+        Postgres["PostgreSQL (canonical store)"]
         Neo4j["Neo4j (optional)"]
         Storage["Shared Storage"]
-        Ollama["Ollama"]
+    end
+
+    subgraph Extract["Extraction (optional hybrid profile)"]
+        OPDHybrid["opendataloader-hybrid\n(port 5002)"]
     end
 
     LB --> API
     API --> Redis
     API --> Weaviate
+    API --> Postgres
     API --> Neo4j
     API --> Storage
+    API --> vLLM
     API --> Ollama
 
     Worker --> Redis
     Worker --> Weaviate
+    Worker --> Postgres
     Worker --> Neo4j
     Worker --> Storage
+    Worker --> vLLM
     Worker --> Ollama
+    Worker -->|OPENDATALOADER_HYBRID_URL| OPDHybrid
 ```
 
 ### 3.4 Optional Responsive Zoom/Pan Setup
@@ -157,13 +181,15 @@ Use this only in doc platforms that allow custom JS (for example MkDocs/Docusaur
 
 - API/runtime: FastAPI, Uvicorn, Pydantic Settings, Structlog/logging
 - Async processing: Celery with Redis broker/result backend
-- Document processing: Docling, pypdfium2, pytesseract (OCR fallback)
-- Semantic/LLM layer: Ollama (chat + embeddings)
+- Document extraction (primary — PDF): OpenDataLoader (`opendataloader-pdf`) — XY-Cut++ reading-order extraction with optional docling hybrid backend
+- Document extraction (fallback — non-PDF / OPD failure): Docling, pypdfium2, pytesseract (OCR fallback)
+- Semantic/LLM layer: vLLM (primary) with Ollama fallback (chat + embeddings)
 - Retrieval/index: Weaviate (hybrid/vector search, schema with policy/table fields)
+- Canonical store: PostgreSQL (raw extraction JSON + normalized node tree)
 - Graph layer (optional): Neo4j
 - Storage: local filesystem for uploaded files, metadata, hierarchy, and compare cache
 - Tooling: Python (project targets 3.13 in `pyproject.toml`), `uv`, pytest, ruff, mypy
-- Containerization: Docker + docker-compose for infra dependencies
+- Containerization: Docker + docker-compose for infra dependencies; `opendataloader-hybrid` sidecar starts with `docker compose up` (always-on)
 
 ## 5. Pros
 
@@ -208,8 +234,10 @@ Minimum production requirements for this architecture:
   - Celery worker instances
   - Redis (broker + result backend)
   - Weaviate (persistent volume)
-  - Ollama service with required models preloaded
+  - PostgreSQL (canonical document store)
+  - vLLM service with required chat + embedding models preloaded (Ollama as fallback)
   - Optional Neo4j cluster/service if graph features are enabled
+  - `opendataloader-hybrid` sidecar (port 5002) — starts automatically with `docker compose up`; set `OPENDATALOADER_HYBRID_URL=http://opendataloader-hybrid:5002` to activate
   - Shared/durable storage for uploads and metadata (or replace with object store + DB)
 
 - Configuration and secrets:

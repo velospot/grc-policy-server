@@ -70,5 +70,16 @@ services:
       HUGGINGFACE_APIKEY: ${HUGGINGFACE_APIKEY:-}
       CLUSTER_HOSTNAME: "node1"
 
+  # OpenDataLoader hybrid backend — routes complex/table pages to docling for higher accuracy.
+  # Set OPENDATALOADER_HYBRID_URL=http://opendataloader-hybrid:5002 in your .env to enable.
+  opendataloader-hybrid:
+    build:
+      context: .
+      dockerfile: Dockerfile.hybrid
+    container_name: opendataloader_hybrid
+    ports:
+      - "5002:5002"
+    restart: unless-stopped
+
 volumes:
   postgres_data:

@@ -15,6 +15,7 @@ from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     DocumentIngestionService,
 )
+from grc_policy_server.services.ingestion.opendataloader_adapter import OpenDataLoaderAdapter
 from grc_policy_server.services.ingestion.upload_v2_models import UploadTaskFilePayload
 from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.llm.factory import build_llm
@@ -46,6 +47,13 @@ def _build_ingestion_service() -> tuple[
         database_url=settings.database_url,
         upload_root=Path(settings.upload_root),
     )
+    odl_adapter: OpenDataLoaderAdapter | None = None
+    if settings.opendataloader_enabled:
+        odl_adapter = OpenDataLoaderAdapter(
+            hybrid_url=settings.opendataloader_hybrid_url or None,
+            timeout_sec=settings.opendataloader_timeout_sec,
+            hybrid_timeout_sec=settings.opendataloader_hybrid_timeout_sec,
+        )
     service = DocumentIngestionService(
         docling_adapter=docling_adapter,
         weaviate=weaviate,
@@ -53,6 +61,7 @@ def _build_ingestion_service() -> tuple[
         llm=llm,
         upload_root=Path(settings.upload_root),
         canonical_store=canonical_store,
+        opendataloader_adapter=odl_adapter,
     )
     return service, weaviate, neo4j, llm
 

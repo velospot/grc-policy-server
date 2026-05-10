@@ -15,9 +15,11 @@ Core building blocks:
 
 - FastAPI for HTTP APIs
 - Celery + Redis for asynchronous jobs
-- Docling + OCR fallback for document parsing
-- Ollama for language/semantic extraction and summarization
-- PostgreSQL canonical document store for raw Docling JSON and normalized nodes
+- **OpenDataLoader (`opendataloader-pdf`)** as primary PDF extractor — XY-Cut++ reading order, preserves heading→section→table ordering; optional hybrid sidecar routes complex pages to a docling backend for ~93% table accuracy
+- **Docling + OCR fallback** as extraction fallback — handles non-PDF (DOCX etc.) and OPD failures; pytesseract OCR applied when low-text pages are detected
+- Unified `ParsedChunk` boundary — both extractors emit the same dataclass; all downstream code is extractor-agnostic
+- vLLM (primary) / Ollama (fallback) for language detection, semantic extraction, and summarization
+- PostgreSQL canonical document store for raw extraction JSON and normalized nodes
 - Weaviate for vector/hybrid retrieval and semantic candidate search
 - Optional Neo4j for graph hierarchy
 - Filesystem-based upload metadata and comparison cache
@@ -62,7 +64,7 @@ Primary request classes:
 Target refinements:
 
 - Keep API + queue + workers model.
-- Keep Docling as the extraction source.
+- Keep OpenDataLoader as primary PDF extractor; keep Docling as fallback and non-PDF handler.
 - Keep PostgreSQL as the canonical comparison substrate:
   - raw Docling JSON
   - normalized document node tree

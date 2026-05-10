@@ -37,13 +37,18 @@ from grc_policy_server.services.comparison.severity_classifier import (
     SeverityClassifier,
 )
 from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
-from grc_policy_server.services.comparison.diff_postprocessor import random_diff_subset
+from grc_policy_server.services.comparison.diff_postprocessor import (
+    filter_key_differences,
+    random_diff_subset,
+)
 from grc_policy_server.services.comparison.policy_semantics import (
     ClauseMeaning,
     clean_policy_text,
     compare_clause_meaning,
+    ends_with_terminal_punctuation,
     extract_clause_meaning,
     is_non_semantic_content,
+    starts_with_lowercase,
 )
 from grc_policy_server.services.documents.canonical_models import (
     TEXT_COMPARISON_NODE_TYPES,
@@ -108,6 +113,8 @@ class RealDiffEngine:
     ) -> ComparisonResult:
         left_nodes = self._load_comparison_nodes(doc1.id)
         right_nodes = self._load_comparison_nodes(doc2.id)
+        left_nodes = self._stitch_page_fragments(left_nodes)
+        right_nodes = self._stitch_page_fragments(right_nodes)
 
         # Detect language from first document's text for better LLM accuracy
         language = await self._detect_document_language(left_nodes)
@@ -156,6 +163,31 @@ class RealDiffEngine:
                 )
             )
         diffs = [self._key_difference_from_record(record) for record in change_records]
+
+        # Filter reference-section diffs and their corresponding change_records together
+        # to avoid pairing mismatches after filtering
+        import re
+        _REFERENCE_SECTION_RE = re.compile(
+            r"\b(legende|symbole?|abkürzung(?:en)?|definitionen?|begriffe?|inhalt"
+            r"|glossar|annex|anhang|abbreviation|legend|symbol|glossary|definition)\b",
+            re.IGNORECASE,
+        )
+        _TABLE_CAPTION_NUM_RE = re.compile(r"\bTabell?e\s+\d+", re.IGNORECASE)
+        filtered_diffs = []
+        filtered_records = []
+        for diff, record in zip(diffs, change_records):
+            section = str(diff.section or "")
+            if not section and diff.doc1Reference:
+                section = str(diff.doc1Reference.section or "")
+            if not section and diff.doc2Reference:
+                section = str(diff.doc2Reference.section or "")
+            # Drop reference-section diffs unless they have a numbered caption
+            if _REFERENCE_SECTION_RE.search(section) and not _TABLE_CAPTION_NUM_RE.search(section):
+                continue
+            filtered_diffs.append(diff)
+            filtered_records.append(record)
+        diffs = filtered_diffs
+        change_records = filtered_records
 
         paired = sorted(
             zip(diffs, change_records),
@@ -421,7 +453,7 @@ class RealDiffEngine:
         top_candidates = [candidate for _, candidate in scored[:6]]
         best_score = 0.0
         best_group: list[dict] = []
-        for group_size in (2, 3):
+        for group_size in (2, 3, 4):
             for group in combinations(top_candidates, group_size):
                 combined = self._combined_node(list(group))
                 score = (
@@ -432,9 +464,95 @@ class RealDiffEngine:
                 if score > best_score:
                     best_score = score
                     best_group = list(group)
-        if best_score < 0.68:
+        if best_score < 0.55:
             return None
         return best_group, 1.0 - best_score
+
+    def _stitch_page_fragments(self, nodes: list[dict]) -> list[dict]:
+        """Merge adjacent same-section, same-type chunks split at page boundaries.
+
+        Operates at comparison time so existing ingested docs benefit without
+        re-ingestion. Uses _combined_node() to concatenate text/clean_text fields.
+        """
+        if not nodes:
+            return nodes
+        ordered = sorted(nodes, key=lambda n: (
+            str(n.get("section_path") or ""),
+            int(n.get("page_number") or 0),
+            int(n.get("chunk_index") or 0),
+        ))
+        result: list[dict] = []
+        i = 0
+        stitched_count = 0
+        while i < len(ordered):
+            node = ordered[i]
+            if i + 1 < len(ordered) and self._is_page_continuation(node, ordered[i + 1]):
+                first_stable_id = node.get("stable_id")
+                merged = self._combined_node([node, ordered[i + 1]])
+                merged["stable_id"] = first_stable_id
+                j = i + 2
+                while j < len(ordered) and self._is_page_continuation(merged, ordered[j]):
+                    merged = self._combined_node([merged, ordered[j]])
+                    merged["stable_id"] = first_stable_id
+                    j += 1
+                stitched_count += j - i
+                result.append(merged)
+                i = j
+            else:
+                result.append(node)
+                i += 1
+        if stitched_count:
+            logger.info(
+                "stitch_page_fragments: merged %d fragment(s) → %d logical node(s)",
+                stitched_count,
+                len(result),
+            )
+        return result
+
+    def _is_page_continuation(self, prev: dict, curr: dict) -> bool:
+        """Return True when curr is a page-boundary continuation of prev."""
+        if prev.get("node_type") != curr.get("node_type"):
+            return False
+        prev_titles = list(prev.get("section_titles") or [])
+        curr_titles = list(curr.get("section_titles") or [])
+        if prev_titles and curr_titles:
+            if prev_titles != curr_titles:
+                return False
+        else:
+            if str(prev.get("section_path") or "") != str(curr.get("section_path") or ""):
+                return False
+        prev_page = int(prev.get("page_number") or 0)
+        curr_page = int(curr.get("page_number") or 0)
+        if curr_page != prev_page + 1:
+            return False
+        node_type = str(prev.get("node_type") or "")
+        if node_type == "table":
+            # Different column count → structurally different table, never a continuation
+            if prev.get("table_num_cols") != curr.get("table_num_cols"):
+                return False
+            # A continuation fragment has NO header cells at row 0 (the header is on the
+            # previous page). An independent new table always starts with is_header=True at row 0.
+            curr_cells = curr.get("table_cells") or []
+            row0_cells = [c for c in curr_cells if int(c.get("row") or 0) == 0]
+            if row0_cells:
+                return not any(c.get("is_header") for c in row0_cells)
+            # No cell data → fall back to schema_signature equality as a weaker signal
+            sig = str(prev.get("table_schema_signature") or "")
+            return bool(sig) and sig == str(curr.get("table_schema_signature") or "")
+        if node_type in {"clause", "paragraph"}:
+            prev_text = str(prev.get("text") or "").rstrip()
+            curr_text = str(curr.get("text") or "").lstrip()
+            if not prev_text or not curr_text:
+                return False
+            prev_meta = prev.get("metadata") or {}
+            curr_meta = curr.get("metadata") or {}
+            if prev_meta.get("is_list") or curr_meta.get("is_list"):
+                return True
+            return (
+                not ends_with_terminal_punctuation(prev_text)
+                and starts_with_lowercase(curr_text)
+            )
+        return False
 
     def _build_change_records(
         self,
@@ -1719,6 +1837,22 @@ class RealDiffEngine:
             or None
         )
 
+    @staticmethod
+    def _col_header(table_change: dict, headers: list[str]) -> str:
+        """Extract the column name for a table_change entry from the node's header list.
+
+        table_change["location"] is "Row N, Col M" (1-indexed). We parse M and look
+        it up in headers (0-indexed). Falls back to empty string when unparseable.
+        """
+        location = str(table_change.get("location") or "")
+        import re as _re
+        m = _re.search(r"Col\s+(\d+)", location, _re.IGNORECASE)
+        if m:
+            col_1idx = int(m.group(1))
+            if 1 <= col_1idx <= len(headers):
+                return headers[col_1idx - 1]
+        return ""
+
     async def _populate_markdown_diff_summaries(
         self,
         diffs: List[KeyDifference],
@@ -1736,6 +1870,23 @@ class RealDiffEngine:
             right_node = record.right_nodes[0] if (record and record.right_nodes) else None
             is_table = diff.nodeType == "table"
             async with sem:
+                if is_table and record and record.table_changes:
+                    headers = list(
+                        (left_node or {}).get("table_headers")
+                        or (right_node or {}).get("table_headers")
+                        or []
+                    )
+                    enriched = [
+                        {**tc, "header": self._col_header(tc, headers)}
+                        for tc in record.table_changes
+                    ]
+                    return await self.llm.explain_table_diff(
+                        old_markdown=self._table_content_for_llm(left_node),
+                        new_markdown=self._table_content_for_llm(right_node),
+                        changed_cells=enriched,
+                        change_type=diff.changeType,
+                        language=language,
+                    )
                 return await self.llm.generate_markdown_diff_summary(
                     node_type=diff.nodeType,
                     change_type=diff.changeType,

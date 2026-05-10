@@ -14,11 +14,12 @@ User uploads one or more documents from the frontend.
 4. API returns `{ jobId, status: "queued" }`.
 5. Frontend starts polling `/documents/upload/v2/{jobId}`.
 6. Worker processes each file:
-   - parse document
-   - apply OCR fallback where needed
-   - extract semantic metadata
+   - **extract document** — for PDFs: OpenDataLoader (XY-Cut++ reading order); if hybrid mode is enabled, complex/table pages are routed to the docling sidecar; on OPD failure, falls back to Docling; for non-PDF (DOCX etc.): always Docling
+   - both extractors emit the same `ParsedChunk` format — all steps below are extractor-agnostic
+   - apply OCR fallback where needed (Docling path only; OPD handles OCR internally)
+   - extract semantic metadata (LLM: vLLM primary, Ollama fallback)
    - upsert chunks to Weaviate
-   - persist file + metadata artifacts
+   - persist file + metadata artifacts to PostgreSQL canonical store and filesystem
 7. Polling endpoint transitions through `queued -> running -> finished|failed`.
 8. Frontend shows terminal toast and refreshes document list.
 
@@ -32,6 +33,44 @@ User uploads one or more documents from the frontend.
 - Empty or invalid uploads
 - Parsing/indexing failure
 - Queue/worker unavailability
+
+## 1a. Extraction Routing (Detail)
+
+```
+PDF uploaded
+  └─ OPENDATALOADER_ENABLED=true?
+       ├─ Yes → OpenDataLoader JAR (XY-Cut++ reading order)
+       │          ├─ OPENDATALOADER_HYBRID_URL set?
+       │          │    ├─ Yes → complex pages → docling sidecar (port 5002)
+       │          │    │        simple pages  → OPD Java path
+       │          │    └─ No  → all pages via OPD Java path
+       │          ├─ produces content chunks? → use OPD result
+       │          └─ no content / error      → fall back to Docling
+       └─ No → Docling (always)
+
+Non-PDF (DOCX etc.)
+  └─ always Docling
+```
+
+Both paths output `list[ParsedChunk]` with `source="opendataloader"` or `source="docling"`.
+All downstream steps (preprocessor → semantic enrichment → hierarchy → Weaviate → PostgreSQL) are unchanged.
+
+### Enabling Hybrid Mode
+
+```bash
+# 1. Start the stack — opendataloader-hybrid starts automatically with docker compose up
+docker compose up
+
+# 2. Set in .env
+OPENDATALOADER_HYBRID_URL=http://opendataloader-hybrid:5002   # docker compose
+# or
+OPENDATALOADER_HYBRID_URL=http://localhost:5002               # local dev
+
+# Optional: tune per-request backend timeout (default 30s)
+OPENDATALOADER_HYBRID_TIMEOUT_SEC=30
+```
+
+If the hybrid server is unreachable at startup, a warning is logged and `hybrid_fallback=True` ensures OPD continues with its standard Java path per page — no ingestion failure.
 
 ## 2. Compare Workflow (Async v2)
 

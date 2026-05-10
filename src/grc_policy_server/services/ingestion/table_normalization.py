@@ -70,23 +70,70 @@ def normalize_table_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
-def extract_headers_from_cells(cells: list[dict[str, Any]], num_cols: int) -> list[str]:
-    header_cells: dict[int, str] = {}
+def extract_headers_from_cells(
+    cells: list[dict[str, Any]], num_cols: int
+) -> tuple[list[str], int]:
+    """Extract column headers, handling multi-row (grouped) header tables.
+
+    Returns (headers, header_depth) where header_depth is 1 for single-row
+    headers and 2 when row 1 sub-headers were used to fill col_span gaps.
+    """
+    num_cols = max(0, int(num_cols or 0))
+    if not cells or num_cols == 0:
+        return [f"column_{c + 1}" for c in range(num_cols)], 1
+
+    # Row 0: expand col_span so every covered column position gets the group text
+    row0_coverage: dict[int, str] = {}
     for cell in cells:
-        row = int(cell.get("row") or 0)
-        col = int(cell.get("col") or 0)
-        if row != 0:
+        if int(cell.get("row") or 0) != 0:
             continue
-        header_cells[col] = str(cell.get("text") or "")
+        col = int(cell.get("col") or 0)
+        col_span = int(cell.get("col_span") or 1)
+        text = str(cell.get("text") or "")
+        for c in range(col, col + col_span):
+            row0_coverage[c] = text
 
-    headers = []
-    for col in range(max(0, int(num_cols or 0))):
-        value = header_cells.get(col) or f"column_{col + 1}"
-        headers.append(normalize_header(value))
-    return headers
+    # Detect multi-row header: row 0 has at least one cell with col_span > 1
+    row0_has_spans = any(
+        int(cell.get("col_span") or 1) > 1
+        for cell in cells
+        if int(cell.get("row") or 0) == 0
+    )
+    # Collect row 1 sub-header texts (only when spans detected)
+    row1_coverage: dict[int, str] = {}
+    if row0_has_spans:
+        for cell in cells:
+            if int(cell.get("row") or 0) != 1:
+                continue
+            col = int(cell.get("col") or 0)
+            text = str(cell.get("text") or "").strip()
+            if text:
+                row1_coverage[col] = text
+
+    use_subheaders = bool(row1_coverage)
+    header_depth = 2 if use_subheaders else 1
+
+    headers: list[str] = []
+    for col in range(num_cols):
+        row0_text = row0_coverage.get(col, "")
+        row1_text = row1_coverage.get(col, "") if use_subheaders else ""
+
+        if row0_text and row1_text and row0_text != row1_text:
+            combined = f"{row0_text} {row1_text}"
+        elif row1_text:
+            combined = row1_text
+        elif row0_text:
+            combined = row0_text
+        else:
+            combined = f"column_{col + 1}"
+
+        headers.append(normalize_header(combined))
+    return headers, header_depth
 
 
-def rows_from_cells(cells: list[dict[str, Any]], headers: list[str]) -> list[dict[str, Any]]:
+def rows_from_cells(
+    cells: list[dict[str, Any]], headers: list[str], *, header_depth: int = 1
+) -> list[dict[str, Any]]:
     if not cells:
         return []
 
@@ -94,7 +141,7 @@ def rows_from_cells(cells: list[dict[str, Any]], headers: list[str]) -> list[dic
     for cell in cells:
         row = int(cell.get("row") or 0)
         col = int(cell.get("col") or 0)
-        if row <= 0:
+        if row < header_depth:
             continue
         header = headers[col] if col < len(headers) else f"column_{col + 1}"
         text = str(cell.get("text") or "").strip()

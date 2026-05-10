@@ -532,3 +532,419 @@ def _debug_artifacts(document_id: str, nodes: list[dict]) -> dict:
         "normalizedTreePath": f"/tmp/{document_id}/canonical_nodes.json",
         "hierarchyPath": f"/tmp/{document_id}/hierarchy.json",
     }
+
+
+# ---------------------------------------------------------------------------
+# Ground-truth tests backed by data/uploads/ artefacts
+# ---------------------------------------------------------------------------
+
+_UPLOADS_DIR = Path(__file__).parent.parent / "data" / "uploads"
+# Doc filenames to look for — we search by metadata rather than hardcoding UUIDs
+# so the fixtures survive re-ingestion.
+_DOC1_FILENAME = "TL_81000_2018-03.pdf"
+_DOC2_FILENAME = "TL_81000_2021-09 GER.pdf"
+
+
+def _find_doc_dir(uploads_dir: Path, filename: str) -> Path | None:
+    """Return the upload directory whose metadata.json matches the given filename."""
+    for meta in uploads_dir.glob("*/metadata.json"):
+        try:
+            m = json.loads(meta.read_text())
+            stored = m.get("original_filename") or m.get("filename") or m.get("name") or ""
+            if stored == filename:
+                return meta.parent
+        except Exception:
+            pass
+    return None
+
+
+def _load_canonical_nodes(uploads_dir: Path, filename: str) -> list[dict]:
+    doc_dir = _find_doc_dir(uploads_dir, filename)
+    if doc_dir is None:
+        pytest.skip(f"No ingested document found for {filename!r}")
+    path = doc_dir / "canonical_nodes.json"
+    if not path.exists():
+        pytest.skip(f"canonical_nodes.json missing for {filename!r}")
+    data = json.loads(path.read_text())
+    return data["nodes"] if isinstance(data, dict) else data
+
+
+@pytest.fixture(scope="module")
+def doc1_canonical_nodes() -> list[dict]:
+    return _load_canonical_nodes(_UPLOADS_DIR, _DOC1_FILENAME)
+
+
+@pytest.fixture(scope="module")
+def doc2_canonical_nodes() -> list[dict]:
+    return _load_canonical_nodes(_UPLOADS_DIR, _DOC2_FILENAME)
+
+
+@pytest.fixture(scope="module")
+def comparison_cache() -> dict:
+    cache_dir = _UPLOADS_DIR / "_comparison_cache"
+    if not cache_dir.exists():
+        pytest.skip("comparison cache not available")
+    files = sorted(cache_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        pytest.skip("comparison cache is empty")
+    return json.loads(files[0].read_text())
+
+
+class TestPageSplitTableDetection:
+    """Verify the Dauerzustand table in TL_81000_2018-03 is stored as a single merged node.
+
+    Re-ingestion runs merge_page_split_tables() at ingestion time, so the stored
+    canonical_nodes.json already contains the merged result (1 node spanning pages 4-5).
+    """
+
+    def test_dauerzustand_ingested_as_single_merged_node(
+        self, doc1_canonical_nodes: list[dict]
+    ) -> None:
+        """Post-fix ingestion must produce exactly 1 Dauerzustand table node."""
+        tables = [
+            n for n in doc1_canonical_nodes
+            if n.get("node_type") == "table" and "Dauerzustand" in (n.get("heading_path") or [])
+        ]
+        assert len(tables) == 1, (
+            f"Expected 1 merged Dauerzustand node after ingestion-time merge, got {len(tables)}"
+        )
+        node = tables[0]
+        assert node.get("page_from") == 4
+        assert node.get("page_to") == 5
+
+    def test_dauerzustand_same_column_count(self, doc1_canonical_nodes: list[dict]) -> None:
+        tables = [
+            n for n in doc1_canonical_nodes
+            if n.get("node_type") == "table" and "Dauerzustand" in (n.get("heading_path") or [])
+        ]
+        col_counts = {
+            (n.get("metadata") or {}).get("table_structure", {}).get("num_cols")
+            for n in tables
+        }
+        assert col_counts == {2}, f"Expected Dauerzustand table to have 2 cols, got {col_counts}"
+
+
+class TestPageSplitTableMerge:
+    """After merge_page_split_tables() the Dauerzustand pair must collapse to one node."""
+
+    def test_merge_produces_single_node(self, doc1_canonical_nodes: list[dict]) -> None:
+        from grc_policy_server.services.documents.canonical_models import (
+            CanonicalNode,
+            merge_page_split_tables,
+        )
+
+        nodes = [CanonicalNode.from_dict(n) for n in doc1_canonical_nodes]
+        merged = merge_page_split_tables(nodes)
+        dauerzustand = [
+            n for n in merged
+            if n.node_type == "table" and "Dauerzustand" in n.heading_path
+        ]
+        assert len(dauerzustand) == 1, (
+            f"Expected 1 merged Dauerzustand node, got {len(dauerzustand)}"
+        )
+
+    def test_merged_node_spans_both_pages(self, doc1_canonical_nodes: list[dict]) -> None:
+        from grc_policy_server.services.documents.canonical_models import (
+            CanonicalNode,
+            merge_page_split_tables,
+        )
+
+        nodes = [CanonicalNode.from_dict(n) for n in doc1_canonical_nodes]
+        merged = merge_page_split_tables(nodes)
+        node = next(
+            n for n in merged
+            if n.node_type == "table" and "Dauerzustand" in n.heading_path
+        )
+        assert node.page_from == 4
+        assert node.page_to == 5
+
+    def test_merged_row_count_is_sum(self, doc1_canonical_nodes: list[dict]) -> None:
+        from grc_policy_server.services.documents.canonical_models import (
+            CanonicalNode,
+            merge_page_split_tables,
+        )
+
+        nodes = [CanonicalNode.from_dict(n) for n in doc1_canonical_nodes]
+        # Sum of raw row counts from the two segments
+        raw_rows = sum(
+            (n.get("metadata") or {}).get("table_structure", {}).get("num_rows", 0)
+            for n in doc1_canonical_nodes
+            if n.get("node_type") == "table" and "Dauerzustand" in (n.get("heading_path") or [])
+        )
+        merged = merge_page_split_tables(nodes)
+        node = next(
+            n for n in merged
+            if n.node_type == "table" and "Dauerzustand" in n.heading_path
+        )
+        assert node.metadata["table_structure"]["num_rows"] == raw_rows
+
+    def test_merge_does_not_join_different_column_count(
+        self, doc1_canonical_nodes: list[dict]
+    ) -> None:
+        """BCI-Prüfung has adjacent-page tables with different col counts — keep separate."""
+        from grc_policy_server.services.documents.canonical_models import (
+            CanonicalNode,
+            merge_page_split_tables,
+        )
+
+        nodes = [CanonicalNode.from_dict(n) for n in doc1_canonical_nodes]
+        merged = merge_page_split_tables(nodes)
+        bci_tables = [
+            n for n in merged
+            if n.node_type == "table" and "BCI-Prüfung 5.2.2" in n.heading_path
+        ]
+        # col counts differ (3 vs 7) — must not be merged
+        assert len(bci_tables) == 2, (
+            f"BCI-Prüfung tables with different col counts should stay separate, got {len(bci_tables)}"
+        )
+
+    def test_merge_is_idempotent_on_already_merged_data(
+        self, doc1_canonical_nodes: list[dict]
+    ) -> None:
+        """merge_page_split_tables() must be a no-op on already-merged ingestion output."""
+        from grc_policy_server.services.documents.canonical_models import (
+            CanonicalNode,
+            merge_page_split_tables,
+        )
+
+        nodes = [CanonicalNode.from_dict(n) for n in doc1_canonical_nodes]
+        once = merge_page_split_tables(nodes)
+        twice = merge_page_split_tables(once)
+        assert sum(1 for n in once if n.node_type == "table") == sum(
+            1 for n in twice if n.node_type == "table"
+        ), "Second application of merge_page_split_tables() must not change the table count"
+
+
+class TestComparisonCacheAccuracy:
+    """Validate the cached comparison output against known accuracy targets.
+
+    The two xfail tests below measure the post-fix state.  They are expected to fail
+    against any cache generated *before* re-ingestion with merge_page_split_tables().
+    Once both documents are re-uploaded and the comparison is re-run, these tests
+    should pass and the xfail markers can be removed.
+    """
+
+    def test_cache_has_key_differences(self, comparison_cache: dict) -> None:
+        diffs = comparison_cache.get("result", {}).get("keyDifferences", [])
+        assert len(diffs) > 0, "Comparison cache must contain key differences"
+
+    def test_pre_fix_baseline_table_added_removed_count(
+        self, comparison_cache: dict
+    ) -> None:
+        """Documents the pre-fix false positive count (64) as a regression baseline."""
+        diffs = comparison_cache.get("result", {}).get("keyDifferences", [])
+        table_added_removed = [
+            d for d in diffs
+            if d.get("changeType") in ("ADDED", "REMOVED")
+            and d.get("nodeType") == "table"
+        ]
+        # Before re-ingestion the count is 64 — record it so we notice if it worsens
+        assert len(table_added_removed) <= 64, (
+            f"Table ADDED/REMOVED count ({len(table_added_removed)}) regressed above "
+            "the pre-fix baseline of 64"
+        )
+
+    @pytest.mark.xfail(
+        strict=False,
+        reason="Requires re-ingestion with merge_page_split_tables() to pass",
+    )
+    def test_table_added_removed_below_threshold(self, comparison_cache: dict) -> None:
+        """After re-ingestion, false table ADDED/REMOVED should drop well below 64.
+
+        Threshold is 40 to allow for genuinely removed/added tables; actual target
+        after re-ingestion is < 10.
+        """
+        diffs = comparison_cache.get("result", {}).get("keyDifferences", [])
+        table_added_removed = [
+            d for d in diffs
+            if d.get("changeType") in ("ADDED", "REMOVED")
+            and d.get("nodeType") == "table"
+        ]
+        assert len(table_added_removed) < 40, (
+            f"Too many table ADDED/REMOVED ({len(table_added_removed)}); "
+            "re-ingest both documents to reduce false positives"
+        )
+
+    @pytest.mark.xfail(
+        strict=False,
+        reason="Requires re-ingestion with merge_page_split_tables() to pass",
+    )
+    def test_dauerzustand_not_falsely_removed(self, comparison_cache: dict) -> None:
+        """After re-ingestion, the Dauerzustand table must not appear as REMOVED."""
+        diffs = comparison_cache.get("result", {}).get("keyDifferences", [])
+        false_removals = [
+            d for d in diffs
+            if d.get("changeType") == "REMOVED"
+            and "Dauerzustand" in str(d.get("section", ""))
+            and d.get("nodeType") == "table"
+        ]
+        assert false_removals == [], (
+            f"Dauerzustand table should not be REMOVED; found {len(false_removals)} entry/entries"
+        )
+
+    @pytest.mark.xfail(
+        strict=False,
+        reason="Requires re-running comparison after adding reference-section filter to filter_key_differences()",
+    )
+    def test_no_reference_section_key_differences(self, comparison_cache: dict) -> None:
+        """Diffs from Legende/Symbole/Abkürzungen/Begriffe/Inhalt sections must be
+        excluded from keyDifferences — they are reference material, not normative content.
+
+        filter_key_differences() now drops these; the cache must be regenerated to reflect it.
+        """
+        import re
+        REFERENCE_RE = re.compile(
+            r"\b(legende|symbole?|abkürzung(?:en)?|definitionen?|begriffe?|inhalt"
+            r"|glossar|annex|anhang|abbreviation|legend|symbol|glossary|definition)\b",
+            re.IGNORECASE,
+        )
+        CAPTION_NUM_RE = re.compile(r"\bTabell?e\s+\d+", re.IGNORECASE)
+        diffs = comparison_cache.get("result", {}).get("keyDifferences", [])
+        reference_diffs = [
+            d for d in diffs
+            if REFERENCE_RE.search(str(d.get("section") or ""))
+            and not CAPTION_NUM_RE.search(str(d.get("section") or ""))
+        ]
+        assert len(reference_diffs) == 0, (
+            f"Found {len(reference_diffs)} key differences in reference sections "
+            f"(e.g. {reference_diffs[0].get('section')!r}); "
+            "these should be filtered by filter_key_differences()"
+        )
+
+    @pytest.mark.xfail(
+        strict=False,
+        reason="Requires re-running comparison after normalization fix to filter_key_differences()",
+    )
+    def test_modified_diffs_have_distinct_normalized_content(
+        self, comparison_cache: dict
+    ) -> None:
+        """MODIFIED diffs where both sides normalize to the same text must not appear
+        in keyDifferences — they represent cosmetic/formatting changes, not semantic ones.
+
+        The normalization fix (hyphen → space, section-name drift) and the updated
+        filter_key_differences() now eliminate these; cache must be regenerated.
+        """
+        from grc_policy_server.utils.hashing import normalize_for_comparison
+        diffs = comparison_cache.get("result", {}).get("keyDifferences", [])
+        false_modified = []
+        for d in diffs:
+            if d.get("changeType") != "MODIFIED":
+                continue
+            ref1 = d.get("doc1Reference") or {}
+            ref2 = d.get("doc2Reference") or {}
+            t1 = normalize_for_comparison(str(ref1.get("sourceText") or d.get("doc1Content") or ""))
+            t2 = normalize_for_comparison(str(ref2.get("sourceText") or d.get("doc2Content") or ""))
+            if t1 and t1 == t2:
+                false_modified.append(d)
+        assert len(false_modified) == 0, (
+            f"Found {len(false_modified)} MODIFIED diffs where normalized content is identical "
+            f"(e.g. section={false_modified[0].get('section')!r}); "
+            "filter_key_differences() should have removed these"
+        )
+
+
+class TestTableQuality:
+    """Validate that enhanced tables have good headers and degenerate tables are excluded."""
+
+    def test_no_majority_column_n_headers(self, doc1_canonical_nodes: list[dict]) -> None:
+        """No ingested table should have more than half column_N headers."""
+        for node in doc1_canonical_nodes:
+            if node.get("node_type") != "table":
+                continue
+            headers = node.get("table_headers") or []
+            if not headers:
+                continue
+            col_n = sum(1 for h in headers if str(h).startswith("column_"))
+            assert col_n <= len(headers) // 2, (
+                f"Table at page {node.get('page_number')} section={node.get('section_path')!r} "
+                f"has {col_n}/{len(headers)} column_N headers"
+            )
+
+    def test_no_degenerate_single_column_tables(
+        self,
+        doc1_canonical_nodes: list[dict],
+        doc2_canonical_nodes: list[dict],
+    ) -> None:
+        """1-column tables with sentence-length headers should be demoted to paragraphs at ingestion."""
+        for node in doc1_canonical_nodes + doc2_canonical_nodes:
+            if node.get("node_type") != "table":
+                continue
+            ts = node.get("table_structure") or {}
+            if int(ts.get("num_cols") or 0) != 1:
+                continue
+            headers = node.get("table_headers") or []
+            if not headers:
+                continue
+            header_len = len(str(headers[0]))
+            assert header_len <= 80, (
+                f"Degenerate 1-col table in section={node.get('section_path')!r} "
+                f"page={node.get('page_number')} survived filtering; "
+                f"header length={header_len}, header='{str(headers[0])[:80]}'"
+            )
+
+    def test_no_reference_section_tables(
+        self,
+        doc1_canonical_nodes: list[dict],
+        doc2_canonical_nodes: list[dict],
+    ) -> None:
+        """Tables in Legende/Symbole/Abkürzungen/Begriffe sections without a numbered
+        caption must be demoted to paragraphs at ingestion — not kept as tables."""
+        import re
+        _REFERENCE_RE = re.compile(
+            r"\b(legende|symbole?|abkürzung|definitionen?|begriffe?|inhalt|glossar"
+            r"|annex|anhang|abbreviation|legend|symbol|glossary|definition)\b",
+            re.IGNORECASE,
+        )
+        _CAPTION_NUM_RE = re.compile(r"\bTabell?e\s+\d+", re.IGNORECASE)
+        for node in doc1_canonical_nodes + doc2_canonical_nodes:
+            if node.get("node_type") != "table":
+                continue
+            section = str(node.get("section_path") or "")
+            if _REFERENCE_RE.search(section) and not _CAPTION_NUM_RE.search(section):
+                pytest.fail(
+                    f"Reference-section table survived ingestion filter: "
+                    f"section={section!r}, page={node.get('page_number')}"
+                )
+
+
+class TestNormalization:
+    """Unit tests for normalize_for_comparison() covering known edge cases."""
+
+    @pytest.mark.parametrize("a, b", [
+        # Word-internal hyphens: German compound words may or may not use hyphens
+        ("EMV-Anforderungen", "EMV Anforderungen"),
+        ("Kfz-Versorgungsnetz", "Kfz Versorgungsnetz"),
+        ("5-polig", "5 polig"),
+        # Section numbers must stay intact (no spaces inserted between digits)
+        ("Prüfung nach 5.2.1", "Prüfung nach 5.2.1"),
+        # Abbreviation dots must not break matching
+        ("u.a. weitere", "u.a. weitere"),
+        # Soft-hyphen removal (U+00AD)
+        ("inter­national", "international"),
+        # Non-breaking space (U+00A0) treated as normal space
+        ("text content", "text content"),
+        # Line-break hyphenation repair
+        ("inter-\nnational", "international"),
+        # Bullet prefix normalisation
+        ("• item one", "- item one"),
+        ("1. item one", "- item one"),
+    ])
+    def test_pairs_normalize_to_same_value(self, a: str, b: str) -> None:
+        from grc_policy_server.utils.hashing import normalize_for_comparison
+        assert normalize_for_comparison(a) == normalize_for_comparison(b), (
+            f"Expected {a!r} and {b!r} to normalize identically\n"
+            f"  a → {normalize_for_comparison(a)!r}\n"
+            f"  b → {normalize_for_comparison(b)!r}"
+        )
+
+    @pytest.mark.parametrize("a, b", [
+        # Genuinely different content must stay distinct
+        ("Anforderungen müssen erfüllt werden", "Anforderungen können erfüllt werden"),
+        ("5.2.1 Prüfung", "5.2.2 Prüfung"),
+        ("ADDED requirement", "requirement"),
+    ])
+    def test_distinct_texts_remain_different(self, a: str, b: str) -> None:
+        from grc_policy_server.utils.hashing import normalize_for_comparison
+        assert normalize_for_comparison(a) != normalize_for_comparison(b), (
+            f"Expected {a!r} and {b!r} to normalize differently"
+        )

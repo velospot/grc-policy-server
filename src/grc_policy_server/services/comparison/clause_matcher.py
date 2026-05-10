@@ -110,6 +110,13 @@ class ClauseMatcher:
             section_map=section_map,
         )
 
+        self._resolve_split_table_pairs(
+            left_nodes=left,
+            right_nodes=right,
+            matched_left=matched_left,
+            matched_right_ids=matched_right_ids,
+        )
+
         removed = [
             node for node in left if str(node.get("chunk_id") or "") not in matched_left
         ]
@@ -175,8 +182,11 @@ class ClauseMatcher:
                 or (section_node or {}).get("section_path")
                 or section_path
             )
+            _stl = list((section_node or {}).get("section_titles") or [])
             title = str(
-                (section_node or {}).get("title") or section_path.split(" / ")[-1]
+                (section_node or {}).get("title")
+                or (_stl[-1] if _stl else None)
+                or section_path
             )
             clean_text = str(
                 (section_node or {}).get("section_summary")
@@ -353,6 +363,103 @@ class ClauseMatcher:
                     right=right_node,
                 )
                 matched_right_ids.add(right_id)
+
+    def _resolve_split_table_pairs(
+        self,
+        *,
+        left_nodes: list[dict],
+        right_nodes: list[dict],
+        matched_left: dict[str, ClauseMatch],
+        matched_right_ids: set[str],
+    ) -> None:
+        """Match unmatched table nodes that are page-split fragments of a single logical table.
+
+        Groups unmatched table nodes by (section_path, num_cols).  When a group has at
+        least one unmatched node on each side, merges the fragments into a virtual node
+        and scores the merged pair.  If the score meets the minimum clause threshold the
+        fragments are registered as matched so they are not reported as REMOVED/ADDED.
+        """
+        def _table_group_key(node: dict) -> tuple[str, int] | None:
+            if str(node.get("node_type") or "") != "table":
+                return None
+            section = str(node.get("section_path") or "")
+            num_cols = int(node.get("table_num_cols") or 0)
+            if num_cols == 0:
+                return None
+            return (section, num_cols)
+
+        def _merge_virtual(nodes_group: list[dict]) -> dict:
+            """Produce a single virtual node by merging all fragments."""
+            if len(nodes_group) == 1:
+                return nodes_group[0]
+            combined_fps: list[str] = []
+            combined_cells: list[dict] = []
+            row_offset = 0
+            total_rows = 0
+            for seg in nodes_group:
+                fps = list(seg.get("table_row_fingerprints") or [])
+                combined_fps.extend(fps)
+                rows = int(seg.get("table_num_rows") or 0)
+                for cell in (seg.get("table_cells") or []):
+                    combined_cells.append({**cell, "row": int(cell.get("row", 0)) + row_offset})
+                row_offset += rows
+                total_rows += rows
+            base = dict(nodes_group[0])
+            base["table_row_fingerprints"] = combined_fps
+            base["table_cells"] = combined_cells
+            base["table_num_rows"] = total_rows
+            base["text"] = "\n".join(str(seg.get("text") or "") for seg in nodes_group)
+            base["clean_text"] = "\n".join(str(seg.get("clean_text") or "") for seg in nodes_group)
+            base["markdown_text"] = "\n".join(str(seg.get("markdown_text") or "") for seg in nodes_group)
+            return base
+
+        # Build groups of unmatched table nodes keyed by (section, num_cols)
+        left_groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
+        for node in left_nodes:
+            lid = str(node.get("chunk_id") or "")
+            if lid and lid not in matched_left:
+                key = _table_group_key(node)
+                if key:
+                    left_groups[key].append(node)
+
+        right_groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
+        for node in right_nodes:
+            rid = str(node.get("chunk_id") or "")
+            if rid and rid not in matched_right_ids:
+                key = _table_group_key(node)
+                if key:
+                    right_groups[key].append(node)
+
+        for key in left_groups:
+            if key not in right_groups:
+                continue
+            left_frags = left_groups[key]
+            right_frags = right_groups[key]
+
+            virtual_left = _merge_virtual(left_frags)
+            virtual_right = _merge_virtual(right_frags)
+            score = self._table_score(virtual_left, virtual_right)
+
+            if score < self.thresholds.min_clause_score:
+                continue
+
+            distance = 1.0 - score
+            # Register each left fragment matched to the first right fragment
+            # (many-to-many virtual match — suppresses false REMOVED/ADDED)
+            primary_right_id = str(right_frags[0].get("chunk_id") or "")
+            for left_frag in left_frags:
+                lid = str(left_frag.get("chunk_id") or "")
+                if lid and lid not in matched_left:
+                    matched_left[lid] = ClauseMatch(
+                        distance=distance,
+                        matched_by="split_table_merge",
+                        left=left_frag,
+                        right=right_frags[0],
+                    )
+            for right_frag in right_frags:
+                rid = str(right_frag.get("chunk_id") or "")
+                if rid:
+                    matched_right_ids.add(rid)
 
     def _vector_fallback(
         self,
@@ -533,7 +640,7 @@ class ClauseMatcher:
         right_title = self._normalize_section_title(right.title.lower())
         title_score = SequenceMatcher(None, left_title, right_title).ratio()
         content_score = token_overlap(left.clean_text, right.clean_text, self.language)
-        numbering_score = self._numbering_depth_score(left.key, right.key)
+        numbering_score = self._numbering_depth_score(left.title, right.title)
         order_penalty = abs(left.order - right.order)
         path_score = 1.0 / (1 + order_penalty * 0.3)
         return (

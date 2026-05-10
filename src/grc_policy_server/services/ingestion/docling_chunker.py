@@ -190,8 +190,8 @@ def _table_structure_to_clean_text(
 
     cells = list(struct.get("cells") or [])
     num_cols = int(struct.get("num_cols") or 0)
-    headers = extract_headers_from_cells(cells, num_cols)
-    rows = rows_from_cells(cells, headers=headers)
+    headers, header_depth = extract_headers_from_cells(cells, num_cols)
+    rows = rows_from_cells(cells, headers=headers, header_depth=header_depth)
     return table_text_projection(
         title or "",
         headers,
@@ -263,6 +263,8 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
         }
         if fields.get("docling_path"):
             metadata["docling_path"] = fields["docling_path"]
+        if fields.get("page_bbox") is not None:
+            metadata["page_bbox"] = fields["page_bbox"]
 
         if any(item.label == DocItemLabel.TABLE for item in doc_chunk.meta.doc_items):
             chunk_type = "table"
@@ -285,17 +287,18 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
                 "SUCCESS" if table_struct else "FAILED",
             )
             if table_struct:
-                headers = extract_headers_from_cells(
+                headers, header_depth = extract_headers_from_cells(
                     table_struct.get("cells", []),
                     int(table_struct.get("num_cols") or 0),
                 )
-                rows = rows_from_cells(table_struct.get("cells", []), headers=headers)
+                rows = rows_from_cells(table_struct.get("cells", []), headers=headers, header_depth=header_depth)
                 metadata["table_structure"] = {
                     "num_rows": table_struct.get("num_rows", 0),
                     "num_cols": table_struct.get("num_cols", 0),
                     "cells": table_struct.get("cells", []),
                 }
                 metadata["table_headers"] = headers
+                metadata["table_header_depth"] = header_depth
                 metadata["table_schema_signature"] = schema_signature(headers)
                 metadata["table_row_fingerprints"] = [
                     str(row.get("row_fingerprint") or "") for row in rows
@@ -403,12 +406,14 @@ def extract_table_and_image_info(
 def extract_basic_chunk_fields(chunk: Any) -> dict[str, Any]:
     doc_chunk = DocChunk.model_validate(chunk)
     page = extract_page_number(doc_chunk.meta)
+    bbox = extract_prov_bbox(doc_chunk.meta)
 
     return {
         "text": getattr(chunk, "text", "") or "",
         "docling_path": getattr(chunk, "path", None),
         "page_number": page if isinstance(page, int) and page >= 0 else None,
         "section_path": _section_path_from_chunk(doc_chunk),
+        "page_bbox": bbox,
     }
 
 
@@ -493,6 +498,32 @@ def extract_page_number(meta_any: Any) -> int:
             return n
 
     return -1
+
+
+def extract_prov_bbox(meta_any: Any) -> dict | None:
+    meta = meta_to_dict(meta_any)
+    for doc_item in iter_dicts(meta.get("doc_items")):
+        for prov in iter_dicts(doc_item.get("prov")):
+            bbox = prov.get("bbox")
+            if isinstance(bbox, dict):
+                return {
+                    "l": bbox.get("l"),
+                    "t": bbox.get("t"),
+                    "r": bbox.get("r"),
+                    "b": bbox.get("b"),
+                    "coord_origin": bbox.get("coord_origin"),
+                }
+    for prov in iter_dicts(meta.get("prov")):
+        bbox = prov.get("bbox")
+        if isinstance(bbox, dict):
+            return {
+                "l": bbox.get("l"),
+                "t": bbox.get("t"),
+                "r": bbox.get("r"),
+                "b": bbox.get("b"),
+                "coord_origin": bbox.get("coord_origin"),
+            }
+    return None
 
 
 def _extract_captions(doc_items: Iterable[Any], dl_doc: Any) -> list[str]:

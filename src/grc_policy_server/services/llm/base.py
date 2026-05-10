@@ -136,3 +136,29 @@ class BaseLLM(ABC):
         Returns an empty string when no semantic change is detected.
         """
         raise NotImplementedError
+
+    async def explain_table_diff(
+        self,
+        *,
+        old_markdown: str | None,
+        new_markdown: str | None,
+        changed_cells: list[dict],
+        change_type: str,
+        language: str = "",
+    ) -> str:
+        """Explain table changes using structured cell-level data.
+
+        ``changed_cells`` is a list of dicts with keys:
+          type, text, oldValue, newValue, location, header (column name).
+        Default implementation falls back to generate_markdown_diff_summary() so
+        subclasses only need to override when a richer prompt is available.
+        """
+        return await self.generate_markdown_diff_summary(
+            node_type="table",
+            change_type=change_type,
+            doc1_source_text=None,
+            doc2_source_text=None,
+            doc1_table_content=old_markdown,
+            doc2_table_content=new_markdown,
+            language=language,
+        )

@@ -7,8 +7,9 @@ from uuid import NAMESPACE_URL, uuid5
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _NON_WORD_RE = re.compile(r"[^a-z0-9]+")
-# Pattern for space between digit and letter (unit pattern): "2 W" -> "2W"
-_DIGIT_SPACE_UNIT_RE = re.compile(r"(\d)\s+([a-zA-Z])")
+# Remove space between digit and unit symbol: "2 W" -> "2W", "100 MHz" -> "100MHz".
+# Negative lookahead (?!\w{3,}) prevents matching long word suffixes like "5 polig".
+_DIGIT_SPACE_UNIT_RE = re.compile(r"(\d)\s+([a-zA-Z])(?!\w{3,})")
 # Pattern for trailing escape characters
 _TRAILING_ESCAPE_RE = re.compile(r"[\\\/]+$")
 BULLET_RE = re.compile(
@@ -27,41 +28,38 @@ def normalize_text(value: str) -> str:
 
 def normalize_for_comparison(value: str) -> str:
     """Normalize text for comparison, removing cosmetic differences.
-    Lossless-ish canonicalization for comparison:
-    - normalize unicode
-    - repair line-break hyphenation
-    - normalize bullets/numbering
-    - collapse spacing
-    - keep lexical meaning intact
 
     Handles:
-    - Whitespace normalization (collapse multiple spaces)
+    - Unicode normalization (NFKC) and soft-hyphen removal
+    - Line-break hyphenation repair: "inter-\\nnational" -> "international"
+    - Word-internal hyphens normalized to spaces: "EMV-Prüfung" == "EMV Prüfung"
+    - Whitespace collapse
+    - Single-letter unit symbols attached to digits: "2 W" -> "2W"
+    - Bullet/numbered list prefix normalization
+    - Punctuation spacing for :;,
     - Case normalization (lowercase)
-    - Space between number and unit: "2 W" -> "2W"
-    - Trailing escape characters: "text\\" -> "text"
-
     """
     text = (value or "").strip()
-    # Remove trailing escape characters (PDF artifacts)
     text = _TRAILING_ESCAPE_RE.sub("", text)
-    # Collapse whitespace
-    text = _WHITESPACE_RE.sub(" ", text)
-    # Remove space between digit and unit letter: "2 W" -> "2W"
-    text = _DIGIT_SPACE_UNIT_RE.sub(r"\1\2", text)
-    text = text.replace("\u00ad", "")  # soft hyphen
+    text = text.replace("­", "")  # soft hyphen
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = unicodedata.normalize("NFKC", text or "")
-    # inter-\nnational -> international
+    # Repair line-break hyphenation BEFORE collapsing whitespace so \n is still present
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
-
-    # normalize bullets / numbered items
+    # Collapse whitespace
+    text = _WHITESPACE_RE.sub(" ", text)
+    # Remove space between digit and single-letter unit symbol: "2 W" -> "2W"
+    text = _DIGIT_SPACE_UNIT_RE.sub(r"\1\2", text)
+    # Normalize bullets / numbered items
     text = BULLET_RE.sub("- ", text)
-
-    # normalize punctuation spacing without removing punctuation
+    # Normalize word-internal hyphens to spaces: "EMV-Prüfung" == "EMV Prüfung"
+    text = re.sub(r"(?<=\w)-(?=\w)", " ", text)
+    # Normalize punctuation spacing: one space after ;, (not . to preserve section
+    # numbers like "5.2.1") and one space after :
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"\s*([:;,.\-])\s*", r"\1 ", text)
-    # Lowercase for case-insensitive comparison
+    text = re.sub(r"\s*([;,])\s*", r"\1 ", text)
+    text = re.sub(r"\s*:\s*", ": ", text)
     return text.lower().strip()
 
 
@@ -79,6 +77,6 @@ def sort_by_page(list):
 
 
 def normalize_whitespace(s: str) -> str:
-    s = s.replace("\u00a0", " ")
+    s = s.replace(" ", " ")
     s = re.sub(r"\s+", " ", s).strip()
     return s

@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import re
 from collections import Counter, defaultdict
+from difflib import SequenceMatcher
 from typing import Iterable
 
 from grc_policy_server.models.schemas import KeyDifference
@@ -11,6 +12,14 @@ from grc_policy_server.utils.hashing import normalize_for_comparison
 _TABLE_SEPARATOR_LINE_RE = re.compile(
     r"^\s*\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)*\s*\|?\s*$",
     re.MULTILINE,
+)
+_TABLE_CAPTION_NUM_RE = re.compile(r"\bTabell?e\s+(\d+[A-Za-z]?)\b", re.IGNORECASE)
+# Sections that contain reference/legend material, not normative policy requirements.
+# Diffs from these sections are excluded from key differences entirely.
+_REFERENCE_SECTION_RE = re.compile(
+    r"\b(legende|symbole?|abkürzung(?:en)?|definitionen?|begriffe?|inhalt"
+    r"|glossar|annex|anhang|abbreviation|legend|symbol|glossary|definition)\b",
+    re.IGNORECASE,
 )
 _RNG = random.SystemRandom()
 
@@ -102,6 +111,15 @@ def filter_key_differences(
 ) -> list[KeyDifference]:
     filtered: list[KeyDifference] = []
     for diff in diffs:
+        # Drop diffs from reference/legend sections — these are not normative content.
+        section = str(diff.section or "")
+        if not section and diff.doc1Reference:
+            section = str(diff.doc1Reference.section or "")
+        if not section and diff.doc2Reference:
+            section = str(diff.doc2Reference.section or "")
+        if _REFERENCE_SECTION_RE.search(section) and not _TABLE_CAPTION_NUM_RE.search(section):
+            continue
+
         pair = _resolve_diff_section_pair(
             diff,
             left_to_right=left_to_right,
@@ -117,7 +135,8 @@ def filter_key_differences(
                 continue
 
         filtered.append(diff)
-    return filtered
+
+    return _consolidate_split_table_diffs(filtered)
 
 
 def random_diff_subset(diffs: list[KeyDifference], max_items: int = 10) -> list[KeyDifference]:
@@ -148,3 +167,171 @@ def _resolve_diff_section_pair(
     if right_section and right_section in right_to_left:
         return right_to_left[right_section], right_section
     return None
+
+
+# ---------------------------------------------------------------------------
+# Page-split table consolidation
+# ---------------------------------------------------------------------------
+
+_SUPPRESS_OVERLAP = 0.70   # identical content — suppress both REMOVED + ADDED
+_MERGE_OVERLAP = 0.30      # partial overlap — collapse to a single MODIFIED
+
+
+def _consolidate_split_table_diffs(diffs: list[KeyDifference]) -> list[KeyDifference]:
+    """Collapse REMOVED + ADDED table pairs caused by page-boundary splits.
+
+    Two passes:
+    1. Exact section-name match — groups REMOVED/ADDED in the same section.
+    2. Caption-number fallback — matches unresolved groups whose section names share
+       the same "Tabelle N" number (handles minor section-name drift between doc versions).
+
+    Overlap thresholds:
+      ≥ 0.70 → suppress both (same content, different pagination)
+      0.30–0.70 → collapse to a single MODIFIED diff
+      < 0.30 → genuine change, keep all diffs
+    """
+    table_removed: dict[str, list[KeyDifference]] = defaultdict(list)
+    table_added: dict[str, list[KeyDifference]] = defaultdict(list)
+    other: list[KeyDifference] = []
+
+    for diff in diffs:
+        node_type = _node_type_from_diff(diff)
+        if node_type != "table":
+            other.append(diff)
+            continue
+        section = _diff_section(diff)
+        if diff.changeType == "REMOVED":
+            table_removed[section].append(diff)
+        elif diff.changeType == "ADDED":
+            table_added[section].append(diff)
+        else:
+            other.append(diff)
+
+    result = list(other)
+    handled_removed: set[str] = set()
+    handled_added: set[str] = set()
+
+    # Pass 1 — exact section match
+    for section, removed_group in table_removed.items():
+        added_group = table_added.get(section)
+        if not added_group:
+            continue
+        _apply_overlap_decision(result, section, removed_group, added_group)
+        handled_removed.add(section)
+        handled_added.add(section)
+
+    # Pass 2 — caption-number fallback for unmatched groups
+    unmatched_removed = {s: g for s, g in table_removed.items() if s not in handled_removed}
+    unmatched_added = {s: g for s, g in table_added.items() if s not in handled_added}
+
+    # Build caption-number → section maps for unmatched groups
+    cap_to_removed: dict[str, str] = {}
+    for section in unmatched_removed:
+        cap = _caption_number_from_section(section)
+        if cap:
+            cap_to_removed.setdefault(cap, section)
+
+    cap_to_added: dict[str, str] = {}
+    for section in unmatched_added:
+        cap = _caption_number_from_section(section)
+        if cap:
+            cap_to_added.setdefault(cap, section)
+
+    for cap, removed_section in cap_to_removed.items():
+        added_section = cap_to_added.get(cap)
+        if not added_section:
+            continue
+        _apply_overlap_decision(
+            result,
+            removed_section,
+            unmatched_removed[removed_section],
+            unmatched_added[added_section],
+        )
+        handled_removed.add(removed_section)
+        handled_added.add(added_section)
+
+    # Keep anything not handled
+    for section, group in table_removed.items():
+        if section not in handled_removed:
+            result.extend(group)
+    for section, group in table_added.items():
+        if section not in handled_added:
+            result.extend(group)
+
+    return result
+
+
+def _apply_overlap_decision(
+    result: list[KeyDifference],
+    section: str,
+    removed_group: list[KeyDifference],
+    added_group: list[KeyDifference],
+) -> None:
+    left_text = _join_source_texts(removed_group)
+    right_text = _join_source_texts(added_group)
+    overlap = _text_overlap(left_text, right_text)
+
+    if overlap >= _SUPPRESS_OVERLAP:
+        pass  # same content, different pagination — drop both
+    elif overlap >= _MERGE_OVERLAP:
+        anchor_removed = removed_group[0]
+        anchor_added = added_group[0]
+        result.append(
+            KeyDifference(
+                changeType="MODIFIED",
+                section=section,
+                doc1Content=anchor_removed.doc1Content,
+                doc2Content=anchor_added.doc2Content,
+                impact=anchor_removed.impact,
+                doc1Reference=anchor_removed.doc1Reference,
+                doc2Reference=anchor_added.doc2Reference,
+            )
+        )
+    else:
+        result.extend(removed_group)
+        result.extend(added_group)
+
+
+def _caption_number_from_section(section: str) -> str | None:
+    m = _TABLE_CAPTION_NUM_RE.search(section)
+    return m.group(1).lower() if m else None
+
+
+def _node_type_from_diff(diff: KeyDifference) -> str:
+    # KeyDifference doesn't carry node_type directly; we infer from content shape.
+    # Table diffs typically have doc1Content / doc2Content starting with "Table (" or "|"
+    for content in (diff.doc1Content, diff.doc2Content):
+        if content:
+            stripped = content.strip()
+            if stripped.startswith("Table (") or stripped.startswith("|"):
+                return "table"
+    # Fall back to checking if the source texts look like markdown tables
+    for ref in (diff.doc1Reference, diff.doc2Reference):
+        if ref and ref.sourceText and ref.sourceText.strip().startswith("|"):
+            return "table"
+    return "other"
+
+
+def _diff_section(diff: KeyDifference) -> str:
+    if diff.doc1Reference:
+        return str(diff.doc1Reference.section)
+    if diff.doc2Reference:
+        return str(diff.doc2Reference.section)
+    return ""
+
+
+def _join_source_texts(diffs: list[KeyDifference]) -> str:
+    parts: list[str] = []
+    for diff in diffs:
+        for ref in (diff.doc1Reference, diff.doc2Reference):
+            if ref and ref.sourceText:
+                parts.append(canonicalize_text_content(ref.sourceText))
+    return " ".join(parts)
+
+
+def _text_overlap(a: str, b: str) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()

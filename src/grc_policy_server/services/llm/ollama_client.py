@@ -421,6 +421,28 @@ End with one sentence on compliance significance, e.g.:
 # Back-compat alias used by tests that import this name directly.
 PROMPT_MARKDOWN_DIFF_SUMMARY = PROMPT_MARKDOWN_DIFF_CLAUSE
 
+PROMPT_TABLE_STRUCTURED_DIFF = """
+You are a compliance analyst reviewing a table change. Change type: {change_type}.
+
+Structured cell changes (JSON):
+{changed_cells_json}
+
+Old table:
+{old_table}
+
+New table:
+{new_table}
+
+Rules — follow strictly:
+- Lead with the most compliance-significant change.
+- Name specific column and row: "`<Column>` / Row <N>: ~~old~~ → **new**"
+- For added/removed rows: describe what the row represents in context.
+- IGNORE cosmetic differences: whitespace, punctuation, capitalisation with identical meaning.
+- If no semantic change is detectable, output nothing at all.
+- End with one sentence on compliance significance (e.g. "This tightens the threshold for …").
+- Write in {language}.
+""".strip()
+
 
 @dataclass(frozen=True)
 class OllamaSettings:
@@ -725,6 +747,32 @@ class OllamaClient(BaseLLM):
         result = await self._generate_text(prompt, temperature=0)
         # Return empty string when the LLM signals no semantic change, so
         # _populate_markdown_diff_summaries can set markdownDiffSummary = None.
+        if result.strip().lower().strip("().") in self._NO_CHANGE_MARKERS:
+            return ""
+        return result
+
+    async def explain_table_diff(
+        self,
+        *,
+        old_markdown: str | None,
+        new_markdown: str | None,
+        changed_cells: list[dict],
+        change_type: str,
+        language: str = "",
+    ) -> str:
+        import json as _json
+
+        if not changed_cells and not old_markdown and not new_markdown:
+            return ""
+        lang_display = self._language_hint(language).strip() or "the same language as the source text"
+        prompt = PROMPT_TABLE_STRUCTURED_DIFF.format(
+            change_type=change_type,
+            changed_cells_json=_json.dumps(changed_cells, ensure_ascii=False, indent=2),
+            old_table=old_markdown or "(not present)",
+            new_table=new_markdown or "(not present)",
+            language=lang_display,
+        )
+        result = await self._generate_text(prompt, temperature=0)
         if result.strip().lower().strip("().") in self._NO_CHANGE_MARKERS:
             return ""
         return result

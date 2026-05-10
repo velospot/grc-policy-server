@@ -169,6 +169,14 @@ class Settings(BaseSettings):
     vllm_timeout_sec: float = 180.0
     vllm_max_retries: int = 1
 
+    opendataloader_enabled: bool = True
+    opendataloader_hybrid_url: str | None = None
+    opendataloader_timeout_sec: float = 180.0
+    opendataloader_hybrid_timeout_sec: float = 30.0
+    # "opendataloader" (default) → OPD first, docling fallback for PDFs
+    # "docling"                  → docling first, OPD fallback for PDFs
+    pdf_extractor: str = "opendataloader"
+
     opik_enabled: bool = False
     opik_url_override: str = "http://localhost:5173/api"
     opik_project_name: str = "grc-policy-server"

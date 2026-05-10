@@ -47,10 +47,11 @@ class CanonicalDocumentStore:
         document_id: str,
         filename: str,
         content_hash: str,
-        docling_json: dict[str, Any],
+        docling_json: dict[str, Any] | None,
         hierarchy: dict[str, Any],
         metadata: dict[str, Any] | None = None,
         version_id: str = "1.0",
+        opd_elements: list[dict] | None = None,
     ) -> list[CanonicalNode]:
         canonical_nodes = canonical_nodes_from_hierarchy(
             hierarchy,
@@ -70,6 +71,7 @@ class CanonicalDocumentStore:
             document_id=document_id,
             docling_json=docling_json,
             canonical_payload=payload,
+            opd_elements=opd_elements,
         )
         self._try_save_postgres(
             document_id=document_id,
@@ -119,8 +121,10 @@ class CanonicalDocumentStore:
         return {
             "documentId": doc_id,
             "rawDoclingJson": _read_json(target_dir / "raw_docling.json"),
+            "rawOpdJson": _read_json(target_dir / "raw_opd.json"),
             "normalizedTreeJson": _read_json(target_dir / "canonical_nodes.json"),
             "rawDoclingPath": str(target_dir / "raw_docling.json"),
+            "rawOpdPath": str(target_dir / "raw_opd.json"),
             "normalizedTreePath": str(target_dir / "canonical_nodes.json"),
             "hierarchyPath": str(target_dir / "hierarchy.json"),
             "hierarchyJson": _read_json(target_dir / "hierarchy.json"),
@@ -148,7 +152,7 @@ class CanonicalDocumentStore:
         filename: str,
         content_hash: str,
         version_id: str,
-        docling_json: dict[str, Any],
+        docling_json: dict[str, Any] | None,
         canonical_payload: dict[str, Any],
         nodes: list[CanonicalNode],
         metadata: dict[str, Any],
@@ -187,7 +191,7 @@ class CanonicalDocumentStore:
                         filename,
                         content_hash,
                         version_id,
-                        Jsonb(docling_json),
+                        Jsonb(docling_json or {}),
                         Jsonb(canonical_payload),
                         Jsonb(metadata),
                         now,
@@ -385,15 +389,21 @@ class CanonicalDocumentStore:
         self,
         *,
         document_id: str,
-        docling_json: dict[str, Any],
+        docling_json: dict[str, Any] | None,
         canonical_payload: dict[str, Any],
+        opd_elements: list[dict] | None = None,
     ) -> None:
         target_dir = self.upload_root / document_id
         target_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / "raw_docling.json").write_text(
-            json.dumps(docling_json, indent=2, ensure_ascii=False),
+            json.dumps(docling_json or {}, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        if opd_elements is not None:
+            (target_dir / "raw_opd.json").write_text(
+                json.dumps(opd_elements, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
         (target_dir / "canonical_nodes.json").write_text(
             json.dumps(canonical_payload, indent=2, ensure_ascii=False),
             encoding="utf-8",

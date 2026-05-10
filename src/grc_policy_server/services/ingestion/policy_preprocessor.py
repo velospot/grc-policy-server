@@ -153,7 +153,10 @@ def _should_merge(previous: ParsedChunk, current: ParsedChunk) -> bool:
         return False
     if previous.section_path != current.section_path:
         return False
-    if previous.page_number != current.page_number:
+    prev_page = previous.page_number or 0
+    curr_page = current.page_number or 0
+    # Allow same-page merge (original) OR strictly consecutive cross-page continuation
+    if not (prev_page == curr_page or curr_page == prev_page + 1):
         return False
     previous_text = previous.metadata.get("clean_text") or ""
     current_text = current.metadata.get("clean_text") or ""
