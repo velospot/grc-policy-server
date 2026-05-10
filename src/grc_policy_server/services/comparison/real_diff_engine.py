@@ -188,16 +188,29 @@ class RealDiffEngine:
             if _REFERENCE_SECTION_RE.search(section) and not _TABLE_CAPTION_NUM_RE.search(section):
                 return True
 
-            # Drop MODIFIED diffs where normalized content is identical (no semantic change)
-            if diff.changeType == "MODIFIED":
-                old_text = canonicalize_text_content(
-                    str(diff.doc1Reference.sourceText if diff.doc1Reference else diff.doc1Content or "")
-                )
-                new_text = canonicalize_text_content(
-                    str(diff.doc2Reference.sourceText if diff.doc2Reference else diff.doc2Content or "")
-                )
-                if old_text and old_text == new_text:
-                    return True
+            # Don't filter diffs that have structural changes
+            has_structural_change = any(
+                change.location == "structure" or "split" in change.text.lower() or "merge" in change.text.lower()
+                for change in (diff.changes or [])
+            )
+            if has_structural_change:
+                return False
+
+            # Drop MODIFIED diffs with identical content in the SAME section (pure cosmetic change)
+            # But keep diffs where section or location changed (semantic difference)
+            if diff.changeType == "MODIFIED" and diff.doc1Reference and diff.doc2Reference:
+                # Check if section/location is the same
+                old_section = str(diff.doc1Reference.section or "").strip()
+                new_section = str(diff.doc2Reference.section or "").strip()
+                if old_section == new_section and old_section:  # Same location, check content
+                    old_text_src = diff.doc1Reference.sourceText
+                    new_text_src = diff.doc2Reference.sourceText
+                    # Only filter if we have identical source text (purely cosmetic)
+                    if old_text_src and new_text_src:
+                        old_text = canonicalize_text_content(str(old_text_src))
+                        new_text = canonicalize_text_content(str(new_text_src))
+                        if old_text and new_text and old_text == new_text:
+                            return True
 
             return False
 
