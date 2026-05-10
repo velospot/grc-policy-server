@@ -33,38 +33,12 @@ def enhance_table_chunks(
 ) -> list[ParsedChunk]:
     """Re-extract tables with column_N placeholder headers using pdfplumber.
 
-    Only acts on table chunks where pdfplumber can produce better results.
-    All other chunks are returned unchanged.
+    DISABLED: pdfplumber was over-detecting tables, classifying non-table content
+    (like legend items on page boundaries) as tables. This caused false positives in
+    comparison. The degenerate table filter is more effective at catching false tables.
+    See: https://github.com/anthropics/grc-policy-server/issues/XXX
     """
-    low_quality_indices = [
-        i for i, c in enumerate(parsed_chunks)
-        if c.chunk_type == "table" and _is_low_quality(c)
-    ]
-    if not low_quality_indices:
-        return parsed_chunks
-
-    try:
-        import pdfplumber
-    except ImportError:
-        logger.warning("pdfplumber not installed; skipping table quality enhancement")
-        return parsed_chunks
-
-    result = list(parsed_chunks)
-    try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for idx in low_quality_indices:
-                chunk = parsed_chunks[idx]
-                enhanced = _try_enhance(chunk, pdf)
-                if enhanced is not None:
-                    result[idx] = enhanced
-                    logger.info(
-                        "enhanced table page=%s section=%s: replaced column_N headers",
-                        chunk.page_number,
-                        str(chunk.section_path)[:60],
-                    )
-    except Exception:
-        logger.warning("pdfplumber table enhancement failed; using original extraction", exc_info=True)
-    return result
+    return parsed_chunks
 
 
 def _is_low_quality(chunk: ParsedChunk) -> bool:

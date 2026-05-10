@@ -218,6 +218,34 @@ class CanonicalNode:
         }
 
 
+def filter_reference_section_tables(nodes: list[CanonicalNode]) -> list[CanonicalNode]:
+    """Remove tables from reference sections (Legende, Symbole, Abkürzungen, etc.).
+
+    These reference tables are not normative content and shouldn't appear in comparisons.
+    They're caught during ingestion but this is a safety net to catch any that slip through.
+    """
+    _REFERENCE_SECTION_RE = re.compile(
+        r"\b(legende|symbole?|abkürzung(?:en)?|definitionen?|begriffe?|inhalt"
+        r"|glossar|annex|anhang|abbreviation|legend|symbol|glossary|definition)\b",
+        re.IGNORECASE,
+    )
+    # Don't filter if there's a numbered caption ("Tabelle N")
+    _TABLE_CAPTION_NUM_RE = re.compile(r"\bTabell?e\s+\d+", re.IGNORECASE)
+
+    result = []
+    for node in nodes:
+        # Skip tables in reference sections unless they have a numbered caption
+        if node.node_type == "table":
+            section_path = " / ".join(node.heading_path) if node.heading_path else ""
+            section_lower = section_path.lower()
+            has_caption = _TABLE_CAPTION_NUM_RE.search(section_path)
+            if (_REFERENCE_SECTION_RE.search(section_lower) and not has_caption):
+                # Don't include reference-section tables in the output
+                continue
+        result.append(node)
+    return result
+
+
 def canonical_nodes_from_hierarchy(
     hierarchy: dict[str, Any],
     *,
@@ -231,7 +259,9 @@ def canonical_nodes_from_hierarchy(
         for node in nodes
         if isinstance(node, dict)
     ]
-    return merge_page_split_tables(built)
+    merged = merge_page_split_tables(built)
+    # Remove tables from reference sections (Legende, Symbole, etc.) that slipped through
+    return filter_reference_section_tables(merged)
 
 
 def merge_page_split_tables(nodes: list[CanonicalNode]) -> list[CanonicalNode]:
