@@ -95,7 +95,7 @@ class TableIdentityResolver:
         section_paths = section_paths or {}
 
         # Group candidates by similarity (same table, different pages)
-        groups = self._group_candidates_by_similarity(candidates)
+        groups = self._group_candidates_by_similarity(candidates, section_paths)
 
         identities: dict[str, TableIdentity] = {}
 
@@ -142,10 +142,16 @@ class TableIdentityResolver:
 
         return identities
 
-    def _group_candidates_by_similarity(self, candidates: list[TableCandidate]) -> list[list[TableCandidate]]:
+    def _group_candidates_by_similarity(
+        self,
+        candidates: list[TableCandidate],
+        section_paths: dict[int, list[str]] | None = None,
+    ) -> list[list[TableCandidate]]:
         """Group candidates by similarity (same table on different pages/backends)."""
         if not candidates:
             return []
+
+        section_paths = section_paths or {}
 
         # Sort by page number
         sorted_cands = sorted(candidates, key=lambda c: (c.page_number, c.bbox["x0"]))
@@ -165,8 +171,13 @@ class TableIdentityResolver:
                 if j in assigned:
                     continue
 
-                # Check if candidates are similar
-                if self._are_candidates_similar(cand, other):
+                # Check if candidates are similar (including section hierarchy)
+                cand_section = section_paths.get(cand.page_number, [])
+                other_section = section_paths.get(other.page_number, [])
+
+                if self._are_candidates_similar(
+                    cand, other, cand_section, other_section
+                ):
                     group.append(other)
                     assigned.add(j)
 
@@ -174,8 +185,30 @@ class TableIdentityResolver:
 
         return groups
 
-    def _are_candidates_similar(self, cand1: TableCandidate, cand2: TableCandidate) -> bool:
-        """Check if two candidates represent the same table."""
+    def _are_candidates_similar(
+        self,
+        cand1: TableCandidate,
+        cand2: TableCandidate,
+        section_path1: list[str] | None = None,
+        section_path2: list[str] | None = None,
+    ) -> bool:
+        """Check if two candidates represent the same table.
+
+        Priority:
+        1. Section path hierarchy (must be compatible if both have paths)
+        2. Column count (must be identical)
+        3. Column signature (Jaccard similarity >= threshold)
+        4. Page proximity (<=2 page gap)
+        5. X-position alignment (<=50pt tolerance)
+        """
+        section_path1 = section_path1 or []
+        section_path2 = section_path2 or []
+
+        # TIER 1: Section path hierarchy check
+        if section_path1 and section_path2:
+            if not self._section_hierarchies_compatible(section_path1, section_path2):
+                return False
+
         # Must have same column count
         if cand1.num_cols != cand2.num_cols:
             return False
@@ -185,7 +218,10 @@ class TableIdentityResolver:
         sig2 = cand2.column_signature()
 
         if sig1 and sig2:
-            if self._jaccard_similarity(sig1.split("|"), sig2.split("|")) < self.structure_match_threshold:
+            if (
+                self._jaccard_similarity(sig1.split("|"), sig2.split("|"))
+                < self.structure_match_threshold
+            ):
                 return False
 
         # Check if on consecutive pages (for split detection)
@@ -195,12 +231,63 @@ class TableIdentityResolver:
 
         # Check x-position similarity (should be roughly in same horizontal position)
         x_diff = abs(cand1.bbox["x0"] - cand2.bbox["x0"])
-        width_diff = abs((cand1.bbox["x1"] - cand1.bbox["x0"]) - (cand2.bbox["x1"] - cand2.bbox["x0"]))
+        width_diff = abs(
+            (cand1.bbox["x1"] - cand1.bbox["x0"]) - (cand2.bbox["x1"] - cand2.bbox["x0"])
+        )
 
         if x_diff > 50 or width_diff > 50:  # 50 points tolerance
             return False
 
         return True
+
+    def _section_hierarchies_compatible(
+        self, path1: list[str], path2: list[str], min_depth: int = 2
+    ) -> bool:
+        """Check if two section paths are hierarchically compatible.
+
+        Examples:
+        - ["Kapitel 6", "6.1", "6.1.5"] vs ["Kapitel 6", "6.1", "6.1.5"] → True (exact)
+        - ["Kapitel 6", "6.1", "6.1.5a"] vs ["Kapitel 6", "6.1", "6.1.5b"] → True (same prefix)
+        - ["Kapitel 6", "6.1"] vs ["Kapitel 6", "6.2"] → False (different parent)
+        """
+        if not path1 or not path2:
+            return True  # No path info = cannot reject
+
+        # Extract section numbers for comparison
+        nums1 = self._extract_section_numbers(path1)
+        nums2 = self._extract_section_numbers(path2)
+
+        if not nums1 or not nums2:
+            return True  # Cannot judge without section numbers
+
+        # Require at least min_depth levels for meaningful comparison
+        if len(nums1) < min_depth or len(nums2) < min_depth:
+            return True
+
+        # Check common prefix (compare all but leaf level)
+        common_depth = min(len(nums1), len(nums2)) - 1
+        if common_depth < 1:
+            return False
+
+        for i in range(common_depth):
+            if nums1[i] != nums2[i]:
+                return False
+
+        return True
+
+    @staticmethod
+    def _extract_section_numbers(section_path: list[str]) -> list[str]:
+        """Extract section numbers from paths like ['6', '6.1', '6.1.5'].
+
+        Returns list of section number strings like ['6', '6.1', '6.1.5'].
+        """
+        numbers = []
+        for segment in section_path:
+            # Extract leading numbers: "6.1.5 Messempfänger" → "6.1.5"
+            match = re.match(r"^([\d\.]+)", segment)
+            if match:
+                numbers.append(match.group(1))
+        return numbers
 
     def _is_split_continuation(self, group: list[TableCandidate]) -> bool:
         """Determine if group represents a split/continued table."""

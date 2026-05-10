@@ -29,6 +29,15 @@ class TableDiffType(str, Enum):
     MOVED = "moved"  # Section path changed
 
 
+class TableDiffImpact(str, Enum):
+    """Impact severity of table changes."""
+
+    IDENTICAL = "identical"  # No change
+    LOW = "low"  # Renumbering, section moves (content identical)
+    MEDIUM = "medium"  # Row/column additions (structure changed)
+    HIGH = "high"  # Cell content modified (data changed)
+
+
 @dataclass(frozen=True)
 class CellDiff:
     """Difference in a single cell."""
@@ -90,12 +99,14 @@ class TableDiff:
     rows_modified: int = 0
     cells_modified: int = 0
     structural_changes: list[str] = field(default_factory=list)
+    diff_impact: TableDiffImpact = TableDiffImpact.IDENTICAL
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "table_uid": self.table_uid,
             "diff_type": self.diff_type.value,
+            "impact": self.diff_impact.value,
             "row_diffs": [rd.to_dict() for rd in self.row_diffs],
             "column_changes": {
                 "added": self.column_additions,
@@ -201,6 +212,9 @@ class TableDiffEngine:
                 "new_pages": new_table.pages,
             },
         )
+
+        # Classify impact severity
+        diff.diff_impact = self._classify_diff_impact(diff)
 
         return diff
 
@@ -348,7 +362,7 @@ class TableDiffEngine:
         old_table: CanonicalTable,
         new_table: CanonicalTable,
     ) -> list[CellDiff]:
-        """Compare two rows cell-by-cell."""
+        """Compare two rows cell-by-cell, including merged cell structure."""
         cell_diffs: list[CellDiff] = []
 
         for col_idx in range(max(len(old_row.cells), len(new_row.cells))):
@@ -356,17 +370,45 @@ class TableDiffEngine:
             new_cell = next((c for c in new_row.cells if c.col == col_idx), None)
 
             if old_cell and new_cell:
-                # Both cells exist - compare
-                if not self._cells_match(old_cell.text, new_cell.text):
+                # Both cells exist - compare text and structure
+                text_changed = not self._cells_match(old_cell.text, new_cell.text)
+
+                # Check for merged cell structure changes (rowspan/colspan)
+                structure_changed = (
+                    old_cell.rowspan != new_cell.rowspan
+                    or old_cell.colspan != new_cell.colspan
+                )
+
+                if text_changed or structure_changed:
+                    metadata = {}
+                    if structure_changed:
+                        metadata["rowspan_old"] = old_cell.rowspan
+                        metadata["rowspan_new"] = new_cell.rowspan
+                        metadata["colspan_old"] = old_cell.colspan
+                        metadata["colspan_new"] = new_cell.colspan
+
+                    change_type = (
+                        "merged_cell_changed" if structure_changed else "modified"
+                    )
+
                     cell_diffs.append(
                         CellDiff(
                             row=old_row.row_number,
                             col=col_idx,
                             old_value=old_cell.text,
                             new_value=new_cell.text,
-                            change_type="modified",
+                            change_type=change_type,
+                            metadata=metadata,
                         )
                     )
+
+                # Recursively compare nested tables if present
+                if old_cell.children or new_cell.children:
+                    nested_diffs = self._compare_nested_tables(
+                        old_cell.children, new_cell.children
+                    )
+                    cell_diffs.extend(nested_diffs)
+
             elif new_cell and not old_cell:
                 # Cell added (column added or cell content added)
                 cell_diffs.append(
@@ -391,6 +433,43 @@ class TableDiffEngine:
                 )
 
         return cell_diffs
+
+    def _compare_nested_tables(
+        self,
+        old_nested: list[CanonicalTable],
+        new_nested: list[CanonicalTable],
+    ) -> list[CellDiff]:
+        """Recursively compare nested tables in cells."""
+        nested_diffs: list[CellDiff] = []
+
+        # Match nested tables by UID
+        old_by_uid = {t.table_uid: t for t in old_nested}
+        new_by_uid = {t.table_uid: t for t in new_nested}
+
+        # Direct UID matches
+        for uid, old_nested_table in old_by_uid.items():
+            if uid in new_by_uid:
+                new_nested_table = new_by_uid[uid]
+                nested_table_diff = self.diff_tables(old_nested_table, new_nested_table)
+
+                # Convert TableDiff to CellDiff representation
+                if nested_table_diff.diff_type != TableDiffType.IDENTICAL:
+                    nested_diffs.append(
+                        CellDiff(
+                            row=-1,  # Special marker for nested table diff
+                            col=-1,
+                            old_value=f"<nested table: {uid}>",
+                            new_value=f"<nested table modified>",
+                            change_type="nested_table_changed",
+                            metadata={
+                                "nested_table_uid": uid,
+                                "nested_diff_type": nested_table_diff.diff_type.value,
+                                "nested_impact": nested_table_diff.diff_impact.value,
+                            },
+                        )
+                    )
+
+        return nested_diffs
 
     def _determine_diff_type(
         self,
@@ -434,6 +513,47 @@ class TableDiffEngine:
             return TableDiffType.CELL_CHANGED
 
         return TableDiffType.IDENTICAL
+
+    def _classify_diff_impact(self, diff: TableDiff) -> TableDiffImpact:
+        """Classify impact severity of table diff.
+
+        Returns:
+            TableDiffImpact: IDENTICAL, LOW, MEDIUM, or HIGH
+        """
+        if diff.diff_type == TableDiffType.IDENTICAL:
+            return TableDiffImpact.IDENTICAL
+
+        # Check if content is identical (no cell modifications)
+        content_identical = diff.cells_modified == 0 and diff.rows_modified == 0
+
+        # Check if only caption/section changed
+        structural_only = (
+            diff.rows_added == 0
+            and diff.rows_removed == 0
+            and len(diff.column_additions) == 0
+            and len(diff.column_removals) == 0
+        )
+
+        # LOW impact: Content identical but numbering/caption/section changed
+        if content_identical and structural_only:
+            structural_changes_set = set(diff.structural_changes)
+            # Only caption and/or section changes, no other structural changes
+            if structural_changes_set <= {"caption_changed", "moved_section"}:
+                return TableDiffImpact.LOW
+
+        # MEDIUM impact: Structure changed but content mostly preserved
+        if (diff.rows_added > 0 or diff.rows_removed > 0) and diff.cells_modified < 5:
+            return TableDiffImpact.MEDIUM
+
+        # HIGH impact: Content modified or major restructuring
+        if diff.cells_modified > 0 or diff.rows_modified > 0:
+            return TableDiffImpact.HIGH
+
+        # Fallback based on diff type
+        if diff.diff_type in (TableDiffType.COLUMN_CHANGED, TableDiffType.ROW_CHANGED):
+            return TableDiffImpact.MEDIUM
+
+        return TableDiffImpact.HIGH
 
     @staticmethod
     def _cells_match(old_text: str, new_text: str) -> bool:

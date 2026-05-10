@@ -107,6 +107,9 @@ def _try_enhance(chunk: ParsedChunk, pdf: Any) -> ParsedChunk | None:
 
 
 _MAX_HEADER_LEN_FOR_REAL_TABLE = 80
+_MIN_TABLE_ROWS = 2
+_MIN_TABLE_COLS = 2
+_MIN_CELL_FILL_PERCENT = 40  # Tables must be at least 40% filled with cells
 
 
 def filter_degenerate_table_chunks(chunks: list[ParsedChunk]) -> list[ParsedChunk]:
@@ -124,6 +127,63 @@ def filter_degenerate_table_chunks(chunks: list[ParsedChunk]) -> list[ParsedChun
     return result
 
 
+def _validate_table_structure(chunk: ParsedChunk) -> bool:
+    """Check if chunk has minimal table structure (not sparse/list-like).
+
+    Returns:
+        True if table has valid structure, False if sparse/list-like.
+    """
+    ts = chunk.metadata.get("table_structure") or {}
+    num_rows = int(ts.get("num_rows") or 0)
+    num_cols = int(ts.get("num_cols") or 0)
+
+    # Must have minimum dimensions
+    if num_rows < _MIN_TABLE_ROWS or num_cols < _MIN_TABLE_COLS:
+        return False
+
+    # Check cell density: actual cells / (rows × cols)
+    cells = chunk.metadata.get("table_cells") or []
+    expected_cells = num_rows * num_cols
+    cell_fill_percent = (len(cells) / expected_cells * 100) if expected_cells > 0 else 0
+
+    if cell_fill_percent < _MIN_CELL_FILL_PERCENT:
+        return False  # Sparse table, likely a list
+
+    return True
+
+
+def _is_list_like_table(chunk: ParsedChunk) -> bool:
+    """Detect if table structure is actually a numbered/bulleted list.
+
+    Returns:
+        True if content appears list-like, False if it appears table-like.
+    """
+    cells = chunk.metadata.get("table_cells") or []
+    if not cells:
+        return False
+
+    # Pattern: First column contains numbers/bullets (5.4.4.2.1, •, -, →, etc.)
+    list_marker_pattern = re.compile(r"^[\d\s\.\-•\*\→]+$")
+    first_col_cells = [c for c in cells if c.get("col") == 0]
+
+    # If most cells in first column match list patterns, it's list-like
+    if first_col_cells:
+        matching = sum(
+            1
+            for c in first_col_cells
+            if list_marker_pattern.match(str(c.get("text", "")))
+        )
+        if len(first_col_cells) > 0 and matching / len(first_col_cells) >= 0.7:
+            return True
+
+    # Pattern: Table has only 1-2 real columns, rest are empty
+    non_empty_cols = {c.get("col") for c in cells if c.get("text", "").strip()}
+    if len(non_empty_cols) <= 2:
+        return True
+
+    return False
+
+
 def _is_degenerate_table(chunk: ParsedChunk) -> bool:
     ts = chunk.metadata.get("table_structure") or {}
     num_cols = int(ts.get("num_cols") or 0)
@@ -137,6 +197,14 @@ def _is_degenerate_table(chunk: ParsedChunk) -> bool:
     # Tables in reference sections (Legende, Symbole, Abkürzungen, Definitionen …)
     # without a numbered caption are key-value lists, not normative tables.
     if _REFERENCE_SECTION_RE.search(section):
+        return True
+
+    # NEW: Structural validation - reject sparse/minimal tables
+    if not _validate_table_structure(chunk):
+        return True
+
+    # NEW: Content heuristics - detect list-like patterns
+    if _is_list_like_table(chunk):
         return True
 
     # Single-column table whose header reads like a sentence (not a column label)
