@@ -711,22 +711,25 @@ class ClauseMatcher:
         return SequenceMatcher(None, left_title, right_title).ratio()
 
     def _table_score(self, left: dict, right: dict) -> float:
-        """Compute similarity score for tables.
+        """Compute similarity score for tables with lenient handling of structural changes.
 
-        Matching is a two-step process that mirrors the overall comparison
-        strategy: first check whether the tables *refer to the same subject*
-        (title similarity), then measure how much of the actual content
-        (cells, structure) changed.
+        Matching uses multiple strategies:
+        1. Title/caption similarity (subject-level match)
+        2. Cell content similarity (Jaccard set-based, ignoring row position shifts)
+        3. Column structure preservation (schema signature match)
+        4. Dimension similarity (handles added/removed rows gracefully)
+
+        Table numbers can change (Tabelle 3 → Tabelle 5) without affecting match,
+        as long as content is highly similar. This handles cases where:
+        - Table captions are renumbered in a revision
+        - Rows are added/removed but column structure is preserved
+        - Cell content is modified but table structure remains
 
         Caption-row normalisation: some PDF extractors embed the table caption
         as a spanning row 0 rather than as an external title.  We detect and
         strip such rows before comparing cell grids and dimensions so that a
         table with an embedded caption is treated identically to one where the
         caption is stored externally.
-
-        When tables have different section numbers or depths the title
-        normalization strips the numeric prefix so "Table 3: Risk Matrix" and
-        "Table 5: Risk Matrix" still receive a high title score.
         """
         # Normalise cells – strip caption rows and re-index remaining rows.
         left_cells_norm = self._normalize_cells_for_comparison(left)
@@ -841,7 +844,7 @@ class ClauseMatcher:
 
         if has_title:
             if title_score >= 0.85:  # type: ignore[operator]
-                return (
+                base_with_title_match = (
                     0.40 * title_score  # type: ignore[operator]
                     + 0.30 * cell_score
                     + 0.10 * dim_score
@@ -849,7 +852,9 @@ class ClauseMatcher:
                     + 0.07 * schema_score
                     + 0.05 * row_fp_score
                 )
-            return (
+                return base_with_title_match
+
+            base_with_title_low = (
                 0.20 * title_score  # type: ignore[operator]
                 + 0.35 * cell_score
                 + 0.15 * dim_score
@@ -858,14 +863,33 @@ class ClauseMatcher:
                 + 0.10 * row_fp_score
             )
 
+            # Fallback: If titles differ but cell content is very similar (>0.75),
+            # consider it a table modification (name/number change, added rows, etc.)
+            # rather than a different table. This handles cases like:
+            # - "Tabelle 3: Risk Matrix" → "Tabelle 5: Risk Matrix" (renumbering)
+            # - Same table with added/removed rows
+            if cell_score > 0.75 and schema_score > 0.5:
+                return max(base_with_title_low, 0.68)
+
+            return base_with_title_low
+
         # No title available – fall back to structure-only weights.
-        return (
+        base_score = (
             0.20 * dim_score
             + 0.45 * cell_score
             + 0.15 * text_score
             + 0.10 * schema_score
             + 0.10 * row_fp_score
         )
+
+        # Fallback: If cell content is very similar (Jaccard >0.75), match tables even if
+        # dimension or name changed. This handles tables with added/removed rows that are
+        # still fundamentally the same table.
+        if base_score < 0.65 and cell_score > 0.75:
+            # High cell content similarity overrides dimension/name differences
+            return max(base_score, 0.65)
+
+        return base_score
 
     def _table_text_score(self, left: dict, right: dict) -> float:
         """Compute text-based similarity for tables (fallback when no structure)."""
