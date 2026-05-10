@@ -164,28 +164,49 @@ class RealDiffEngine:
             )
         diffs = [self._key_difference_from_record(record) for record in change_records]
 
-        # Filter reference-section diffs and their corresponding change_records together
+        # Filter non-semantic diffs and their corresponding change_records together
         # to avoid pairing mismatches after filtering
         import re
+        from grc_policy_server.services.comparison.diff_postprocessor import canonicalize_text_content
+
         _REFERENCE_SECTION_RE = re.compile(
             r"\b(legende|symbole?|abkürzung(?:en)?|definitionen?|begriffe?|inhalt"
             r"|glossar|annex|anhang|abbreviation|legend|symbol|glossary|definition)\b",
             re.IGNORECASE,
         )
         _TABLE_CAPTION_NUM_RE = re.compile(r"\bTabell?e\s+\d+", re.IGNORECASE)
-        filtered_diffs = []
-        filtered_records = []
-        for diff, record in zip(diffs, change_records):
+
+        def _should_filter_diff(diff: KeyDifference) -> bool:
+            """Return True if diff should be filtered out (non-semantic)."""
             section = str(diff.section or "")
             if not section and diff.doc1Reference:
                 section = str(diff.doc1Reference.section or "")
             if not section and diff.doc2Reference:
                 section = str(diff.doc2Reference.section or "")
+
             # Drop reference-section diffs unless they have a numbered caption
             if _REFERENCE_SECTION_RE.search(section) and not _TABLE_CAPTION_NUM_RE.search(section):
-                continue
-            filtered_diffs.append(diff)
-            filtered_records.append(record)
+                return True
+
+            # Drop MODIFIED diffs where normalized content is identical (no semantic change)
+            if diff.changeType == "MODIFIED":
+                old_text = canonicalize_text_content(
+                    str(diff.doc1Reference.sourceText if diff.doc1Reference else diff.doc1Content or "")
+                )
+                new_text = canonicalize_text_content(
+                    str(diff.doc2Reference.sourceText if diff.doc2Reference else diff.doc2Content or "")
+                )
+                if old_text and old_text == new_text:
+                    return True
+
+            return False
+
+        filtered_diffs = []
+        filtered_records = []
+        for diff, record in zip(diffs, change_records):
+            if not _should_filter_diff(diff):
+                filtered_diffs.append(diff)
+                filtered_records.append(record)
         diffs = filtered_diffs
         change_records = filtered_records
 
