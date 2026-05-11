@@ -563,6 +563,168 @@ class TableDiffEngine:
         new_norm = " ".join(str(new_text).split())
         return old_norm.lower() == new_norm.lower()
 
+    def compare_table_json(
+        self,
+        old_json: dict[str, Any],
+        new_json: dict[str, Any],
+    ) -> TableDiff:
+        """Compare tables using their JSON representations.
+
+        This method provides JSON-based comparison that preserves full structural
+        information (rowspan/colspan, nested tables, cell types, formatting).
+
+        Args:
+            old_json: Canonical table JSON from table.to_dict()
+            new_json: Canonical table JSON from table.to_dict()
+
+        Returns:
+            TableDiff with granular change information
+        """
+        # Extract table UIDs
+        old_uid = old_json.get("table_uid", "unknown")
+        new_uid = new_json.get("table_uid", "unknown")
+
+        # Extract dimensions
+        old_dims = old_json.get("dimensions", {})
+        new_dims = new_json.get("dimensions", {})
+        old_rows = old_json.get("rows", [])
+        new_rows = new_json.get("rows", [])
+
+        # Extract structural info
+        old_section = old_json.get("section_path", [])
+        new_section = new_json.get("section_path", [])
+        old_caption = old_json.get("caption_normalized", "")
+        new_caption = new_json.get("caption_normalized", "")
+
+        # Compute similarity using JSON structure
+        old_json_str = str(sorted(old_json.items()))
+        new_json_str = str(sorted(new_json.items()))
+        similarity = self._compute_json_similarity(old_json_str, new_json_str)
+
+        # Detect structural changes
+        structural_changes = []
+        if old_section != new_section:
+            structural_changes.append("moved_section")
+        if old_caption != new_caption:
+            structural_changes.append("caption_changed")
+        if old_dims.get("num_cols") != new_dims.get("num_cols"):
+            structural_changes.append("columns_changed")
+        if old_json.get("split_info", {}).get("is_split") != new_json.get("split_info", {}).get("is_split"):
+            structural_changes.append("split_status_changed")
+
+        # Compare rows
+        rows_added = max(0, len(new_rows) - len(old_rows))
+        rows_removed = max(0, len(old_rows) - len(new_rows))
+
+        # Count modified rows by comparing row JSONs
+        rows_modified = 0
+        for i, (old_row_json, new_row_json) in enumerate(
+            zip(old_rows, new_rows)
+        ):
+            if old_row_json != new_row_json:
+                rows_modified += 1
+
+        # Count modified cells by comparing row-by-row
+        cells_modified = 0
+        for old_row_json, new_row_json in zip(old_rows, new_rows):
+            old_cells = old_row_json.get("cells", [])
+            new_cells = new_row_json.get("cells", [])
+            for old_cell, new_cell in zip(old_cells, new_cells):
+                if old_cell != new_cell:
+                    cells_modified += 1
+
+        # Determine diff type
+        diff_type = self._determine_diff_type(
+            similarity=similarity,
+            column_additions=[],
+            column_removals=[],
+            structural_changes=structural_changes,
+            row_changes={"rows_added": rows_added, "rows_removed": rows_removed},
+            rows_added=rows_added,
+            rows_removed=rows_removed,
+            rows_modified=rows_modified,
+        )
+
+        # Create table diff
+        diff = TableDiff(
+            table_uid=old_uid if old_uid != "unknown" else new_uid,
+            diff_type=diff_type,
+            old_table=None,  # JSON-based, no table objects
+            new_table=None,
+            row_diffs=[],  # Would need to reconstruct from JSON
+            similarity_score=similarity,
+            rows_added=rows_added,
+            rows_removed=rows_removed,
+            rows_modified=rows_modified,
+            cells_modified=cells_modified,
+            structural_changes=structural_changes,
+            metadata={
+                "comparison_method": "json_based",
+                "old_rows": len(old_rows),
+                "new_rows": len(new_rows),
+            },
+        )
+
+        # Classify impact
+        diff.diff_impact = self._classify_json_diff_impact(diff)
+        return diff
+
+    @staticmethod
+    def _compute_json_similarity(old_str: str, new_str: str) -> float:
+        """Compute similarity between two JSON string representations.
+
+        Uses simple character-level comparison as a heuristic.
+
+        Args:
+            old_str: String representation of old JSON
+            new_str: String representation of new JSON
+
+        Returns:
+            Similarity score between 0.0 and 1.0
+        """
+        # Simple approach: count matching characters
+        if not old_str or not new_str:
+            return 0.0
+
+        matches = sum(
+            1 for o, n in zip(old_str, new_str) if o == n
+        )
+        max_len = max(len(old_str), len(new_str))
+        return matches / max_len if max_len > 0 else 0.0
+
+    @staticmethod
+    def _classify_json_diff_impact(diff: TableDiff) -> TableDiffImpact:
+        """Classify impact severity using JSON diff information.
+
+        Args:
+            diff: TableDiff computed from JSON comparison
+
+        Returns:
+            TableDiffImpact severity level
+        """
+        if diff.diff_type == TableDiffType.IDENTICAL:
+            return TableDiffImpact.IDENTICAL
+
+        # Check if only structural metadata changed
+        content_identical = diff.cells_modified == 0 and diff.rows_modified == 0
+        structural_only = (
+            diff.rows_added == 0
+            and diff.rows_removed == 0
+        )
+
+        # LOW impact: content identical, only metadata/numbering changed
+        if content_identical and structural_only:
+            changes_set = set(diff.structural_changes)
+            if changes_set <= {"caption_changed", "moved_section"}:
+                return TableDiffImpact.LOW
+
+        # MEDIUM impact: structure changed but <5 cell modifications
+        if diff.cells_modified < 5:
+            return TableDiffImpact.MEDIUM
+
+        # HIGH impact: significant content changes
+        return TableDiffImpact.HIGH
+
 
 class TableMatchingEngine:
     """Match old and new tables for comparison."""

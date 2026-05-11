@@ -309,6 +309,19 @@ class CanonicalTable:
 
         return "\n".join(lines)
 
+    def to_json(self) -> str:
+        """Export table to JSON string with full structure information.
+
+        Includes cell structure (rowspan/colspan), nested tables, cell types,
+        formatting metadata, and section path + table_uid for identity.
+
+        Returns:
+            JSON string representation of canonical table
+        """
+        import json
+
+        return json.dumps(self.to_dict(), indent=2, default=str)
+
     @staticmethod
     def _escape_html(text: str) -> str:
         """Escape HTML special characters."""

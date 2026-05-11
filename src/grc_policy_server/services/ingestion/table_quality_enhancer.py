@@ -233,3 +233,233 @@ def _rows_to_cells(rows: list[list[str | None]]) -> list[dict]:
                 "is_header": row_idx == 0,
             })
     return cells
+
+
+async def hybrid_extract_tables_async(
+    pdf_bytes: bytes,
+    parsed_chunks: list[ParsedChunk],
+) -> list[ParsedChunk]:
+    """Enhance table extraction using ensemble approach with Docling as primary.
+
+    Strategy:
+    1. Keep Docling extraction for section hierarchy preservation
+    2. Use TableExtractorEnsemble as fallback for accuracy improvement
+    3. Replace Docling table chunks with ensemble results if quality improves
+    4. Return enhanced chunks with best extraction from either source
+
+    Args:
+        pdf_bytes: PDF content as bytes
+        parsed_chunks: Chunks from Docling extraction
+
+    Returns:
+        List of enhanced ParsedChunk objects with improved table extractions
+    """
+    try:
+        import tempfile
+        from pathlib import Path
+
+        from grc_policy_server.services.ingestion.table_extraction_ensemble import (
+            TableExtractorEnsemble,
+        )
+
+        # Write PDF to temp file (required by ensemble API)
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+
+        try:
+            # Extract with ensemble
+            ensemble = TableExtractorEnsemble()
+            candidates = await ensemble.extract_tables(tmp_path)
+
+            if not candidates:
+                logger.debug("Ensemble extraction found no tables, using Docling only")
+                return parsed_chunks
+
+            logger.info(f"Ensemble extracted {len(candidates)} candidate tables")
+
+            # Build page-to-section-path mapping from Docling chunks
+            page_to_section: dict[int, str] = {}
+            docling_tables: dict[int, ParsedChunk] = {}  # page -> Docling table chunk
+
+            for chunk in parsed_chunks:
+                if chunk.chunk_type == "table" and chunk.page_number is not None:
+                    section = str(chunk.section_path or "")
+                    page_to_section[chunk.page_number] = section
+                    docling_tables[chunk.page_number] = chunk
+
+            # Match and enhance Docling tables with ensemble results
+            enhanced = list(parsed_chunks)
+            matched_pages = set()
+
+            for candidate in candidates:
+                page = candidate.page_number
+                if page not in docling_tables:
+                    logger.debug(
+                        f"Ensemble found table on page {page} not in Docling, skipping"
+                    )
+                    continue
+
+                matched_pages.add(page)
+                docling_chunk = docling_tables[page]
+
+                # Check if ensemble result is better quality
+                if _is_ensemble_better(docling_chunk, candidate):
+                    # Replace Docling chunk with ensemble-enhanced version
+                    enhanced_chunk = _apply_ensemble_enhancement(docling_chunk, candidate)
+                    # Find and replace in enhanced list
+                    for i, chunk in enumerate(enhanced):
+                        if chunk is docling_chunk:
+                            enhanced[i] = enhanced_chunk
+                            logger.info(
+                                f"Enhanced table on page {page} with ensemble result"
+                            )
+                            break
+
+            return enhanced
+
+        finally:
+            # Clean up temp file
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.warning(f"Hybrid extraction failed, using Docling only: {e}")
+        return parsed_chunks
+
+
+def _is_ensemble_better(docling_chunk: ParsedChunk, candidate: Any) -> bool:
+    """Check if ensemble candidate is better quality than Docling extraction.
+
+    Quality criteria:
+    - Confidence > 0.7
+    - Most headers are real (not column_N)
+    - Valid table structure (>= 2 rows and cols)
+
+    Args:
+        docling_chunk: Original Docling table chunk
+        candidate: Ensemble TableCandidate
+
+    Returns:
+        True if ensemble result should replace Docling
+    """
+    # Low confidence threshold
+    if candidate.confidence < 0.7:
+        return False
+
+    # Check header quality
+    real_headers = sum(1 for h in candidate.headers if not str(h).startswith("column_"))
+    if not candidate.headers or real_headers / len(candidate.headers) < 0.5:
+        return False
+
+    # Ensure minimum structure
+    if candidate.num_rows < 2 or candidate.num_cols < 2:
+        return False
+
+    # Don't replace already good Docling extractions
+    docling_headers = docling_chunk.metadata.get("table_headers") or []
+    if docling_headers:
+        docling_real = sum(
+            1 for h in docling_headers if not str(h).startswith("column_")
+        )
+        if docling_real == len(docling_headers):
+            # Docling has perfect headers, keep it
+            return False
+
+    return True
+
+
+def _apply_ensemble_enhancement(
+    docling_chunk: ParsedChunk,
+    candidate: Any,
+) -> ParsedChunk:
+    """Apply ensemble extraction as enhancement to Docling chunk.
+
+    Updates table metadata with ensemble results while preserving section context.
+
+    Args:
+        docling_chunk: Original Docling ParsedChunk
+        candidate: Ensemble TableCandidate with improved extraction
+
+    Returns:
+        Enhanced ParsedChunk with ensemble table data
+    """
+    # Convert candidate cells to normalized format
+    cells = [
+        {
+            "row": c.get("row", 0),
+            "col": c.get("col", 0),
+            "text": c.get("text", "").strip(),
+            "rowspan": c.get("rowspan", 1),
+            "colspan": c.get("colspan", 1),
+            "is_header": c.get("is_header", False),
+        }
+        for c in candidate.cells
+    ]
+
+    normalized = normalize_table_cells(cells)
+    headers, header_depth = extract_headers_from_cells(normalized, candidate.num_cols)
+
+    # Build rows
+    rows = rows_from_cells(normalized, headers, header_depth=header_depth)
+    sig = schema_signature(headers)
+    row_fps = [r["row_fingerprint"] for r in rows]
+
+    # Create markdown representation
+    md_lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        md_lines.append(
+            "| " + " | ".join(str(row["row_data"].get(h, "")) for h in headers) + " |"
+        )
+    markdown = "\n".join(md_lines)
+
+    clean_text = table_text_projection("", headers, [r["row_data"] for r in rows])
+
+    # Update metadata
+    new_metadata = dict(docling_chunk.metadata)
+    new_metadata["table_structure"] = {
+        "num_rows": len(rows),
+        "num_cols": candidate.num_cols,
+        "cells": normalized,
+    }
+    new_metadata["table_headers"] = headers
+    new_metadata["table_header_depth"] = header_depth
+    new_metadata["table_schema_signature"] = sig
+    new_metadata["table_row_fingerprints"] = row_fps
+    new_metadata["table_markdown"] = markdown
+    new_metadata["table_clean_text"] = clean_text
+    new_metadata["table_extraction_source"] = "ensemble"
+    new_metadata["extraction_backend"] = candidate.backend_name
+    new_metadata["extraction_confidence"] = candidate.confidence
+
+    return replace(
+        docling_chunk,
+        text=markdown,
+        markdown_text=markdown,
+        metadata=new_metadata,
+    )
+
+
+def _run_async_hybrid_extract(pdf_bytes: bytes, parsed_chunks: list[ParsedChunk]) -> list[ParsedChunk]:
+    """Sync wrapper for async hybrid_extract_tables_async.
+
+    This wrapper is used when called via asyncio.to_thread() from an async context.
+    """
+    import asyncio
+    try:
+        # Try to get existing event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Can't use run_until_complete on a running loop
+            # Fall back to Docling only
+            logger.debug("Hybrid extraction not available in running loop context")
+            return parsed_chunks
+        return loop.run_until_complete(hybrid_extract_tables_async(pdf_bytes, parsed_chunks))
+    except RuntimeError:
+        # No event loop, create new one
+        return asyncio.run(hybrid_extract_tables_async(pdf_bytes, parsed_chunks))
