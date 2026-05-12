@@ -162,6 +162,76 @@ def rows_from_cells(
     return rows
 
 
+def enrich_table_with_facts(table: Any) -> None:
+    """Populate NormalizedFact objects and semantic_key on each TableCell in-place.
+
+    Also stores the detected EMC test type in table.metadata["emc_test_type"].
+    This is a post-normalization pass — the table must already have canonical cells.
+
+    Args:
+        table: CanonicalTable instance (typed as Any to avoid circular imports at
+               module level; the function handles missing attributes gracefully)
+    """
+    try:
+        from grc_policy_server.services.ingestion.ontology.column_mapper import map_header
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import (
+            EMCTestClassifier,
+            NormalizedFactExtractor,
+        )
+    except ImportError:
+        return  # Ontology module not available — skip enrichment silently
+
+    extractor = NormalizedFactExtractor()
+    classifier = EMCTestClassifier()
+
+    caption = getattr(table, "caption_original", "") or getattr(table, "caption_normalized", "") or ""
+    columns = getattr(table, "columns", []) or []
+    headers = [getattr(c, "name", "") for c in columns]
+    section_path = getattr(table, "section_path", []) or []
+    table_uid = getattr(table, "table_uid", "") or ""
+
+    # Detect test type
+    test_type = classifier.classify_table(caption, headers)
+    if test_type.value == "unknown" and section_path:
+        test_type = classifier.classify_from_section_path(section_path)
+
+    # Store on metadata (metadata is a mutable dict on CanonicalTable)
+    meta = getattr(table, "metadata", {})
+    if isinstance(meta, dict):
+        meta["emc_test_type"] = test_type.value
+
+    # Build column index → entity type map
+    col_entity_map: dict[int, str] = {}
+    for col in columns:
+        entity = map_header(getattr(col, "name", ""))
+        if entity is not None:
+            col_entity_map[getattr(col, "index", 0)] = entity.value
+
+    # Enrich each cell
+    rows = getattr(table, "rows", []) or []
+    for row in rows:
+        cells = getattr(row, "cells", []) or []
+        for cell in cells:
+            col_idx = getattr(cell, "col", 0)
+            entity_type_str = col_entity_map.get(col_idx)
+            col_name = ""
+            if col_idx < len(columns):
+                col_name = getattr(columns[col_idx], "name", "")
+
+            cell_text = getattr(cell, "text", "") or ""
+            facts = extractor.extract_from_cell(
+                cell_text,
+                column_name=col_name,
+                owner_object_id=table_uid,
+            )
+            if facts:
+                cell.normalized_facts = facts
+
+            # Populate semantic_key from entity type
+            if entity_type_str and not getattr(cell, "semantic_key", ""):
+                cell.semantic_key = entity_type_str
+
+
 def table_text_projection(
     table_title: str,
     headers: list[str],

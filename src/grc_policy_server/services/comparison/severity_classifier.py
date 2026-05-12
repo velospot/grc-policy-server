@@ -79,10 +79,49 @@ EXTENSIBILITY
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Literal, Protocol, runtime_checkable
 
 ChangeType = Literal["ADDED", "REMOVED", "MODIFIED"]
 Severity = Literal["low", "medium", "high"]
+
+
+class SeverityReasonCode(str, Enum):
+    """Structured reason codes for severity classification — machine-readable audit trail."""
+
+    OBLIGATION_STRENGTHENED = "OBLIGATION_STRENGTHENED"
+    OBLIGATION_WEAKENED = "OBLIGATION_WEAKENED"
+    TEST_LEVEL_CHANGED = "TEST_LEVEL_CHANGED"
+    NUMERIC_LIMIT_CHANGED = "NUMERIC_LIMIT_CHANGED"
+    FREQUENCY_RANGE_CHANGED = "FREQUENCY_RANGE_CHANGED"
+    ACCEPTANCE_CRITERION_CHANGED = "ACCEPTANCE_CRITERION_CHANGED"
+    TEST_METHOD_CHANGED = "TEST_METHOD_CHANGED"
+    SCOPE_BROADENED = "SCOPE_BROADENED"
+    SCOPE_NARROWED = "SCOPE_NARROWED"
+    NORMATIVE_FOOTNOTE_CHANGED = "NORMATIVE_FOOTNOTE_CHANGED"
+    EVIDENCE_MAY_BE_INVALIDATED = "EVIDENCE_MAY_BE_INVALIDATED"
+    CROSS_REFERENCE_CHANGED = "CROSS_REFERENCE_CHANGED"
+    PRESENTATION_ONLY = "PRESENTATION_ONLY"
+
+
+class SemanticImpact(str, Enum):
+    """Impact category for a change — more granular than severity."""
+
+    NONE = "none"
+    EDITORIAL = "editorial"
+    STRUCTURAL = "structural"
+    SEMANTIC = "semantic"
+    TECHNICAL = "technical"
+    NORMATIVE = "normative"
+    SCOPE = "scope"
+
+
+class AuditDisposition(str, Enum):
+    """Routing decision for downstream audit/review workflows."""
+
+    AUTO_CLASSIFIED = "auto_classified"
+    REQUIRES_HUMAN_REVIEW = "requires_human_review"
+    ESCALATED = "escalated"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -122,19 +161,30 @@ class ClassificationContext:
     cosmetic_change: bool = False
     reference_number_only_change: bool = False
     formatting_only_change: bool = False
+    # Ontology-backed enrichment fields (populated by Phase C ontology module)
+    normalized_facts: list[dict[str, Any]] = field(default_factory=list)
+    ontology_entity_type: str = ""  # e.g. "FieldStrength", "FrequencyRange", "EmissionLimit"
 
 
 @dataclass(frozen=True)
 class ClassificationResult:
     """Verdict produced by the rule engine.
 
-    severity   One of: low | medium | high  (never "critical").
-    reasons    Informational tags — useful for debugging and trace payloads.
-    impact     Capitalised severity string for the API response `impact` field.
+    severity              One of: low | medium | high  (never "critical").
+    reasons               Informational tags — useful for debugging and trace payloads.
+    impact                Capitalised severity string for the API response `impact` field.
+    semantic_impact       Fine-grained impact category (none/editorial/structural/…).
+    severity_reason_codes Structured reason codes for audit-grade reports.
+    severity_confidence   Classifier confidence in [0, 1].
+    audit_disposition     Routing hint for review workflows.
     """
 
     severity: Severity
     reasons: list[str] = field(default_factory=list)
+    semantic_impact: SemanticImpact = SemanticImpact.NONE
+    severity_reason_codes: list[SeverityReasonCode] = field(default_factory=list)
+    severity_confidence: float = 1.0
+    audit_disposition: AuditDisposition = AuditDisposition.AUTO_CLASSIFIED
 
     @property
     def impact(self) -> str:
@@ -367,6 +417,114 @@ class ContentSignalRule:
         return None
 
 
+_DOMAIN_ENTITY_MAP: dict[str, tuple[SeverityReasonCode, SemanticImpact]] = {
+    "FieldStrength":        (SeverityReasonCode.TEST_LEVEL_CHANGED,            SemanticImpact.TECHNICAL),
+    "FrequencyRange":       (SeverityReasonCode.FREQUENCY_RANGE_CHANGED,       SemanticImpact.TECHNICAL),
+    "EmissionLimit":        (SeverityReasonCode.NUMERIC_LIMIT_CHANGED,         SemanticImpact.TECHNICAL),
+    "ImmunityLevel":        (SeverityReasonCode.TEST_LEVEL_CHANGED,            SemanticImpact.TECHNICAL),
+    "AcceptanceCriterion":  (SeverityReasonCode.ACCEPTANCE_CRITERION_CHANGED,  SemanticImpact.NORMATIVE),
+    "TestMethod":           (SeverityReasonCode.TEST_METHOD_CHANGED,           SemanticImpact.TECHNICAL),
+    "NormativeTerm":        (SeverityReasonCode.OBLIGATION_STRENGTHENED,       SemanticImpact.NORMATIVE),
+}
+
+
+class DomainEntityRule:
+    """Rule 9.1 — Ontology entity changed → HIGH with structured reason code.
+
+    Fires when `ctx.ontology_entity_type` identifies a known EMC domain entity
+    (FieldStrength, FrequencyRange, EmissionLimit, etc.).  These changes are
+    deterministically high severity because the underlying test parameter changed.
+
+    Inert until Phase C populates `ontology_entity_type` — no effect on existing
+    behaviour when the field is empty.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if not ctx.ontology_entity_type:
+            return None
+        entry = _DOMAIN_ENTITY_MAP.get(ctx.ontology_entity_type)
+        if entry is None:
+            return None
+        reason_code, impact = entry
+        return ClassificationResult(
+            severity="high",
+            reasons=_collect_reasons(ctx) + [reason_code.value],
+            semantic_impact=impact,
+            severity_reason_codes=[reason_code, SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED],
+            severity_confidence=0.95,
+            audit_disposition=AuditDisposition.ESCALATED,
+        )
+
+
+class NormativeObligationEscalationRule:
+    """Rule 9.2 — Obligation weakened → MEDIUM with audit routing.
+
+    Fires when a requirement verb change has direction "weakened", enriching the
+    result with `OBLIGATION_WEAKENED` reason code and `REQUIRES_HUMAN_REVIEW`
+    disposition.  Severity stays MEDIUM (obligation changes are review-relevant
+    but not automatically high without knowing domain context).
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if (
+            ctx.requirement_verb_change
+            and ctx.requirement_verb_change.get("direction") == "weakened"
+        ):
+            return ClassificationResult(
+                severity="medium",
+                reasons=_collect_reasons(ctx),
+                semantic_impact=SemanticImpact.NORMATIVE,
+                severity_reason_codes=[SeverityReasonCode.OBLIGATION_WEAKENED],
+                severity_confidence=0.90,
+                audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+            )
+        return None
+
+
+class ObligationStrengthCodeRule:
+    """Rule 9.3 — Obligation strengthened → MEDIUM with structured reason code.
+
+    Fires when a requirement verb change direction is "strengthened", adding the
+    `OBLIGATION_STRENGTHENED` reason code for audit traceability.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if (
+            ctx.requirement_verb_change
+            and ctx.requirement_verb_change.get("direction") == "strengthened"
+        ):
+            return ClassificationResult(
+                severity="medium",
+                reasons=_collect_reasons(ctx),
+                semantic_impact=SemanticImpact.NORMATIVE,
+                severity_reason_codes=[SeverityReasonCode.OBLIGATION_STRENGTHENED],
+                severity_confidence=0.90,
+                audit_disposition=AuditDisposition.AUTO_CLASSIFIED,
+            )
+        return None
+
+
+class PresentationOnlyRule:
+    """Rule 9.4 — Purely cosmetic + formatting change → LOW with PRESENTATION_ONLY code.
+
+    Fires only when *both* `cosmetic_change` and `formatting_only_change` are set,
+    meaning the two texts differ only in presentation (case, whitespace, hyphens,
+    unicode punctuation).  Adds `PRESENTATION_ONLY` to reason codes.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if ctx.cosmetic_change and ctx.formatting_only_change:
+            return ClassificationResult(
+                severity="low",
+                reasons=_collect_reasons(ctx),
+                semantic_impact=SemanticImpact.EDITORIAL,
+                severity_reason_codes=[SeverityReasonCode.PRESENTATION_ONLY],
+                severity_confidence=1.0,
+                audit_disposition=AuditDisposition.AUTO_CLASSIFIED,
+            )
+        return None
+
+
 class DefaultRule:
     """Rule 10 — Catch-all → LOW.
 
@@ -408,16 +566,20 @@ class RuleEngine:
 
 # Module-level singleton — rules are stateless, safe to share across threads.
 _DEFAULT_ENGINE = RuleEngine([
-    ReferenceNumberOnlyRule(),   # Rule 1  — reference-number-only  → low
-    FormattingOnlyRule(),        # Rule 2  — formatting-only         → low
-    CosmeticOnlyRule(),          # Rule 3  — cosmetic MODIFIED       → low
-    AddedRemovedRule(),          # Rule 4  — ADDED / REMOVED         → high
-    ObligationChangeRule(),      # Rule 5  — obligation verb change  → medium
-    HighDistanceRule(),          # Rule 6  — distance > 0.60         → high
-    MovedRule(),                 # Rule 7  — moved node/section      → medium (always)
-    SplitMergeRule(),            # Rule 8  — split/merged            → low or medium
-    ContentSignalRule(),         # Rule 9  — content drift ≤ 60 %   → medium
-    DefaultRule(),               # Rule 10 — catch-all               → low
+    ReferenceNumberOnlyRule(),          # Rule 1   — reference-number-only       → low
+    FormattingOnlyRule(),               # Rule 2   — formatting-only              → low
+    CosmeticOnlyRule(),                 # Rule 3   — cosmetic MODIFIED            → low
+    AddedRemovedRule(),                 # Rule 4   — ADDED / REMOVED              → high
+    ObligationChangeRule(),             # Rule 5   — obligation verb change       → medium
+    HighDistanceRule(),                 # Rule 6   — distance > 0.60              → high
+    MovedRule(),                        # Rule 7   — moved node/section           → medium (always)
+    SplitMergeRule(),                   # Rule 8   — split/merged                 → low or medium
+    ContentSignalRule(),                # Rule 9   — content drift ≤ 60 %        → medium
+    DomainEntityRule(),                 # Rule 9.1 — ontology entity changed      → high + reason codes
+    NormativeObligationEscalationRule(),# Rule 9.2 — obligation weakened          → medium + review
+    ObligationStrengthCodeRule(),       # Rule 9.3 — obligation strengthened      → medium + code
+    PresentationOnlyRule(),             # Rule 9.4 — cosmetic + formatting only   → low + PRESENTATION_ONLY
+    DefaultRule(),                      # Rule 10  — catch-all                    → low
 ])
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -317,19 +317,40 @@ class TableExtractorEnsemble:
 
         return intersection / union if union > 0 else 0.0
 
-    @staticmethod
-    def _select_best_candidate(candidates: list[TableCandidate]) -> TableCandidate:
-        """Select best candidate from a group of duplicates.
+    # KB spec backend priority weights: higher = preferred when scores are similar.
+    # GMFT (ML detector) > Camelot (ruled) > pdfplumber (coordinate) > Surya (OCR) > img2table
+    _BACKEND_WEIGHTS: ClassVar[dict[str, float]] = {
+        "gmft": 1.0,
+        "camelot": 0.9,
+        "pdfplumber": 0.8,
+        "surya": 0.6,
+        "img2table": 0.5,
+    }
 
-        Prioritizes: confidence, column quality, header count.
+    def _reconciliation_score(self, candidate: TableCandidate) -> float:
+        """Weighted reconciliation score for backend candidate selection.
+
+        score = 0.40 * confidence
+              + 0.30 * col_quality      (fraction of non-fallback headers)
+              + 0.20 * backend_weight   (domain-knowledge-based backend priority)
+              + 0.10 * header_quality   (raw header count / num_cols)
         """
-        if not candidates:
+        header_quality_count = len(
+            [h for h in candidate.headers if h and not str(h).startswith("column_")]
+        )
+        col_quality = header_quality_count / max(candidate.num_cols, 1)
+        backend_weight = self._BACKEND_WEIGHTS.get(candidate.backend_name.lower(), 0.5)
+        header_quality_norm = header_quality_count / max(candidate.num_cols, 1)
+
+        return (
+            0.40 * candidate.confidence
+            + 0.30 * col_quality
+            + 0.20 * backend_weight
+            + 0.10 * header_quality_norm
+        )
+
+    def _select_best_candidate(self, candidates: list[TableCandidate]) -> TableCandidate:
+        """Select best candidate from a group of duplicates using reconciliation score."""
+        if len(candidates) == 1:
             return candidates[0]
-
-        def score(c: TableCandidate) -> tuple[float, int, float]:
-            # (confidence, header_count, column_quality_metric)
-            header_quality = len([h for h in c.headers if h and not str(h).startswith("column_")])
-            col_quality = header_quality / max(c.num_cols, 1)
-            return (c.confidence, header_quality, col_quality)
-
-        return max(candidates, key=score)
+        return max(candidates, key=self._reconciliation_score)

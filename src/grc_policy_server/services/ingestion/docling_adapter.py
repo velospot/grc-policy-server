@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from io import BytesIO
-from typing import Optional
+from typing import Any, Optional
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
@@ -89,4 +89,64 @@ class DoclingAdapter:
         if not result.document:
             raise RuntimeError(f"Docling conversion failed for {filename}")
 
-        return result.document
+        doc = result.document
+        continuation_hints = self._detect_multi_page_continuations(doc)
+        if continuation_hints:
+            logger.debug(
+                "Docling detected %d multi-page table continuation pair(s): %s",
+                len(continuation_hints),
+                continuation_hints,
+            )
+        doc._continuation_hints = continuation_hints
+        return doc
+
+    def _detect_multi_page_continuations(self, doc: Any) -> list[tuple[int, int]]:
+        """Scan consecutive-page table pairs for repeated header rows.
+
+        When a table on page N+1 begins with a row whose cell texts match the
+        headers of the last table on page N, the two are continuation candidates.
+
+        Returns list of (table_index_page_n, table_index_page_n+1) pairs.
+        Indices reference the flattened table item list from Docling's document.
+        """
+        try:
+            tables = list(getattr(doc, "tables", None) or [])
+        except Exception:
+            return []
+
+        if len(tables) < 2:
+            return []
+
+        def _page_of(table: Any) -> int:
+            try:
+                prov = table.prov
+                if prov:
+                    return int(prov[0].page_no)
+            except Exception:
+                pass
+            return -1
+
+        def _header_texts(table: Any) -> set[str]:
+            """Return normalized header cell texts from the first row."""
+            texts: set[str] = set()
+            try:
+                for cell in table.data.grid[0]:
+                    t = (getattr(cell, "text", None) or "").strip().lower()
+                    if t:
+                        texts.add(t)
+            except Exception:
+                pass
+            return texts
+
+        hints: list[tuple[int, int]] = []
+        for i in range(len(tables) - 1):
+            t1, t2 = tables[i], tables[i + 1]
+            p1, p2 = _page_of(t1), _page_of(t2)
+            if p1 < 0 or p2 < 0 or p2 != p1 + 1:
+                continue
+            headers1 = _header_texts(t1)
+            # Check whether the first row of t2 repeats headers from t1
+            first_row2 = _header_texts(t2)
+            if headers1 and first_row2 and len(headers1 & first_row2) / len(headers1) >= 0.6:
+                hints.append((i, i + 1))
+        return hints

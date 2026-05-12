@@ -57,6 +57,52 @@ class BBox:
 
 
 @dataclass(frozen=True)
+class NormalizedFact:
+    """A single normalized fact extracted from a cell or document object."""
+
+    fact_id: str
+    owner_object_id: str  # node_id of CanonicalNode or table_uid of CanonicalTable
+    fact_type: str  # "frequency_range"|"field_strength"|"emission_limit"|"normative_term"|"numeric"
+    name: str
+    value: str
+    unit: str = ""
+    raw_value: str = ""
+    confidence: float = 1.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fact_id": self.fact_id,
+            "owner_object_id": self.owner_object_id,
+            "fact_type": self.fact_type,
+            "name": self.name,
+            "value": self.value,
+            "unit": self.unit,
+            "raw_value": self.raw_value,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass(frozen=True)
+class Citation:
+    """Stable reference linking an extracted fact back to its source location in the PDF."""
+
+    citation_id: str
+    source_node_id: str  # node_id in the CanonicalNode hierarchy
+    page: int
+    bbox: BBox | None = None
+    text_snippet: str = ""  # up to 120-char excerpt from source
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "citation_id": self.citation_id,
+            "source_node_id": self.source_node_id,
+            "page": self.page,
+            "bbox": self.bbox.to_dict() if self.bbox else None,
+            "text_snippet": self.text_snippet,
+        }
+
+
+@dataclass(frozen=True)
 class TableColumn:
     """Table column metadata."""
 
@@ -65,6 +111,7 @@ class TableColumn:
     normalized: str  # Normalized for comparison
     width: float | None = None
     data_type: str = "text"  # text, number, date, etc.
+    key_column: bool = False  # True if this column participates in the row semantic key
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +120,7 @@ class TableColumn:
             "normalized": self.normalized,
             "width": self.width,
             "data_type": self.data_type,
+            "key_column": self.key_column,
         }
 
 
@@ -97,6 +145,11 @@ class TableCell:
     background_color: str | None = None
     # Original source references
     metadata: dict[str, Any] = field(default_factory=dict)
+    # CIR semantic fields
+    semantic_key: str = ""
+    normalized_facts: list[NormalizedFact] = field(default_factory=list)
+    citations: list[Citation] = field(default_factory=list)
+    footnote_refs: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -116,6 +169,10 @@ class TableCell:
                 "background_color": self.background_color,
             },
             "metadata": self.metadata,
+            "semantic_key": self.semantic_key,
+            "normalized_facts": [f.to_dict() for f in self.normalized_facts],
+            "citations": [c.to_dict() for c in self.citations],
+            "footnote_refs": self.footnote_refs,
         }
 
 
@@ -168,6 +225,12 @@ class CanonicalTable:
     content_hash: str = ""
     # Rich metadata
     metadata: dict[str, Any] = field(default_factory=dict)
+    # CIR multi-page stitching provenance
+    footnote_refs: list[str] = field(default_factory=list)
+    multi_page_stitched: bool = False
+    stitched_from_pages: list[int] = field(default_factory=list)
+    stitching_score: float = 0.0
+    is_continuation_fragment: bool = False  # True for page-N+ fragments before stitching
 
     def __post_init__(self) -> None:
         """Validate and initialize table."""
@@ -235,6 +298,12 @@ class CanonicalTable:
                 "markdown": self.markdown_repr,
             },
             "metadata": self.metadata,
+            "cir": {
+                "footnote_refs": self.footnote_refs,
+                "multi_page_stitched": self.multi_page_stitched,
+                "stitched_from_pages": self.stitched_from_pages,
+                "stitching_score": self.stitching_score,
+            },
         }
 
     def to_html(self) -> str:
@@ -405,6 +474,9 @@ def canonical_tables_from_ensemble_candidates(
             confidence=canonical_cand.confidence,
             structure_hash=identity.structure_hash,
             content_hash=identity.content_hash,
+            multi_page_stitched=identity.is_split and len(identity.pages) > 1,
+            stitched_from_pages=list(identity.pages) if identity.is_split else [],
+            stitching_score=getattr(identity, "stitching_score", 0.0),
             metadata={
                 "continuation_signals": identity.continuation_signals,
                 "all_backends": [c.backend_name for c in related_candidates],

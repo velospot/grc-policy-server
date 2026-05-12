@@ -53,6 +53,12 @@ class CanonicalNode:
     content_hash: str = ""
     title: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # CIR provenance fields
+    ocr_used: bool = False
+    text_density: float = 0.0
+    has_native_text: bool = True
+    source_extractor: str = ""  # "docling"|"opendataloader"|"pytesseract"
+    reading_order: int = -1
 
     @classmethod
     def from_hierarchy_record(
@@ -114,6 +120,11 @@ class CanonicalNode:
             content_hash=str(record.get("content_hash") or ""),
             title=record.get("title"),
             metadata=metadata,
+            ocr_used=bool(metadata.get("ocr_used", False)),
+            text_density=float(metadata.get("text_density") or 0.0),
+            has_native_text=bool(metadata.get("has_native_text", True)),
+            source_extractor=str(metadata.get("source_extractor") or record.get("source_extractor") or ""),
+            reading_order=int(metadata.get("reading_order") or record.get("reading_order") or -1),
         )
 
     @classmethod
@@ -138,6 +149,11 @@ class CanonicalNode:
             content_hash=str(payload.get("content_hash") or ""),
             title=payload.get("title"),
             metadata=dict(payload.get("metadata") or {}),
+            ocr_used=bool(payload.get("ocr_used", False)),
+            text_density=float(payload.get("text_density") or 0.0),
+            has_native_text=bool(payload.get("has_native_text", True)),
+            source_extractor=str(payload.get("source_extractor") or ""),
+            reading_order=int(payload.get("reading_order") or -1),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -161,6 +177,11 @@ class CanonicalNode:
             "content_hash": self.content_hash,
             "title": self.title,
             "metadata": self.metadata,
+            "ocr_used": self.ocr_used,
+            "text_density": self.text_density,
+            "has_native_text": self.has_native_text,
+            "source_extractor": self.source_extractor,
+            "reading_order": self.reading_order,
         }
 
     def to_comparison_record(self) -> dict[str, Any]:

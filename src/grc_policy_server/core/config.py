@@ -211,7 +211,7 @@ class Settings(BaseSettings):
     celery_worker_max_memory_per_child_kb: int = 0
     celery_broker_connection_retry_on_startup: bool = True
     celery_broker_pool_limit: int = 10
-    celery_result_expires_sec: int = 86400
+    celery_result_expires_sec: int = 5400  # 90--> minutes # 86400 --> 1 day
     celery_task_track_started: bool = True
     celery_task_reject_on_worker_lost: bool = True
     celery_worker_disable_rate_limits: bool = True

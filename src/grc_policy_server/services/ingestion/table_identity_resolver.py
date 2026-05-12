@@ -49,6 +49,7 @@ class TableIdentity:
     content_hash: str
     is_split: bool = False
     continuation_signals: list[str] = None
+    stitching_score: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate identity data."""
@@ -122,6 +123,14 @@ class TableIdentityResolver:
             # Detect continuation signals
             signals = self._detect_continuation_signals(group, canonical)
 
+            # Compute stitching score between first two group members (if split)
+            stitching_score = 0.0
+            if is_split and len(group) >= 2:
+                sorted_group = sorted(group, key=lambda c: c.page_number)
+                sp1 = section_paths.get(sorted_group[0].page_number, [])
+                sp2 = section_paths.get(sorted_group[1].page_number, [])
+                stitching_score = self._continuation_score(sorted_group[0], sorted_group[1], sp1, sp2)
+
             identity = TableIdentity(
                 table_uid=table_uid,
                 caption_original=canonical.metadata.get("caption_original", ""),
@@ -135,6 +144,7 @@ class TableIdentityResolver:
                 content_hash=content_hash,
                 is_split=is_split,
                 continuation_signals=signals,
+                stitching_score=stitching_score,
             )
 
             identities[table_uid] = identity
@@ -185,6 +195,50 @@ class TableIdentityResolver:
 
         return groups
 
+    _CONTINUATION_THRESHOLD: float = 0.70
+
+    def _continuation_score(
+        self,
+        cand1: TableCandidate,
+        cand2: TableCandidate,
+        section_path1: list[str] | None = None,
+        section_path2: list[str] | None = None,
+    ) -> float:
+        """KB spec 6-factor continuation score for multi-page table stitching.
+
+        Weights per KB doc 03:
+        score = 0.20 * caption_sim
+              + 0.35 * col_header_sim     (dominant signal — same schema = same table)
+              + 0.10 * alignment_score    (x-position proximity)
+              + 0.10 * repeated_header_score
+              + 0.10 * adjacency_score
+              + 0.15 * section_path_score (section context)
+        """
+        section_path1 = section_path1 or []
+        section_path2 = section_path2 or []
+
+        # Fail fast: different column count means cannot be continuation
+        if cand1.num_cols != cand2.num_cols:
+            return 0.0
+
+        caption_sim = self._caption_similarity(cand1, cand2)
+        col_header_sim = self._column_header_similarity(cand1, cand2)
+        alignment = self._alignment_score(cand1, cand2)
+        repeated_header = self._repeated_header_score(cand1, cand2)
+        adjacency = self._adjacency_score(cand1, cand2)
+        section_compat = 1.0 if self._section_hierarchies_compatible(
+            section_path1, section_path2
+        ) else 0.0
+
+        return (
+            0.20 * caption_sim
+            + 0.35 * col_header_sim
+            + 0.10 * alignment
+            + 0.10 * repeated_header
+            + 0.10 * adjacency
+            + 0.15 * section_compat
+        )
+
     def _are_candidates_similar(
         self,
         cand1: TableCandidate,
@@ -192,53 +246,71 @@ class TableIdentityResolver:
         section_path1: list[str] | None = None,
         section_path2: list[str] | None = None,
     ) -> bool:
-        """Check if two candidates represent the same table.
+        """Check if two candidates represent the same (possibly multi-page) table.
 
-        Priority:
-        1. Section path hierarchy (must be compatible if both have paths)
-        2. Column count (must be identical)
-        3. Column signature (Jaccard similarity >= threshold)
-        4. Page proximity (<=2 page gap)
-        5. X-position alignment (<=50pt tolerance)
+        Uses the 6-factor KB spec continuation score with threshold 0.70.
         """
-        section_path1 = section_path1 or []
-        section_path2 = section_path2 or []
+        score = self._continuation_score(cand1, cand2, section_path1, section_path2)
+        return score >= self._CONTINUATION_THRESHOLD
 
-        # TIER 1: Section path hierarchy check
-        if section_path1 and section_path2:
-            if not self._section_hierarchies_compatible(section_path1, section_path2):
-                return False
+    def _caption_similarity(self, cand1: TableCandidate, cand2: TableCandidate) -> float:
+        """Normalized token Jaccard similarity between captions."""
+        cap1 = self._normalize_caption(cand1.metadata.get("caption_original", ""))
+        cap2 = self._normalize_caption(cand2.metadata.get("caption_original", ""))
+        if not cap1 and not cap2:
+            return 0.0  # No caption on either side: no signal (no reward, no penalty)
+        if not cap1 or not cap2:
+            return 0.3  # One-sided caption: weak match
+        tokens1 = set(cap1.split())
+        tokens2 = set(cap2.split())
+        return self._jaccard_similarity(list(tokens1), list(tokens2))
 
-        # Must have same column count
-        if cand1.num_cols != cand2.num_cols:
-            return False
-
-        # Check column signature match
+    def _column_header_similarity(self, cand1: TableCandidate, cand2: TableCandidate) -> float:
+        """Jaccard similarity between column signatures."""
         sig1 = cand1.column_signature()
         sig2 = cand2.column_signature()
+        if not sig1 and not sig2:
+            return 0.5
+        if not sig1 or not sig2:
+            return 0.2
+        return self._jaccard_similarity(sig1.split("|"), sig2.split("|"))
 
-        if sig1 and sig2:
-            if (
-                self._jaccard_similarity(sig1.split("|"), sig2.split("|"))
-                < self.structure_match_threshold
-            ):
-                return False
+    def _alignment_score(self, cand1: TableCandidate, cand2: TableCandidate) -> float:
+        """X-position alignment score: linear decay from 0pt → 1.0 to 100pt → 0.0."""
+        x_diff = abs(cand1.bbox.get("x0", 0) - cand2.bbox.get("x0", 0))
+        if x_diff <= 0:
+            return 1.0
+        if x_diff >= 100:
+            return 0.0
+        return 1.0 - (x_diff / 100.0)
 
-        # Check if on consecutive pages (for split detection)
+    def _repeated_header_score(self, cand1: TableCandidate, cand2: TableCandidate) -> float:
+        """1.0 if the first data row of cand2 repeats cand1's headers (common on page breaks)."""
+        if not cand1.headers or not cand2.cells:
+            return 0.0
+        # Get cand2's first row cells
+        first_row_cells = [cell for cell in cand2.cells if cell.get("row", 999) == 0]
+        if not first_row_cells:
+            return 0.0
+        first_row_texts = {
+            _normalize_text(str(cell.get("text", "")))
+            for cell in first_row_cells
+            if cell.get("text")
+        }
+        header_texts = {_normalize_text(h) for h in cand1.headers if h}
+        if not header_texts:
+            return 0.0
+        overlap = len(first_row_texts & header_texts)
+        return overlap / len(header_texts) if header_texts else 0.0
+
+    def _adjacency_score(self, cand1: TableCandidate, cand2: TableCandidate) -> float:
+        """Page adjacency score: consecutive → 1.0, 1-page gap → 0.5, else → 0.0."""
         page_diff = abs(cand2.page_number - cand1.page_number)
-        if page_diff > 2:  # Allow 1-2 page gap (for page numbers/ads)
-            return False
-
-        # Check x-position similarity (should be roughly in same horizontal position)
-        x_diff = abs(cand1.bbox["x0"] - cand2.bbox["x0"])
-        width_diff = abs(
-            (cand1.bbox["x1"] - cand1.bbox["x0"]) - (cand2.bbox["x1"] - cand2.bbox["x0"])
-        )
-
-        if x_diff > 50 or width_diff > 50:  # 50 points tolerance
-            return False
-
-        return True
+        if page_diff == 1:
+            return 1.0
+        if page_diff == 2:
+            return 0.5
+        return 0.0
 
     def _section_hierarchies_compatible(
         self, path1: list[str], path2: list[str], min_depth: int = 2

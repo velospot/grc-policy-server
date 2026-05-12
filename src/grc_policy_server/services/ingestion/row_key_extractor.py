@@ -17,6 +17,11 @@ from enum import Enum
 from typing import Any
 
 from grc_policy_server.services.documents.canonical_table_model import CanonicalTable, TableCell
+from grc_policy_server.services.ingestion.ontology.emc_ontology import (
+    EMC_DOMAIN_ROW_KEYS,
+    EMCTestClassifier,
+    EMCTestType,
+)
 
 
 class RowKeyComponent(str, Enum):
@@ -68,7 +73,12 @@ class RowKey:
 
 
 class RowKeyExtractor:
-    """Extract row keys from compliance table rows."""
+    """Extract row keys from compliance table rows.
+
+    When `domain_test_type` is set (or auto-detected from the table), domain-specific
+    row keys are built using the EMC ontology column patterns (KB spec doc 15/24).
+    For unknown test types the original generic extractor logic is used.
+    """
 
     def __init__(
         self,
@@ -76,6 +86,7 @@ class RowKeyExtractor:
         test_case_patterns: list[str] | None = None,
         condition_keywords: list[str] | None = None,
         step_keywords: list[str] | None = None,
+        domain_test_type: EMCTestType = EMCTestType.UNKNOWN,
     ):
         """Initialize extractor with custom patterns.
 
@@ -130,8 +141,23 @@ class RowKeyExtractor:
             re.compile(pattern, re.IGNORECASE) for pattern in self.test_case_patterns
         ]
 
+        self.domain_test_type = domain_test_type
+        self._classifier = EMCTestClassifier()
+
+    def classify_table_domain(self, table: CanonicalTable) -> EMCTestType:
+        """Auto-detect EMC test type from table caption and column headers."""
+        caption = table.caption_original or table.caption_normalized or ""
+        headers = [col.name for col in table.columns]
+        detected = self._classifier.classify_table(caption, headers)
+        if detected == EMCTestType.UNKNOWN and table.section_path:
+            detected = self._classifier.classify_from_section_path(table.section_path)
+        return detected
+
     def extract_row_keys(self, table: CanonicalTable) -> dict[int, str]:
         """Extract row keys for all rows in a table.
+
+        Uses domain-specific key structure when the test type is known,
+        otherwise falls back to generic extraction.
 
         Args:
             table: Canonical table to extract keys from
@@ -139,14 +165,82 @@ class RowKeyExtractor:
         Returns:
             Mapping of row number to row key string
         """
+        domain = self.domain_test_type
+        if domain == EMCTestType.UNKNOWN:
+            domain = self.classify_table_domain(table)
+
         row_keys: dict[int, str] = {}
 
-        for row_idx, row in enumerate(table.rows):
-            key = self.extract_row_key(row, table)
-            if key and not key.is_empty():
-                row_keys[row_idx] = key.to_string()
+        if domain != EMCTestType.UNKNOWN and domain in EMC_DOMAIN_ROW_KEYS:
+            col_key_names = EMC_DOMAIN_ROW_KEYS[domain]
+            col_index_map = self._map_columns_to_key_components(table, col_key_names)
+            for row_idx, row in enumerate(table.rows):
+                key_str = self._domain_row_key(row, col_index_map, col_key_names)
+                if key_str:
+                    row_keys[row_idx] = key_str
+        else:
+            for row_idx, row in enumerate(table.rows):
+                key = self.extract_row_key(row, table)
+                if key and not key.is_empty():
+                    row_keys[row_idx] = key.to_string()
 
         return row_keys
+
+    def _map_columns_to_key_components(
+        self,
+        table: CanonicalTable,
+        key_component_names: list[str],
+    ) -> dict[str, int]:
+        """Map domain key component names to column indices using fuzzy header matching."""
+        from grc_policy_server.services.ingestion.ontology.column_mapper import map_header
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import OntologyEntityType
+
+        # Build a map from OntologyEntityType → column index
+        entity_to_col: dict[str, int] = {}
+        for col in table.columns:
+            entity = map_header(col.name)
+            if entity is not None:
+                entity_to_col[entity.value.lower()] = col.index
+
+        # Map key component names to column indices
+        component_to_col: dict[str, int] = {}
+        _COMPONENT_TO_ENTITY: dict[str, str] = {
+            "phenomenon": OntologyEntityType.PHENOMENON.value.lower(),
+            "frequency_range": OntologyEntityType.FREQUENCY_RANGE.value.lower(),
+            "acceptance_criterion": OntologyEntityType.ACCEPTANCE_CRITERION.value.lower(),
+            "limit_class": OntologyEntityType.EMISSION_LIMIT.value.lower(),
+            "voltage_level": OntologyEntityType.FIELD_STRENGTH.value.lower(),
+        }
+        for name in key_component_names:
+            entity_name = _COMPONENT_TO_ENTITY.get(name)
+            if entity_name and entity_name in entity_to_col:
+                component_to_col[name] = entity_to_col[entity_name]
+            else:
+                # Fallback: fuzzy column name match
+                for col in table.columns:
+                    if name.replace("_", " ") in col.name.lower() or col.name.lower() in name.replace("_", " "):
+                        component_to_col[name] = col.index
+                        break
+        return component_to_col
+
+    def _domain_row_key(
+        self,
+        row: Any,
+        col_index_map: dict[str, int],
+        key_component_names: list[str],
+    ) -> str:
+        """Build a domain row key from a row using the column index map."""
+        cell_by_col: dict[int, str] = {cell.col: cell.text.strip() for cell in row.cells}
+        parts: list[str] = []
+        for name in key_component_names:
+            col_idx = col_index_map.get(name)
+            if col_idx is not None:
+                text = cell_by_col.get(col_idx, "").lower().replace(" ", "_")[:40]
+                parts.append(text)
+        # Drop trailing empty parts
+        while parts and not parts[-1]:
+            parts.pop()
+        return ":".join(parts)
 
     def extract_row_key(self, row: Any, table: CanonicalTable | None = None) -> RowKey:
         """Extract key from a single row.

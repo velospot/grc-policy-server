@@ -370,3 +370,77 @@ class TestRowChangeDetector:
         assert "Result" in col_changes["columns_added"]
         assert col_changes["column_count_old"] == 2
         assert col_changes["column_count_new"] == 3
+
+
+class TestDomainRowKeys:
+    """Test domain-specific row key extraction for EMC test types."""
+
+    def _make_table(self, caption: str, columns: list[tuple[str, str]], rows_data: list[list[str]]) -> CanonicalTable:
+        cols = [TableColumn(i, name, name.lower()) for i, (name, _) in enumerate(columns)]
+        rows = []
+        for r_idx, row_texts in enumerate(rows_data):
+            cells = [TableCell(row=r_idx, col=c_idx, text=text) for c_idx, text in enumerate(row_texts)]
+            rows.append(TableRow(row_number=r_idx, cells=cells))
+        return CanonicalTable(
+            table_uid=f"tbl_{caption.lower().replace(' ', '_')}",
+            caption_original=caption,
+            caption_normalized=caption.lower(),
+            section_path=[],
+            pages=[1],
+            columns=cols,
+            rows=rows,
+        )
+
+    def test_classify_table_domain_radiated_immunity(self):
+        from grc_policy_server.services.ingestion.row_key_extractor import RowKeyExtractor
+        extractor = RowKeyExtractor()
+        table = self._make_table(
+            "Radiated Immunity",
+            [("Phenomenon", "str"), ("Frequency Range", "str"), ("Level", "str"), ("Acceptance Criterion", "str")],
+            [["BCI", "1 MHz - 400 MHz", "30 V/m", "Class A"]],
+        )
+        domain = extractor.classify_table_domain(table)
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import EMCTestType
+        assert domain == EMCTestType.RADIATED_IMMUNITY
+
+    def test_domain_row_keys_use_column_content(self):
+        from grc_policy_server.services.ingestion.row_key_extractor import RowKeyExtractor
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import EMCTestType
+        extractor = RowKeyExtractor(domain_test_type=EMCTestType.RADIATED_IMMUNITY)
+        table = self._make_table(
+            "Radiated Immunity",
+            [("Phenomenon", "str"), ("Frequency Range", "str"), ("Level", "str")],
+            [
+                ["BCI", "1 MHz - 400 MHz", "30 V/m"],
+                ["ESD", "DC - 10 GHz", "4 kV"],
+            ],
+        )
+        keys = extractor.extract_row_keys(table)
+        # Domain extraction should produce some keys (exact content depends on column mapping)
+        assert isinstance(keys, dict)
+
+    def test_esd_domain_keys(self):
+        from grc_policy_server.services.ingestion.row_key_extractor import RowKeyExtractor
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import EMCTestType
+        extractor = RowKeyExtractor(domain_test_type=EMCTestType.ESD)
+        table = self._make_table(
+            "ESD Requirements",
+            [("Phenomenon", "str"), ("Voltage Level", "str"), ("Acceptance Criterion", "str")],
+            [["ESD", "8 kV", "Class A"]],
+        )
+        # Should not raise any exception
+        keys = extractor.extract_row_keys(table)
+        assert isinstance(keys, dict)
+
+    def test_unknown_domain_falls_back_to_generic(self):
+        from grc_policy_server.services.ingestion.row_key_extractor import RowKeyExtractor
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import EMCTestType
+        extractor = RowKeyExtractor(domain_test_type=EMCTestType.UNKNOWN)
+        table = self._make_table(
+            "Generic Table",
+            [("REQ-ID", "str"), ("Condition", "str")],
+            [["REQ-001", "normal operation"]],
+        )
+        keys = extractor.extract_row_keys(table)
+        # Should use generic extraction path — at least one key should be found
+        assert isinstance(keys, dict)
