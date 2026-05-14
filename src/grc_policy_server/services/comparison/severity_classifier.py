@@ -20,7 +20,7 @@ SEVERITY LEVELS
   ┌──────────┬──────────────────────────────────────────────────────────────┐
   │ Severity │ Meaning                                                      │
   ├──────────┼──────────────────────────────────────────────────────────────┤
-  │ high     │ Content added/removed, or > 60 % semantic divergence         │
+  │ high     │ Content added/removed, or > 70 % semantic divergence         │
   │ medium   │ Obligation changed, moved/split/merged, moderate drift       │
   │ low      │ Cosmetic, formatting, or reference-number-only differences   │
   └──────────┴──────────────────────────────────────────────────────────────┘
@@ -38,7 +38,7 @@ RULE TABLE  (evaluated top-to-bottom; first match wins)
   4   AddedRemovedRule           change_type ∈ {ADDED, REMOVED}   → high
   5   ObligationChangeRule       verb change or meaning weakened/  → medium
                                  strengthened/inverted
-  6   HighDistanceRule           distance > 0.60                   → high
+  6   HighDistanceRule           distance > 0.75                   → high
   7   MovedRule                  alignment_type == "moved"         → medium
                                  (always; moved content is always
                                  reviewer-relevant regardless of
@@ -76,6 +76,7 @@ EXTENSIBILITY
   To override rules in tests or domain pipelines:
     classifier = SeverityClassifier(engine=RuleEngine([MyRule(), DefaultRule()]))
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -128,6 +129,7 @@ class AuditDisposition(str, Enum):
 # Context & Result
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass(frozen=True)
 class ClassificationContext:
     """All signals available to every classifier rule (immutable).
@@ -163,7 +165,9 @@ class ClassificationContext:
     formatting_only_change: bool = False
     # Ontology-backed enrichment fields (populated by Phase C ontology module)
     normalized_facts: list[dict[str, Any]] = field(default_factory=list)
-    ontology_entity_type: str = ""  # e.g. "FieldStrength", "FrequencyRange", "EmissionLimit"
+    ontology_entity_type: str = (
+        ""  # e.g. "FieldStrength", "FrequencyRange", "EmissionLimit"
+    )
 
 
 @dataclass(frozen=True)
@@ -195,6 +199,7 @@ class ClassificationResult:
 # Rule protocol
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class ClassifierRule(Protocol):
     """Contract for a single classification rule.
@@ -203,13 +208,13 @@ class ClassifierRule(Protocol):
     to defer to the next rule in the engine.
     """
 
-    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
-        ...
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None: ...
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Shared helpers (private)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def _collect_reasons(ctx: ClassificationContext) -> list[str]:
     """Build the informational reason-tag list.  Never used to gate severity."""
@@ -234,7 +239,9 @@ def _collect_reasons(ctx: ClassificationContext) -> list[str]:
 def _has_obligation_signal(ctx: ClassificationContext) -> bool:
     """True when the change involves a shift in normative strength."""
     return bool(ctx.requirement_verb_change) or ctx.meaning_change in {
-        "weakened", "strengthened", "inverted",
+        "weakened",
+        "strengthened",
+        "inverted",
     }
 
 
@@ -251,6 +258,7 @@ def _has_content_signal(ctx: ClassificationContext) -> bool:
 # Rule implementations  (priority: top → bottom, matching rule table in module doc)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class ReferenceNumberOnlyRule:
     """Rule 1 — Reference-number-only change → LOW.
 
@@ -262,7 +270,9 @@ class ReferenceNumberOnlyRule:
 
     def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
         if ctx.reference_number_only_change:
-            return ClassificationResult(severity="low", reasons=["reference_number_change"])
+            return ClassificationResult(
+                severity="low", reasons=["reference_number_change"]
+            )
         return None
 
 
@@ -280,7 +290,9 @@ class FormattingOnlyRule:
 
     def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
         if ctx.formatting_only_change:
-            return ClassificationResult(severity="low", reasons=["formatting_only_change"])
+            return ClassificationResult(
+                severity="low", reasons=["formatting_only_change"]
+            )
         return None
 
 
@@ -333,22 +345,24 @@ class ObligationChangeRule:
 
     def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
         if _has_obligation_signal(ctx):
-            return ClassificationResult(severity="medium", reasons=_collect_reasons(ctx))
+            return ClassificationResult(
+                severity="medium", reasons=_collect_reasons(ctx)
+            )
         return None
 
 
 class HighDistanceRule:
     """Rule 6 — High semantic distance → HIGH.
 
-    Fires when distance > 0.60, meaning less than 40 % of the semantic content
+    Fires when distance > 0.75, meaning less than 40 % of the semantic content
     is shared between the two node versions.  At this divergence level the node
     is effectively a replacement, not an edit.
 
-    Threshold: distance > 0.60  (equivalent to cosine_similarity < 0.40).
+    Threshold: distance > 0.75  (equivalent to cosine_similarity < 0.40).
     """
 
     def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
-        if ctx.distance is not None and ctx.distance > 0.60:
+        if ctx.distance is not None and ctx.distance > 0.75:
             return ClassificationResult(severity="high", reasons=_collect_reasons(ctx))
         return None
 
@@ -370,7 +384,9 @@ class MovedRule:
 
     def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
         if ctx.alignment_type == "moved":
-            return ClassificationResult(severity="medium", reasons=_collect_reasons(ctx))
+            return ClassificationResult(
+                severity="medium", reasons=_collect_reasons(ctx)
+            )
         return None
 
 
@@ -411,20 +427,36 @@ class ContentSignalRule:
 
     def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
         if _has_content_signal(ctx):
-            return ClassificationResult(severity="medium", reasons=_collect_reasons(ctx))
+            return ClassificationResult(
+                severity="medium", reasons=_collect_reasons(ctx)
+            )
         if ctx.distance is not None and ctx.distance > 0.35:
-            return ClassificationResult(severity="medium", reasons=_collect_reasons(ctx))
+            return ClassificationResult(
+                severity="medium", reasons=_collect_reasons(ctx)
+            )
         return None
 
 
 _DOMAIN_ENTITY_MAP: dict[str, tuple[SeverityReasonCode, SemanticImpact]] = {
-    "FieldStrength":        (SeverityReasonCode.TEST_LEVEL_CHANGED,            SemanticImpact.TECHNICAL),
-    "FrequencyRange":       (SeverityReasonCode.FREQUENCY_RANGE_CHANGED,       SemanticImpact.TECHNICAL),
-    "EmissionLimit":        (SeverityReasonCode.NUMERIC_LIMIT_CHANGED,         SemanticImpact.TECHNICAL),
-    "ImmunityLevel":        (SeverityReasonCode.TEST_LEVEL_CHANGED,            SemanticImpact.TECHNICAL),
-    "AcceptanceCriterion":  (SeverityReasonCode.ACCEPTANCE_CRITERION_CHANGED,  SemanticImpact.NORMATIVE),
-    "TestMethod":           (SeverityReasonCode.TEST_METHOD_CHANGED,           SemanticImpact.TECHNICAL),
-    "NormativeTerm":        (SeverityReasonCode.OBLIGATION_STRENGTHENED,       SemanticImpact.NORMATIVE),
+    "FieldStrength": (SeverityReasonCode.TEST_LEVEL_CHANGED, SemanticImpact.TECHNICAL),
+    "FrequencyRange": (
+        SeverityReasonCode.FREQUENCY_RANGE_CHANGED,
+        SemanticImpact.TECHNICAL,
+    ),
+    "EmissionLimit": (
+        SeverityReasonCode.NUMERIC_LIMIT_CHANGED,
+        SemanticImpact.TECHNICAL,
+    ),
+    "ImmunityLevel": (SeverityReasonCode.TEST_LEVEL_CHANGED, SemanticImpact.TECHNICAL),
+    "AcceptanceCriterion": (
+        SeverityReasonCode.ACCEPTANCE_CRITERION_CHANGED,
+        SemanticImpact.NORMATIVE,
+    ),
+    "TestMethod": (SeverityReasonCode.TEST_METHOD_CHANGED, SemanticImpact.TECHNICAL),
+    "NormativeTerm": (
+        SeverityReasonCode.OBLIGATION_STRENGTHENED,
+        SemanticImpact.NORMATIVE,
+    ),
 }
 
 
@@ -450,7 +482,10 @@ class DomainEntityRule:
             severity="high",
             reasons=_collect_reasons(ctx) + [reason_code.value],
             semantic_impact=impact,
-            severity_reason_codes=[reason_code, SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED],
+            severity_reason_codes=[
+                reason_code,
+                SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED,
+            ],
             severity_confidence=0.95,
             audit_disposition=AuditDisposition.ESCALATED,
         )
@@ -541,6 +576,7 @@ class DefaultRule:
 # Rule engine
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class RuleEngine:
     """Evaluates a prioritised list of `ClassifierRule` objects.
 
@@ -565,22 +601,24 @@ class RuleEngine:
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Module-level singleton — rules are stateless, safe to share across threads.
-_DEFAULT_ENGINE = RuleEngine([
-    ReferenceNumberOnlyRule(),          # Rule 1   — reference-number-only       → low
-    FormattingOnlyRule(),               # Rule 2   — formatting-only              → low
-    CosmeticOnlyRule(),                 # Rule 3   — cosmetic MODIFIED            → low
-    AddedRemovedRule(),                 # Rule 4   — ADDED / REMOVED              → high
-    ObligationChangeRule(),             # Rule 5   — obligation verb change       → medium
-    HighDistanceRule(),                 # Rule 6   — distance > 0.60              → high
-    MovedRule(),                        # Rule 7   — moved node/section           → medium (always)
-    SplitMergeRule(),                   # Rule 8   — split/merged                 → low or medium
-    ContentSignalRule(),                # Rule 9   — content drift ≤ 60 %        → medium
-    DomainEntityRule(),                 # Rule 9.1 — ontology entity changed      → high + reason codes
-    NormativeObligationEscalationRule(),# Rule 9.2 — obligation weakened          → medium + review
-    ObligationStrengthCodeRule(),       # Rule 9.3 — obligation strengthened      → medium + code
-    PresentationOnlyRule(),             # Rule 9.4 — cosmetic + formatting only   → low + PRESENTATION_ONLY
-    DefaultRule(),                      # Rule 10  — catch-all                    → low
-])
+_DEFAULT_ENGINE = RuleEngine(
+    [
+        ReferenceNumberOnlyRule(),  # Rule 1   — reference-number-only       → low
+        FormattingOnlyRule(),  # Rule 2   — formatting-only              → low
+        CosmeticOnlyRule(),  # Rule 3   — cosmetic MODIFIED            → low
+        AddedRemovedRule(),  # Rule 4   — ADDED / REMOVED              → high
+        ObligationChangeRule(),  # Rule 5   — obligation verb change       → medium
+        HighDistanceRule(),  # Rule 6   — distance > 0.75              → high
+        MovedRule(),  # Rule 7   — moved node/section           → medium (always)
+        SplitMergeRule(),  # Rule 8   — split/merged                 → low or medium
+        ContentSignalRule(),  # Rule 9   — content drift ≤ 60 %        → medium
+        DomainEntityRule(),  # Rule 9.1 — ontology entity changed      → high + reason codes
+        NormativeObligationEscalationRule(),  # Rule 9.2 — obligation weakened          → medium + review
+        ObligationStrengthCodeRule(),  # Rule 9.3 — obligation strengthened      → medium + code
+        PresentationOnlyRule(),  # Rule 9.4 — cosmetic + formatting only   → low + PRESENTATION_ONLY
+        DefaultRule(),  # Rule 10  — catch-all                    → low
+    ]
+)
 
 
 class SeverityClassifier:

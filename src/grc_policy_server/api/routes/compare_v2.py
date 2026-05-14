@@ -77,6 +77,8 @@ def compare_v2_enqueue(
         doc2=payload.doc2,
         force_re_extract=payload.forceReExtract,
         cache_key=cache_key,
+        audit_mode=payload.auditMode,
+        save_to_db=payload.saveToDb,
     )
 
     try:

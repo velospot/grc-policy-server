@@ -10,3 +10,5 @@ class CompareTaskPayload(BaseModel):
     doc2: Document
     force_re_extract: bool = False
     cache_key: str
+    audit_mode: bool = True
+    save_to_db: bool = False

@@ -47,8 +47,9 @@ class DocumentAccuracyMetrics:
 
     document_id: str
     filename: str
+    document_family: str = ""            # e.g. "din_en_60068", "dnv_cg_0339", "tl_81000"
     total_tables: int = 0
-    tables_classified: int = 0          # non-UNKNOWN EMC type
+    tables_classified: int = 0          # non-UNKNOWN type
     emc_type_distribution: dict[str, int] = field(default_factory=dict)
     overall_fact_coverage: float = 0.0  # % data cells with ≥1 fact
     overall_row_key_coverage: float = 0.0
@@ -126,6 +127,16 @@ class AccuracyEvaluator:
             except Exception:
                 pass
 
+        # Resolve document family profile (for grouping in reports)
+        try:
+            from grc_policy_server.services.ingestion.document_family_profile import (
+                get_profile_for_document,
+            )
+            _profile = get_profile_for_document(filename=metrics.filename)
+            metrics.document_family = _profile.family_id if _profile else "unknown"
+        except Exception:
+            metrics.document_family = "unknown"
+
         if not nodes_file.exists():
             metrics.errors.append(f"canonical_nodes.json not found")
             return metrics
@@ -190,9 +201,12 @@ class AccuracyEvaluator:
         heading_path = node.get("heading_path") or []
         caption = heading_path[0] if heading_path else ""
 
-        # Extract header texts
-        header_cells = [c for c in cells_raw if c.get("is_header")]
-        headers = [str(c.get("text") or "") for c in header_cells]
+        # Extract headers using the same normalisation as the ingestion chunkers so
+        # that multi-row (grouped) headers are collapsed to one entry per column and
+        # the resulting header list is indexed 0…num_cols-1, matching data cell col
+        # positions exactly.
+        from grc_policy_server.services.ingestion.table_normalization import extract_headers_from_cells
+        headers, header_depth = extract_headers_from_cells(cells_raw, num_cols)
 
         # EMC classification (use propagated type for continuation fragments)
         propagated = meta.get("_propagated_emc_type")
@@ -202,11 +216,17 @@ class AccuracyEvaluator:
         else:
             emc_type = self._classifier.classify_table(caption, headers)
 
-        # Column mapping
+        # Column mapping — headers[i] corresponds to actual column position i
+        from grc_policy_server.services.ingestion.ontology.column_mapper import ENTITY_TYPE_DEFAULT_UNIT
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import OntologyEntityType
+
         entity_types: list[str] = []
-        for h in headers:
-            entity = self._map_header(h)
+        col_entity_map: dict[int, OntologyEntityType] = {}
+        for col_pos, h_text in enumerate(headers):
+            entity = self._map_header(h_text)
             entity_types.append(entity.value if entity else "")
+            if entity is not None:
+                col_entity_map[col_pos] = entity
         mapped_count = sum(1 for e in entity_types if e)
         col_mapped_pct = mapped_count / max(len(headers), 1) if headers else 0.0
 
@@ -215,16 +235,31 @@ class AccuracyEvaluator:
         cells_with_facts = 0
         fact_type_counts: dict[str, int] = {}
 
-        # Build col_index → header mapping for column name lookup
-        col_to_header = {}
-        for c in header_cells:
-            col_to_header[c.get("col", 0)] = str(c.get("text") or "")
+        # Build col_index → header mapping for column name lookup (actual position → header)
+        col_to_header = {col_pos: h for col_pos, h in enumerate(headers)}
 
         for c in data_cells:
             text = str(c.get("text") or "").strip()
             col_idx = c.get("col", 0)
             col_name = col_to_header.get(col_idx, "")
             facts = self._fact_extractor.extract_from_cell(text, column_name=col_name)
+
+            # Column-unit inheritance: bare numeric + typed column → synthesise fact
+            if not facts:
+                col_entity = col_entity_map.get(col_idx)
+                if col_entity is not None:
+                    inherited_unit = ENTITY_TYPE_DEFAULT_UNIT.get(col_entity)
+                    if inherited_unit:
+                        fact_type_for_entity = {
+                            OntologyEntityType.EMISSION_LIMIT: "emission_limit",
+                            OntologyEntityType.FIELD_STRENGTH: "field_strength",
+                            OntologyEntityType.FREQUENCY_RANGE: "frequency_range",
+                        }.get(col_entity)
+                        if fact_type_for_entity:
+                            facts = self._fact_extractor.extract_bare_numeric_with_unit(
+                                text, inherited_unit, fact_type_for_entity
+                            )
+
             if facts:
                 cells_with_facts += 1
                 for f in facts:
@@ -305,7 +340,7 @@ class AccuracyEvaluator:
         for dm in metrics:
             print()
             print("=" * 110)
-            print(f"ACCURACY REPORT  —  {dm.filename}  ({dm.document_id[:8]}...)")
+            print(f"ACCURACY REPORT  —  {dm.filename}  ({dm.document_id[:8]}...)  [family: {dm.document_family}]")
             print("=" * 110)
             print(f"  Tables total       : {dm.total_tables}")
             classified_pct = dm.tables_classified / max(dm.total_tables, 1)
@@ -343,9 +378,11 @@ class AccuracyEvaluator:
         if len(metrics) > 1:
             total_t = sum(m.total_tables for m in metrics)
             total_cls = sum(m.tables_classified for m in metrics)
-            avg_fact = sum(m.overall_fact_coverage for m in metrics) / len(metrics)
-            avg_rk = sum(m.overall_row_key_coverage for m in metrics) / len(metrics)
-            avg_cm = sum(m.overall_column_mapped_pct for m in metrics) / len(metrics)
+            docs_with_tables = [m for m in metrics if m.total_tables > 0]
+            n_docs = max(len(docs_with_tables), 1)
+            avg_fact = sum(m.overall_fact_coverage for m in docs_with_tables) / n_docs
+            avg_rk = sum(m.overall_row_key_coverage for m in docs_with_tables) / n_docs
+            avg_cm = sum(m.overall_column_mapped_pct for m in docs_with_tables) / n_docs
             total_nf = sum(m.total_normalized_facts for m in metrics)
             print("=" * 110)
             print(f"AGGREGATE  tables={total_t}  classified={total_cls}/{total_t} ({total_cls/max(total_t,1):.0%})"

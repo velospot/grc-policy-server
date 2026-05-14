@@ -73,7 +73,11 @@ class ChangeRecord:
     significance: str = "medium"
     impact: str = "Medium"
     severity: Literal["low", "medium", "high"] = "medium"
+    requires_human_review: bool = False
     significance_reasons: list[str] = field(default_factory=list)
+    # Evidence pack: source location for each version (doc1 = v1, doc2 = v2)
+    v1_evidence: list[dict[str, Any]] = field(default_factory=list)
+    v2_evidence: list[dict[str, Any]] = field(default_factory=list)
 
     def to_trace_payload(self) -> dict[str, Any]:
         return {
@@ -107,6 +111,8 @@ class ChangeRecord:
                 if self.doc2_reference
                 else None
             ),
+            "v1Evidence": self.v1_evidence,
+            "v2Evidence": self.v2_evidence,
         }
 
     def to_llm_payload(self) -> dict[str, Any]:

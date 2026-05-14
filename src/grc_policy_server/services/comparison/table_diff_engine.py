@@ -17,6 +17,59 @@ from grc_policy_server.services.ingestion.row_key_extractor import RowChangeDete
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Frequency range comparison helpers
+# ---------------------------------------------------------------------------
+
+def _parse_freq_range_hz(fact_value: str) -> tuple[float, float] | None:
+    """Parse a NormalizedFact frequency_range value into (lower_hz, upper_hz).
+
+    Handles:
+    - "lower-upper" range format (e.g. "150000.0-30000000.0")
+    - Single value (e.g. "150000.0") — treated as a point range
+    Returns None on parse failure.
+    """
+    try:
+        if "-" in fact_value:
+            parts = fact_value.split("-", 1)
+            return float(parts[0]), float(parts[1])
+        v = float(fact_value)
+        return v, v
+    except (ValueError, IndexError):
+        return None
+
+
+def _classify_frequency_range_change(
+    old_lower: float, old_upper: float,
+    new_lower: float, new_upper: float,
+) -> str:
+    """Return a semantic change type for a frequency range shift.
+
+    Returns one of: "frequency_range_expanded", "frequency_range_restricted",
+    "frequency_range_shifted", "frequency_range_unchanged".
+    """
+    if old_lower == new_lower and old_upper == new_upper:
+        return "frequency_range_unchanged"
+    expanded = new_lower <= old_lower and new_upper >= old_upper
+    restricted = new_lower >= old_lower and new_upper <= old_upper
+    if expanded and not restricted:
+        return "frequency_range_expanded"
+    if restricted and not expanded:
+        return "frequency_range_restricted"
+    return "frequency_range_shifted"
+
+
+def _get_frequency_range_hz(cell: Any) -> tuple[float, float] | None:
+    """Extract the first frequency_range NormalizedFact from *cell* as (lower_hz, upper_hz)."""
+    facts = getattr(cell, "normalized_facts", None) or []
+    for fact in facts:
+        if getattr(fact, "fact_type", "") == "frequency_range":
+            parsed = _parse_freq_range_hz(getattr(fact, "value", ""))
+            if parsed is not None:
+                return parsed
+    return None
+
+
 class TableDiffType(str, Enum):
     """Type of table-level difference."""
 
@@ -92,6 +145,7 @@ class TableDiff:
     row_diffs: list[RowDiff] = field(default_factory=list)
     column_additions: list[str] = field(default_factory=list)
     column_removals: list[str] = field(default_factory=list)
+    column_renames: list[dict[str, str]] = field(default_factory=list)
     # Metadata
     similarity_score: float = 0.0
     rows_added: int = 0
@@ -111,6 +165,7 @@ class TableDiff:
             "column_changes": {
                 "added": self.column_additions,
                 "removed": self.column_removals,
+                "renamed": self.column_renames,
             },
             "summary": {
                 "similarity_score": self.similarity_score,
@@ -172,6 +227,7 @@ class TableDiffEngine:
         col_changes = row_changes.get("column_changes", {})
         column_additions = col_changes.get("columns_added", [])
         column_removals = col_changes.get("columns_removed", [])
+        column_renames = col_changes.get("columns_renamed", [])
 
         # Count actual row changes from row_diffs (more reliable than row_changes for non-compliance tables)
         rows_added = sum(1 for rd in row_diffs if rd.change_type == "added")
@@ -199,6 +255,7 @@ class TableDiffEngine:
             row_diffs=row_diffs,
             column_additions=column_additions,
             column_removals=column_removals,
+            column_renames=column_renames,
             similarity_score=similarity,
             rows_added=rows_added,
             rows_removed=rows_removed,
@@ -219,34 +276,80 @@ class TableDiffEngine:
         return diff
 
     def _compute_table_similarity(self, old_table: CanonicalTable, new_table: CanonicalTable) -> float:
-        """Compute similarity score between tables (0.0 to 1.0)."""
+        """Compute similarity score between tables (0.0 to 1.0).
+
+        Uses a hybrid metric:
+        1. If row keys cover ≥50% of rows in both tables, use Jaccard similarity
+           of row-key sets weighted by per-matched-row cell similarity.
+        2. Otherwise fall back to grid-position Dice similarity, which is symmetric
+           and does not penalise tables that gained new rows (unlike the old max()
+           denominator which caused false ADDED/REMOVED classification).
+        """
         if not old_table.rows or not new_table.rows:
             return 0.0
 
-        # Content-based similarity using cell matching
+        structure_penalty = abs(len(old_table.columns) - len(new_table.columns)) / max(
+            len(old_table.columns), len(new_table.columns), 1
+        )
+
+        # --- Attempt row-key-based matching ---
+        old_row_keys: dict[int, str] = self.row_key_extractor.extract_row_keys(old_table)
+        new_row_keys: dict[int, str] = self.row_key_extractor.extract_row_keys(new_table)
+        old_key_coverage = len(old_row_keys) / max(len(old_table.rows), 1)
+        new_key_coverage = len(new_row_keys) / max(len(new_table.rows), 1)
+
+        if old_key_coverage >= 0.50 and new_key_coverage >= 0.50:
+            old_keys_set = set(old_row_keys.values())
+            new_keys_set = set(new_row_keys.values())
+            intersection = old_keys_set & new_keys_set
+            union = old_keys_set | new_keys_set
+            jaccard = len(intersection) / len(union) if union else 1.0
+
+            avg_cell_sim = 0.0
+            if intersection:
+                old_key_to_idx = {v: k for k, v in old_row_keys.items()}
+                new_key_to_idx = {v: k for k, v in new_row_keys.items()}
+                cell_sims: list[float] = []
+                for key in intersection:
+                    old_idx = old_key_to_idx.get(key)
+                    new_idx = new_key_to_idx.get(key)
+                    if old_idx is not None and new_idx is not None:
+                        cell_sims.append(
+                            self._row_cell_similarity(old_table.rows[old_idx], new_table.rows[new_idx])
+                        )
+                avg_cell_sim = sum(cell_sims) / len(cell_sims) if cell_sims else 0.0
+
+            score = 0.70 * jaccard + 0.30 * avg_cell_sim
+            return min(1.0, max(0.0, score * (1 - min(structure_penalty, 0.40) * 0.5)))
+
+        # --- Grid-position fallback with Dice denominator ---
         old_grid = old_table.cell_grid()
         new_grid = new_table.cell_grid()
 
         if not old_grid and not new_grid:
             return 1.0
+        if not old_grid or not new_grid:
+            return 0.0
 
-        # Count matching cells
-        matches = 0
-        total_cells = max(len(old_grid), len(new_grid))
-
-        for pos, old_text in old_grid.items():
-            new_text = new_grid.get(pos, "")
-            if self._cells_match(old_text, new_text):
-                matches += 1
-
-        # Penalize for structural differences
-        structure_penalty = abs(len(old_table.columns) - len(new_table.columns)) / max(
-            len(old_table.columns), len(new_table.columns), 1
+        matches = sum(
+            1 for pos, old_text in old_grid.items()
+            if self._cells_match(old_text, new_grid.get(pos, ""))
         )
+        dice_denom = len(old_grid) + len(new_grid)
+        base = (2 * matches / dice_denom) if dice_denom > 0 else 0.0
+        return min(1.0, max(0.0, base * (1 - structure_penalty * 0.5)))
 
-        similarity = (matches / total_cells if total_cells > 0 else 0) * (1 - structure_penalty * 0.5)
-
-        return min(1.0, max(0.0, similarity))
+    def _row_cell_similarity(self, old_row: Any, new_row: Any) -> float:
+        """Cell-level Dice similarity for two matched rows."""
+        old_texts = [c.text.strip() for c in old_row.cells]
+        new_texts = [c.text.strip() for c in new_row.cells]
+        if not old_texts and not new_texts:
+            return 1.0
+        if not old_texts or not new_texts:
+            return 0.0
+        matches = sum(1 for o, n in zip(old_texts, new_texts) if self._cells_match(o, n))
+        dice_denom = len(old_texts) + len(new_texts)
+        return (2 * matches / dice_denom) if dice_denom > 0 else 0.0
 
     def _detect_structural_changes(self, old_table: CanonicalTable, new_table: CanonicalTable) -> list[str]:
         """Detect structural changes between tables."""
@@ -380,7 +483,7 @@ class TableDiffEngine:
                 )
 
                 if text_changed or structure_changed:
-                    metadata = {}
+                    metadata: dict[str, Any] = {}
                     if structure_changed:
                         metadata["rowspan_old"] = old_cell.rowspan
                         metadata["rowspan_new"] = new_cell.rowspan
@@ -390,6 +493,21 @@ class TableDiffEngine:
                     change_type = (
                         "merged_cell_changed" if structure_changed else "modified"
                     )
+
+                    # Semantic frequency range annotation
+                    if text_changed and not structure_changed:
+                        old_freq = _get_frequency_range_hz(old_cell)
+                        new_freq = _get_frequency_range_hz(new_cell)
+                        if old_freq and new_freq:
+                            freq_change = _classify_frequency_range_change(
+                                old_freq[0], old_freq[1], new_freq[0], new_freq[1]
+                            )
+                            if freq_change != "frequency_range_unchanged":
+                                change_type = freq_change
+                                metadata["old_freq_lower_hz"] = old_freq[0]
+                                metadata["old_freq_upper_hz"] = old_freq[1]
+                                metadata["new_freq_lower_hz"] = new_freq[0]
+                                metadata["new_freq_upper_hz"] = new_freq[1]
 
                     cell_diffs.append(
                         CellDiff(
@@ -803,7 +921,7 @@ class TableMatchingEngine:
             return None
 
         best_match = None
-        best_score = 0.7  # Minimum similarity threshold
+        best_score = 0.65  # Minimum similarity threshold (lowered; Dice metric scores higher)
 
         for new_table in new_tables.values():
             score = self.diff_engine._compute_table_similarity(old_table, new_table)

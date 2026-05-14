@@ -1,0 +1,1220 @@
+[
+  {
+    "document_id": "254ae40f-0396-4ccc-9a77-937cbc3aba91",
+    "filename": "254ae40f-0396-4ccc-9a77-937cbc3aba91",
+    "total_tables": 0,
+    "tables_classified": 0,
+    "emc_type_distribution": {},
+    "overall_fact_coverage": 0.0,
+    "overall_row_key_coverage": 0.0,
+    "overall_column_mapped_pct": 0.0,
+    "total_normalized_facts": 0,
+    "errors": [],
+    "tables": []
+  },
+  {
+    "document_id": "323374da-3705-47a4-8d06-1d04b76240df",
+    "filename": "323374da-3705-47a4-8d06-1d04b76240df",
+    "total_tables": 0,
+    "tables_classified": 0,
+    "emc_type_distribution": {},
+    "overall_fact_coverage": 0.0,
+    "overall_row_key_coverage": 0.0,
+    "overall_column_mapped_pct": 0.0,
+    "total_normalized_facts": 0,
+    "errors": [],
+    "tables": []
+  },
+  {
+    "document_id": "64d92a00-537d-4340-a5e4-c03f9f0398eb",
+    "filename": "64d92a00-537d-4340-a5e4-c03f9f0398eb",
+    "total_tables": 12,
+    "tables_classified": 12,
+    "emc_type_distribution": {
+      "radiated_immunity": 11,
+      "transient_immunity": 1
+    },
+    "overall_fact_coverage": 0.16117216117216118,
+    "overall_row_key_coverage": 0.66,
+    "overall_column_mapped_pct": 0.6101694915254238,
+    "total_normalized_facts": 48,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "Tabelle 1 - Betriebs- und Prüfspannungen",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "column_1",
+          "versorgungsnetz nennspannung in v 12",
+          "versorgungsnetz nennspannung in v 24",
+          "versorgungsnetz nennspannung in v 42",
+          "versorgungsnetz nennspannung in v 48"
+        ],
+        "header_entity_types": [
+          "",
+          "FieldStrength",
+          "FieldStrength",
+          "FieldStrength",
+          "FieldStrength"
+        ],
+        "column_mapped_pct": 0.8,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 1,
+        "caption": "Tabelle 3 - FPSC Luftentladung Systemtest direkte Entladung",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1",
+          "kategorie 2",
+          "kategorie 3"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.625,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 5
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 2,
+        "caption": "Tabelle 4 - FPSC Kontaktentladung Systemtest direkte Entladung",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1",
+          "kategorie 2",
+          "kategorie 3"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.625,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 5
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 3,
+        "caption": "Tabelle 5 - FPSC Kontaktentladung indirekte Entladung",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1",
+          "kategorie 2",
+          "kategorie 3"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.625,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 5
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 4,
+        "caption": "Tabelle 13 - Funktionszustandsklassifizierung (Streifenleitung)",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1e in v/m",
+          "kategorie 2e in v/m",
+          "kategorie 3e in v/m"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 5,
+        "caption": "Tabelle 13 - Funktionszustandsklassifizierung (Streifenleitung)",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "a",
+          "kategorie 1",
+          "1 status i"
+        ],
+        "header_entity_types": [
+          "",
+          "ImmunityLevel",
+          ""
+        ],
+        "column_mapped_pct": 0.3333333333333333,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {},
+        "sample_row_keys": [
+          "a:a:a",
+          "b:b:b",
+          "c:c:c"
+        ]
+      },
+      {
+        "index": 6,
+        "caption": "Tabelle 21 - Test Nummer 26 aus der vorigen Tabelle",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "column_1",
+          "column_2",
+          "frequenz",
+          "column_4",
+          "column_5",
+          "av grenzwert",
+          "av",
+          "av",
+          "av bw"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "",
+          "",
+          "EmissionLimit",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.2222222222222222,
+        "fact_bearing_cells_pct": 0.04918032786885246,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "emission_limit": 3
+        },
+        "sample_row_keys": [
+          "1_552,_098",
+          "1_559,_098",
+          "1_563,_098"
+        ]
+      },
+      {
+        "index": 7,
+        "caption": "Tabelle 26 - Messempfängereinstellungen",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "detektor frequenzbereich in khz",
+          "peak bandbreite in khz",
+          "peak schrittweite in khz",
+          "peak messzeit in ms"
+        ],
+        "header_entity_types": [
+          "FrequencyRange",
+          "FrequencyRange",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {},
+        "sample_row_keys": [
+          "0,_2",
+          "9/10"
+        ]
+      },
+      {
+        "index": 8,
+        "caption": "Tabelle 30 - Einstellwerte für Störfestigkeitsmessungen Impulse (24 V)",
+        "emc_test_type": "transient_immunity",
+        "headers": [
+          "impulstyp",
+          "anzahl",
+          "u s in v",
+          "t d in μs",
+          "t r in μs",
+          "generator r i in ω",
+          "bemerkung"
+        ],
+        "header_entity_types": [
+          "Phenomenon",
+          "",
+          "FieldStrength",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.2857142857142857,
+        "fact_bearing_cells_pct": 0.20588235294117646,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "field_strength": 5,
+          "frequency_range": 2
+        },
+        "sample_row_keys": [
+          "impuls_1",
+          "impuls_2",
+          "impuls_3a"
+        ]
+      },
+      {
+        "index": 9,
+        "caption": "Tabelle 39 - Funktionszustandsklassifizierung (Fahrzeugprüfung)",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1e in v/m",
+          "kategorie 2e in v/m",
+          "kategorie 3e in v/m"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 10,
+        "caption": "Tabelle 41 - Mobilfunkprüfung mit portablen Gerätenachbildungen im Fahrzeuginnen",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "test nr.",
+          "dienst oder band",
+          "frequenzbereich in mhz",
+          "maximale fre- quenschritte in khz",
+          "p vor inw",
+          "p netto inw",
+          "modulation"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.14285714285714285,
+        "fact_bearing_cells_pct": 0.14583333333333334,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "frequency_range": 18
+        },
+        "sample_row_keys": [
+          "26,_5bis_28:am_1_000hz,_80_%modulationsgrad",
+          "68bis_87,_5:fm_1_000hz,_4khz_hub",
+          "144bis_174:fm_1_000hz,_4khz_hub"
+        ]
+      },
+      {
+        "index": 11,
+        "caption": "Tabelle 43 - FPSC Luftentladung Fahrzeug",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1",
+          "kategorie 2",
+          "kategorie 3"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.625,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 5
+        },
+        "sample_row_keys": []
+      }
+    ]
+  },
+  {
+    "document_id": "82cf92e7-2f98-495c-a5d7-24c78e9640a2",
+    "filename": "82cf92e7-2f98-495c-a5d7-24c78e9640a2",
+    "total_tables": 25,
+    "tables_classified": 24,
+    "emc_type_distribution": {
+      "radiated_immunity": 11,
+      "conducted_emissions": 12,
+      "transient_immunity": 1,
+      "unknown": 1
+    },
+    "overall_fact_coverage": 0.19471947194719472,
+    "overall_row_key_coverage": 0.6712962962962963,
+    "overall_column_mapped_pct": 0.4842105263157895,
+    "total_normalized_facts": 299,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "Tabelle 3 - FPSC Luftentladung Systemprüfung direkte Entladung",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1",
+          "kategorie 2",
+          "kategorie 3"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.625,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 5
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 1,
+        "caption": "Tabelle 4 - FPSC Kontaktentladung Systemprüfung direkte Entladung",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1",
+          "kategorie 2",
+          "kategorie 3"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.625,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 5
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 2,
+        "caption": "Tabelle 5 - FPSC Kontaktentladung indirekte Entladung",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1",
+          "kategorie 2",
+          "kategorie 3"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.625,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 5
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 3,
+        "caption": "Tabelle 13 - Funktionszustandsklassifizierung (Streifenleitung)",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "prüfschärfe l2",
+          "kategorie 1e in v/m 280a)",
+          "kategorie 2e in v/m 280a)",
+          "kategorie 3e in v/m nicht spezifiziert"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 4,
+        "caption": "Tabelle 13 - Funktionszustandsklassifizierung (Streifenleitung)",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "a",
+          "kategorie 1",
+          "1",
+          "status i"
+        ],
+        "header_entity_types": [
+          "",
+          "ImmunityLevel",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.25,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {},
+        "sample_row_keys": [
+          "a:a:a",
+          "b:b:b",
+          "c:c:c"
+        ]
+      },
+      {
+        "index": 5,
+        "caption": "Tabelle 14 - Mobilfunkprüfung auf Komponentenebene",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfung",
+          "prüf- nummer",
+          "dienst oder band",
+          "frequenz- bereich in mhz",
+          "maximale frequenzschritte in khz",
+          "leistung (p netto ) inw",
+          "modulation"
+        ],
+        "header_entity_types": [
+          "Phenomenon",
+          "",
+          "",
+          "FrequencyRange",
+          "FrequencyRange",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.42857142857142855,
+        "fact_bearing_cells_pct": 0.2236842105263158,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "frequency_range": 21
+        },
+        "sample_row_keys": [
+          ":100:am_1_000hz,_80_%modulationsgrad",
+          ":500:fm_1_000hz,_4khz_hub",
+          ":1_000:fm_1_000hz,_4khz_hub"
+        ]
+      },
+      {
+        "index": 6,
+        "caption": "Tabelle 19 (fortgesetzt)",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "prüf- nr.",
+          "dienst oder band",
+          "frequenz",
+          "column_4",
+          "column_5",
+          "pk grenzwert u in db (μv)",
+          "pk",
+          "pk",
+          "pk bw f in khz",
+          "qp grenzwert u in db (μv)",
+          "qp bw f in khz",
+          "av grenzwert u in db (μv)",
+          "av",
+          "av",
+          "av bw f in",
+          "column_16"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "",
+          "",
+          "EmissionLimit",
+          "",
+          "",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.375,
+        "fact_bearing_cells_pct": 0.13333333333333333,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "frequency_range": 1,
+          "emission_limit": 5
+        },
+        "sample_row_keys": [
+          "-:-",
+          "-:55",
+          "-:20"
+        ]
+      },
+      {
+        "index": 7,
+        "caption": "Tabelle 20 (fortgesetzt)",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "prüf- nr.",
+          "dienst oder band",
+          "frequenz",
+          "frequenz mhz",
+          "frequenz",
+          "pk grenzwert e in db(μv/m)",
+          "pk klasse",
+          "pk",
+          "pk bw f in",
+          "qp grenzwert e in db(μv/m) klasse",
+          "qp bw f in khz",
+          "qp e in klasse",
+          "av grenzwert db(μv/m)",
+          "av",
+          "av bw f in khz",
+          "av",
+          "column_17"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "FrequencyRange",
+          "FrequencyRange",
+          "EmissionLimit",
+          "AcceptanceCriterion",
+          "",
+          "",
+          "EmissionLimit",
+          "FrequencyRange",
+          "AcceptanceCriterion",
+          "EmissionLimit",
+          "",
+          "FrequencyRange",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.5882352941176471,
+        "fact_bearing_cells_pct": 0.2336065573770492,
+        "row_key_coverage_pct": 0.8,
+        "fact_type_counts": {
+          "frequency_range": 25,
+          "emission_limit": 32
+        },
+        "sample_row_keys": [
+          "9/10:8",
+          "9/10:8",
+          "9/10:8"
+        ]
+      },
+      {
+        "index": 8,
+        "caption": "Tabelle 20 (fortgesetzt)",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "column_1",
+          "column_2",
+          "dienst oder band frequenz",
+          "column_4",
+          "column_5",
+          "av grenzwert e in db(μv/m)",
+          "av",
+          "av",
+          "av bw"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "",
+          "",
+          "EmissionLimit",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.2222222222222222,
+        "fact_bearing_cells_pct": 0.04,
+        "row_key_coverage_pct": 0.9090909090909091,
+        "fact_type_counts": {
+          "emission_limit": 8
+        },
+        "sample_row_keys": [
+          "1_164:72_-_9_409_×_lg(f/1_164)",
+          "1_175,_45:32",
+          "1_177,_45:32_+_10_325_×_lg(f/1_177,_45)"
+        ]
+      },
+      {
+        "index": 9,
+        "caption": "Tabelle 23 (fortgesetzt)",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "prüf- nr.",
+          "dienst oder band",
+          "frequenz",
+          "column_4",
+          "column_5",
+          "pk grenzwert u in db (μv)",
+          "pk",
+          "pk",
+          "pk bw f in khz",
+          "qp grenzwert u in db (μv)",
+          "qp bw",
+          "av grenzwert u in db (μv)",
+          "av",
+          "av",
+          "av bw",
+          "column_16"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "",
+          "",
+          "EmissionLimit",
+          "",
+          "",
+          "FrequencyRange",
+          "EmissionLimit",
+          "",
+          "EmissionLimit",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.3125,
+        "fact_bearing_cells_pct": 0.20089285714285715,
+        "row_key_coverage_pct": 0.9375,
+        "fact_type_counts": {
+          "frequency_range": 16,
+          "emission_limit": 29
+        },
+        "sample_row_keys": [
+          "9/10:-",
+          "9/10:43",
+          "9/10:8"
+        ]
+      },
+      {
+        "index": 10,
+        "caption": "Tabelle 33 - Einstellwerte für Störfestigkeitsprüfungen Impulse (24 V)",
+        "emc_test_type": "transient_immunity",
+        "headers": [
+          "impulstyp",
+          "anzahl",
+          "u s in v",
+          "t d in μs",
+          "t r in μs",
+          "generator r i in ω",
+          "bemerkung"
+        ],
+        "header_entity_types": [
+          "Phenomenon",
+          "",
+          "FieldStrength",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.2857142857142857,
+        "fact_bearing_cells_pct": 0.21311475409836064,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "field_strength": 9,
+          "frequency_range": 4
+        },
+        "sample_row_keys": [
+          "impuls_1",
+          "impuls_2",
+          "impuls_3a"
+        ]
+      },
+      {
+        "index": 11,
+        "caption": "Tabelle 35 - Maximal zulässige Störaussendung für 12-V-Störquellen",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "impulstyp",
+          "u s in v",
+          "t d in μs",
+          "t r in μs"
+        ],
+        "header_entity_types": [
+          "Phenomenon",
+          "FieldStrength",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 12,
+        "caption": "Tabelle 36 - Maximal zulässige Störaussendung für 24-V-Störquellen",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "impulstyp",
+          "u s in v",
+          "t d in μs",
+          "t r in μs"
+        ],
+        "header_entity_types": [
+          "Phenomenon",
+          "FieldStrength",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 13,
+        "caption": "Tabelle 36 - Maximal zulässige Störaussendung für 24-V-Störquellen",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "impulstyp",
+          "u gegen mas- se",
+          "t d in μs",
+          "t r in μs"
+        ],
+        "header_entity_types": [
+          "Phenomenon",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.25,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {},
+        "sample_row_keys": [
+          "impuls_48a",
+          "impuls_48"
+        ]
+      },
+      {
+        "index": 14,
+        "caption": "Tabelle 38 - Einstellwerte",
+        "emc_test_type": "unknown",
+        "headers": [
+          "methode",
+          "impulstyp",
+          "anzahl",
+          "u s in v fpsc i level 1",
+          "t d in μs",
+          "t r in μs",
+          "generator r i in ω"
+        ],
+        "header_entity_types": [
+          "TestMethod",
+          "Phenomenon",
+          "",
+          "FieldStrength",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.42857142857142855,
+        "fact_bearing_cells_pct": 0.16666666666666666,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 2
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 15,
+        "caption": "Tabelle 38 (fortgesetzt)",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "methode",
+          "impulstyp",
+          "anzahl",
+          "u s in v fpsc i level 1",
+          "t d in μs",
+          "t r in μs",
+          "generator r i in ω"
+        ],
+        "header_entity_types": [
+          "TestMethod",
+          "Phenomenon",
+          "",
+          "FieldStrength",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.42857142857142855,
+        "fact_bearing_cells_pct": 0.16666666666666666,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 2
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 16,
+        "caption": "Tabelle 40 (fortgesetzt)",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "prüf nr.",
+          "dienst oder band",
+          "frequenz in mhz",
+          "pk grenz- wert u in db (μv)",
+          "pk bw f in khz",
+          "qp grenz- wert u in db (μv)",
+          "qp bw f in khz",
+          "av grenz- wert u in db (μv)",
+          "av bw f in khz",
+          "ant.- pos. a)"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          ""
+        ],
+        "column_mapped_pct": 0.7,
+        "fact_bearing_cells_pct": 0.1,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "emission_limit": 2
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 17,
+        "caption": "Tabelle 40 (fortgesetzt)",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "prüf- nr.",
+          "dienst oder band",
+          "frequenz in mhz",
+          "column_4",
+          "column_5",
+          "pk grenz- wert u in db (μv)",
+          "pk bw f in khz",
+          "qp grenz- wert u in db (μv)",
+          "qp bw f in khz",
+          "av grenz- wert u in db (μv)",
+          "av bw f in khz",
+          "ant.- pos. a)"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "",
+          "",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          ""
+        ],
+        "column_mapped_pct": 0.5833333333333334,
+        "fact_bearing_cells_pct": 0.27848101265822783,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "frequency_range": 19,
+          "emission_limit": 25
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 18,
+        "caption": "Tabelle 41 (fortgesetzt)",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "prüf- nr.",
+          "dienst oder band",
+          "in",
+          "frequenz",
+          "mhz",
+          "pk grenz- wert u in db (μv)",
+          "pk bw f in khz",
+          "qp grenz- wert u in db (μv)",
+          "qp bw f in khz",
+          "av grenz- wert u in db (μv)",
+          "av bw f in khz",
+          "ant.- pos. a)"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "",
+          "FrequencyRange",
+          "",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          ""
+        ],
+        "column_mapped_pct": 0.5833333333333334,
+        "fact_bearing_cells_pct": 0.0898876404494382,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "emission_limit": 8
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 19,
+        "caption": "Tabelle 41 (fortgesetzt)",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "prüf- nr.",
+          "dienst oder band",
+          "frequenz",
+          "column_4",
+          "column_5",
+          "av grenzwert",
+          "av bw",
+          "ant.- pos. a)"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "",
+          "",
+          "EmissionLimit",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.25,
+        "fact_bearing_cells_pct": 0.06578947368421052,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "emission_limit": 5
+        },
+        "sample_row_keys": [
+          "1_164:35_-_9_409_×_lg(f/1_164)",
+          "1_175,_45:-5",
+          "1_177,_45:10_325_×_lg(f/1_177,_45)_-_5"
+        ]
+      },
+      {
+        "index": 20,
+        "caption": "Tabelle 43 - Prüfung Nummer 25 aus der vorigen Tabelle",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüf- nr.",
+          "dienst oder band",
+          "frequenz",
+          "frequenz",
+          "frequenz",
+          "av grenzwert",
+          "av bw",
+          "ant.- pos. a)"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "FrequencyRange",
+          "FrequencyRange",
+          "EmissionLimit",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.06578947368421052,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "emission_limit": 5
+        },
+        "sample_row_keys": [
+          "1_559,_098",
+          "1_563,_098",
+          "1_570,_098"
+        ]
+      },
+      {
+        "index": 21,
+        "caption": "Tabelle 44 - Fahrzeugprüfung (im Fernfeld)",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "frequenzbereich in mhz 0, 1",
+          "frequenzbereich in mhz bis 30",
+          "prüffeldstärke in v/m 140",
+          "polarisation vertikal",
+          "modulation cw oder am (1khz, 80 %)"
+        ],
+        "header_entity_types": [
+          "FrequencyRange",
+          "FrequencyRange",
+          "FieldStrength",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.6,
+        "fact_bearing_cells_pct": 0.4642857142857143,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "field_strength": 21,
+          "frequency_range": 18
+        },
+        "sample_row_keys": [
+          "bis_30:cw_oder_am_(1khz,_80_%)",
+          "bis_54:cw_oder_am_(1khz,_80_%)",
+          "bis_65:cw_oder_am_(1khz,_80_%)"
+        ]
+      },
+      {
+        "index": 22,
+        "caption": "Tabelle 44 (fortgesetzt)",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "optional",
+          "5 930bis 6 000",
+          "30",
+          "vertikal und horizontal",
+          "cw"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.0,
+        "fact_bearing_cells_pct": 0.6333333333333333,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "frequency_range": 19
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 23,
+        "caption": "Tabelle 47 (fortgesetzt)",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüf nr.",
+          "dienst oder band",
+          "frequenzbereich in mhz",
+          "maximale fre- quenschritte in khz",
+          "p vor inw",
+          "p netto inw",
+          "modulation"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "FrequencyRange",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.14285714285714285,
+        "fact_bearing_cells_pct": 0.125,
+        "row_key_coverage_pct": 0.5,
+        "fact_type_counts": {
+          "frequency_range": 3
+        },
+        "sample_row_keys": [
+          "3_400bis_4_200_4_600bis_5_150:pm_1_600hz,_50_%tastverhältnis",
+          "5_150bis_5_850:pm_1_600hz,_50_%tastverhältnis",
+          "5_850bis_5_930:pm_1_600hz,_50_%tastverhältnis"
+        ]
+      },
+      {
+        "index": 24,
+        "caption": "Tabelle 49 - FPSC Luftentladung Fahrzeug",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "prüfschärfe",
+          "kategorie 1",
+          "kategorie 2",
+          "kategorie 3"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.625,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 5
+        },
+        "sample_row_keys": []
+      }
+    ]
+  },
+  {
+    "document_id": "a6fe17d5-6992-4f61-9c45-d6d448ad4583",
+    "filename": "a6fe17d5-6992-4f61-9c45-d6d448ad4583",
+    "total_tables": 0,
+    "tables_classified": 0,
+    "emc_type_distribution": {},
+    "overall_fact_coverage": 0.0,
+    "overall_row_key_coverage": 0.0,
+    "overall_column_mapped_pct": 0.0,
+    "total_normalized_facts": 0,
+    "errors": [],
+    "tables": []
+  }
+]

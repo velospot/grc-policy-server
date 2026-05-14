@@ -1,7 +1,9 @@
-"""Automotive EMC domain ontology — entity types, unit normalization, test classification,
+"""EMC and related domain ontology — entity types, unit normalization, test classification,
 and NormalizedFact extraction from table cells.
 
-All processing is offline (regex + dict lookups, no network calls, no LLM).
+Covers automotive EMC (TL 81000), IEC environmental testing (DIN EN 60068),
+and maritime EMC (DNV CG-0339). All processing is offline (regex + dict lookups,
+no network calls, no LLM).
 """
 
 from __future__ import annotations
@@ -14,12 +16,14 @@ from typing import Any
 
 
 class EMCTestType(str, Enum):
-    """Detected EMC test type — determines domain-specific row key structure."""
+    """Detected test type — determines domain-specific row key structure."""
 
     RADIATED_IMMUNITY = "radiated_immunity"
     CONDUCTED_EMISSIONS = "conducted_emissions"
     ESD = "esd"
     TRANSIENT_IMMUNITY = "transient_immunity"
+    ENVIRONMENTAL_VIBRATION = "environmental_vibration"  # DIN EN 60068 vibration/shock
+    MARITIME_INSTALLATION = "maritime_installation"       # DNV location/class tables
     UNKNOWN = "unknown"
 
 
@@ -35,6 +39,7 @@ class OntologyEntityType(str, Enum):
     NUMERIC_LIMIT = "NumericLimit"
     IMMUNITY_LEVEL = "ImmunityLevel"
     TEST_METHOD = "TestMethod"
+    TEST_NUMBER = "TestNumber"
 
 
 # KB spec: domain-specific row key column patterns per test type
@@ -50,6 +55,14 @@ EMC_DOMAIN_ROW_KEYS: dict[EMCTestType, list[str]] = {
     ],
     EMCTestType.TRANSIENT_IMMUNITY: [
         "phenomenon", "pulse_type", "supply_voltage", "coupling_path", "severity_level"
+    ],
+    # DIN EN 60068 vibration/shock test categories
+    EMCTestType.ENVIRONMENTAL_VIBRATION: [
+        "kategorie", "beschreibung", "specification",
+    ],
+    # DNV CG-0339 installation location / EMC class tables
+    EMCTestType.MARITIME_INSTALLATION: [
+        "parameters", "class", "location",
     ],
 }
 
@@ -211,6 +224,11 @@ class UnitNormalizer:
             "dBuA": ("dBuA", "emission_limit"),
             "dBµV/m": ("dBuV/m", "emission_limit"),
             "dBuV/m": ("dBuV/m", "emission_limit"),
+            # Spaced / alternative notations for dBuV (DNV tables)
+            "db(µv)": ("dBuV", "emission_limit"),
+            "db(uv)": ("dBuV", "emission_limit"),
+            "dbµv": ("dBuV", "emission_limit"),
+            "dbuv": ("dBuV", "emission_limit"),
             "V/m": ("V/m", "field_strength"),
             "mV/m": ("mV/m", "field_strength"),
             "dBV/m": ("dBV/m", "field_strength"),
@@ -222,6 +240,15 @@ class UnitNormalizer:
             "V": ("V", "voltage"),
             "mA": ("mA", "current"),
             "A": ("A", "current"),
+            # DIN EN 60068 — acceleration / vibration units
+            "m/s²": ("m/s²", "acceleration"),
+            "m/s2": ("m/s²", "acceleration"),
+            "(m/s²)²/hz": ("(m/s²)²/Hz", "psd"),
+            "(m/s2)2/hz": ("(m/s²)²/Hz", "psd"),
+            "g²/hz": ("g²/Hz", "psd"),
+            "g2/hz": ("g²/Hz", "psd"),
+            "g": ("g", "acceleration"),
+            "mm": ("mm", "displacement"),
         }
         for key, val in mapping.items():
             if raw.lower() == key.lower():
@@ -251,6 +278,24 @@ _TRANSIENT_SIGNALS = {
     "transient", "eft", "electrical fast transient", "burst",
     "surge", "pulse", "pfmf", "ring wave",
 }
+# DIN EN 60068 — environmental vibration / shock testing signals.
+# Use specific multi-word phrases or German terms to avoid false positives on
+# generic words like "vibration" or "severity" that appear in EMC documents too.
+_ENVIRONMENTAL_VIBRATION_SIGNALS = {
+    "random vibration", "sinusoidal vibration",
+    "spektrale beschleunigungsdichte", "power spectral density",
+    "beschleunigungsdichte",
+    "schwingung", "schweregrad",
+    "sinusschwingung",
+    "mechanische erschütterung",
+}
+# DNV CG-0339 — maritime installation location / EMC class tables
+_MARITIME_INSTALLATION_SIGNALS = {
+    "machinery spaces", "control room", "accommodation", "bridge", "open deck",
+    "pump room", "below floor plates", "masts",
+    "column i", "column ii", "main areas on board",
+    "installation class", "emc class",
+}
 
 
 class EMCTestClassifier:
@@ -267,6 +312,15 @@ class EMCTestClassifier:
         return self._classify_text(combined)
 
     def _classify_text(self, text: str) -> EMCTestType:
+        # Environmental vibration is a distinct domain — check first to avoid
+        # false EMC matches on shared terms like "level" or "frequency".
+        for signal in _ENVIRONMENTAL_VIBRATION_SIGNALS:
+            if signal in text:
+                return EMCTestType.ENVIRONMENTAL_VIBRATION
+        # Maritime installation class tables (location/area grids)
+        for signal in _MARITIME_INSTALLATION_SIGNALS:
+            if signal in text:
+                return EMCTestType.MARITIME_INSTALLATION
         for signal in _ESD_SIGNALS:
             if signal in text:
                 return EMCTestType.ESD
@@ -355,7 +409,8 @@ class NormalizedFactExtractor:
 
         # Emission limit (dBuV, dBuA)
         for m in _EMISSION_LIMIT_RE.finditer(cell_text):
-            norm_unit, _ = self._normalizer.normalize_unit(m.group(2))
+            raw_unit = m.group(2) or "dBuV"  # group 2 is None for spaced db(μv) form
+            norm_unit, _ = self._normalizer.normalize_unit(raw_unit)
             facts.append(NormalizedFact(
                 fact_id=_new_fact_id(),
                 owner_object_id=owner_object_id,
@@ -446,6 +501,40 @@ class NormalizedFactExtractor:
             ))
 
         return facts
+
+    def extract_bare_numeric_with_unit(
+        self,
+        cell_text: str,
+        inherited_unit: str,
+        fact_type: str,
+        owner_object_id: str = "",
+    ) -> "list[Any]":
+        """Extract a bare numeric value from a cell using an inherited column unit.
+
+        Used for column-unit inheritance: when a column is typed (e.g. EmissionLimit →
+        dBuV) but the cell only contains the numeric part (e.g. "66"), synthesise a fact
+        by pairing the number with the column's canonical unit.
+        """
+        from grc_policy_server.services.documents.canonical_table_model import NormalizedFact
+
+        _BARE_NUMERIC_RE = re.compile(r"^\s*[±+\-]?\s*(\d+(?:[.,]\d+)?)\s*$")
+        m = _BARE_NUMERIC_RE.match(cell_text)
+        if not m:
+            return []
+        try:
+            float(m.group(1).replace(",", "."))
+        except ValueError:
+            return []
+        return [NormalizedFact(
+            fact_id=_new_fact_id(),
+            owner_object_id=owner_object_id,
+            fact_type=fact_type,
+            name=fact_type,
+            value=m.group(1).replace(",", "."),
+            unit=inherited_unit,
+            raw_value=cell_text.strip(),
+            confidence=0.75,
+        )]
 
 
 def _new_fact_id() -> str:

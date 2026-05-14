@@ -49,6 +49,8 @@ class KeyDifference(BaseModel):
         default_factory=list
     )  # Specific changes for highlighting
     markdownDiffSummary: Optional[str] = None  # LLM-generated markdown diff summary
+    requiresHumanReview: bool = False
+    severityConfidence: Optional[float] = None
 
 
 class ActionItem(BaseModel):
@@ -84,12 +86,17 @@ class ComparisonResult(BaseModel):
     actionPlan: List[ActionItem]
     followUpQuestions: List[str]
     accuracyMetrics: Optional[ComparisonAccuracyMetrics] = None
+    comparisonMode: Literal["auditor_grade", "simple"] = "auditor_grade"
+    requireHumanReview: bool = False
+    hiddenDiffsCount: int = 0
 
 
 class CompareRequest(BaseModel):
     doc1: Document
     doc2: Document
     forceReExtract: bool = False
+    auditMode: bool = True
+    saveToDb: bool = False
 
 
 class DiffChunk(BaseModel):

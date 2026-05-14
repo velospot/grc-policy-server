@@ -31,6 +31,65 @@ _VERSION_SUFFIX_RE = re.compile(
     r"(?i)(?:[-_ ](?:v(?:ersion)?[-_ ]?)?\d+(?:\.\d+)*)$"
 )
 _MAX_SECTION_TEXT = 5000
+
+# Header/footer suppression -----------------------------------------------
+# Patterns that identify page headers and footers to exclude from hierarchy.
+_PAGE_NUMBER_ONLY_RE = re.compile(r"^\s*(?:seite\s+)?\d+(?:\s+von\s+\d+)?\s*$", re.IGNORECASE)
+_CONFIDENTIALITY_FRAGMENTS = (
+    "volkswagen ag vertraulich",
+    "vw ag confidential",
+    "confidential",
+    "vertraulich",
+    "nur für internen gebrauch",
+    "internal use only",
+    "company confidential",
+    "proprietary",
+)
+
+
+def _is_header_footer_chunk(chunk: "ParsedChunk") -> bool:
+    """Return True if *chunk* looks like a repeating page header or footer."""
+    text = (chunk.text or "").strip()
+    if not text or len(text) > 200:
+        return False
+    if _PAGE_NUMBER_ONLY_RE.fullmatch(text):
+        return True
+    text_lower = text.lower()
+    return any(frag in text_lower for frag in _CONFIDENTIALITY_FRAGMENTS)
+
+
+def filter_header_footer_chunks(chunks: Iterable["ParsedChunk"]) -> list["ParsedChunk"]:
+    """Remove page header/footer chunks from *chunks*.
+
+    Operates in two passes:
+    1. Suppress obvious single-line confidentiality stamps and page number lines.
+    2. Suppress short text chunks (≤120 chars) that appear on ≥40% of pages —
+       these are repeating headers/footers even if the text is less obvious.
+    """
+    chunk_list = list(chunks)
+    if not chunk_list:
+        return chunk_list
+
+    # Pass 1: pattern-based suppression
+    pass1 = [c for c in chunk_list if not _is_header_footer_chunk(c)]
+
+    # Pass 2: frequency-based suppression for short text on many pages
+    pages = {c.page_number for c in pass1 if c.page_number is not None}
+    total_pages = max(len(pages), 1)
+    threshold = max(2, int(total_pages * 0.4))
+
+    text_page_map: dict[str, set[int]] = {}
+    for c in pass1:
+        txt = (c.text or "").strip()
+        if 0 < len(txt) <= 120 and c.page_number is not None:
+            text_page_map.setdefault(txt, set()).add(c.page_number)
+
+    frequent_texts = {txt for txt, pg_set in text_page_map.items() if len(pg_set) >= threshold}
+
+    return [
+        c for c in pass1
+        if not ((c.text or "").strip() in frequent_texts)
+    ]
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _SUMMARY_OBLIGATION_RE = re.compile(
     r"\b(shall|must|required|should|may|muss|müssen|soll|sollen|"
@@ -62,7 +121,8 @@ def build_document_hierarchy(
     section_leaf_ordinals: dict[tuple[str, ...], int] = defaultdict(int)
     section_ordinal = 0
 
-    for chunk in sorted(parsed_chunks, key=lambda item: (item.page_number or 0, item.ordinal)):
+    filtered_chunks = filter_header_footer_chunks(parsed_chunks)
+    for chunk in sorted(filtered_chunks, key=lambda item: (item.page_number or 0, item.ordinal)):
         section_titles = _normalize_section_titles(chunk)
         section_path = " / ".join(section_titles) if section_titles else "Unknown Section"
         inherited_reason = _get_inherited_exclusion(section_titles, section_exclusions)

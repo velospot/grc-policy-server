@@ -4,6 +4,7 @@ from grc_policy_server.api.deps import (
     get_diff_engine_stream,
     require_api_bearer_token,
 )
+from grc_policy_server.core.config import settings
 from grc_policy_server.models.schemas import (
     ActionItem,
     ComparisonAccuracyMetrics,
@@ -68,10 +69,22 @@ async def compare_with_summary(
             detail="Comparison stream finished without a summary payload",
         )
 
+    audit_mode = payload.auditMode
+    hidden_diffs_count = 0
+    if not audit_mode:
+        visible = [d for d in key_differences if d.changeSeverity != "low"]
+        hidden_diffs_count = len(key_differences) - len(visible)
+        key_differences = visible
+
+    require_human_review = any(d.requiresHumanReview for d in key_differences)
+
     return ComparisonResult(
         summary=summary,
         keyDifferences=key_differences,
         actionPlan=action_plan,
         followUpQuestions=follow_up_questions,
         accuracyMetrics=accuracy_metrics,
+        comparisonMode="auditor_grade" if audit_mode else "simple",
+        requireHumanReview=require_human_review,
+        hiddenDiffsCount=hidden_diffs_count,
     )

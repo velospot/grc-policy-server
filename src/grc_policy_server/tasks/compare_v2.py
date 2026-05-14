@@ -55,10 +55,13 @@ def _build_diff_engine() -> tuple[
 async def _compare_payload(payload: CompareTaskPayload) -> dict[str, Any]:
     engine, weaviate, neo4j, llm = _build_diff_engine()
     try:
+        effective_save_to_db = payload.save_to_db or settings.save_comparison_to_db
         result = await engine.compare(
             payload.doc1,
             payload.doc2,
             force_re_extract=payload.force_re_extract,
+            audit_mode=payload.audit_mode,
+            save_to_db=effective_save_to_db,
         )
         cache_store = ComparisonCacheStore(upload_root=Path(settings.upload_root))
         cache_store.save_for_key(

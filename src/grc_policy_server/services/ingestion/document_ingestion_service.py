@@ -27,6 +27,7 @@ from grc_policy_server.services.ingestion.opendataloader_adapter import OpenData
 from grc_policy_server.services.ingestion.opendataloader_chunker import (
     parse_opendataloader_elements,
 )
+from grc_policy_server.services.ingestion.document_family_profile import get_profile_for_document
 from grc_policy_server.services.ingestion.table_quality_enhancer import (
     enhance_table_chunks,
     filter_degenerate_table_chunks,
@@ -232,7 +233,8 @@ class DocumentIngestionService:
 
         if is_pdf:
             chunks = await asyncio.to_thread(enhance_table_chunks, content, chunks)
-            chunks = filter_degenerate_table_chunks(chunks)
+            _profile = get_profile_for_document(filename=filename)
+            chunks = filter_degenerate_table_chunks(chunks, profile=_profile)
 
         return chunks, ocr_metadata, extraction_json, opd_elements
 

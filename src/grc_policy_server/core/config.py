@@ -134,6 +134,7 @@ class Settings(BaseSettings):
     neo4j_password: str = "password"
     neo4j_database: str = "neo4j"
     neo4j_enabled: bool = False
+    save_comparison_to_db: bool = False
 
     weaviate_url: str = "http://weaviate:8080"
     weaviate_collection: str = "PolicyChunk"

@@ -400,13 +400,46 @@ class RowChangeDetector:
 
     @staticmethod
     def _detect_column_changes(old_table: CanonicalTable, new_table: CanonicalTable) -> dict[str, Any]:
-        """Detect changes to table columns."""
+        """Detect column additions, removals, and renames.
+
+        A RENAME is identified when a removed header and an added header both map
+        to the same OntologyEntityType via map_header() — e.g. 'Prüf.Nr' and
+        'Test.Nr' both map to TEST_NUMBER and are classified as COLUMN_RENAMED
+        rather than separate COLUMN_REMOVED + COLUMN_ADDED events.
+        """
+        from grc_policy_server.services.ingestion.ontology.column_mapper import map_header
+
         old_cols = {col.name for col in old_table.columns}
         new_cols = {col.name for col in new_table.columns}
+        raw_added = new_cols - old_cols
+        raw_removed = old_cols - new_cols
+
+        renames: list[dict[str, str]] = []
+        matched_added: set[str] = set()
+        matched_removed: set[str] = set()
+
+        for removed_header in raw_removed:
+            removed_entity = map_header(removed_header)
+            if removed_entity is None:
+                continue
+            for added_header in raw_added:
+                if added_header in matched_added:
+                    continue
+                added_entity = map_header(added_header)
+                if added_entity is not None and added_entity == removed_entity:
+                    renames.append({
+                        "old_name": removed_header,
+                        "new_name": added_header,
+                        "entity_type": removed_entity.value,
+                    })
+                    matched_added.add(added_header)
+                    matched_removed.add(removed_header)
+                    break
 
         return {
-            "columns_added": sorted(list(new_cols - old_cols)),
-            "columns_removed": sorted(list(old_cols - new_cols)),
+            "columns_added": sorted(raw_added - matched_added),
+            "columns_removed": sorted(raw_removed - matched_removed),
+            "columns_renamed": renames,
             "column_count_old": len(old_table.columns),
             "column_count_new": len(new_table.columns),
         }

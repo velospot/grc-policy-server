@@ -4,9 +4,16 @@ import io
 import logging
 import re
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-_TABLE_CAPTION_NUM_RE = re.compile(r"\bTabell?e\s+\d+[A-Za-z]?\b", re.IGNORECASE)
+if TYPE_CHECKING:
+    from grc_policy_server.services.ingestion.document_family_profile import DocumentFamilyProfile
+
+# Matches numbered table captions in German (Tabelle 3, Tabelle A.1) and English (Table 2, Table 23)
+_TABLE_CAPTION_NUM_RE = re.compile(
+    r"\b(?:Tabell?e|Table)\s+(?:[A-Z]\.)?\d+(?:\.\d+)*[A-Za-z]?\b",
+    re.IGNORECASE,
+)
 # Section headings that indicate reference/legend content, not normative tables.
 # Tables in these sections without a numbered caption are lists, not tables.
 _REFERENCE_SECTION_RE = re.compile(
@@ -112,15 +119,20 @@ _MIN_TABLE_COLS = 2
 _MIN_CELL_FILL_PERCENT = 40  # Tables must be at least 40% filled with cells
 
 
-def filter_degenerate_table_chunks(chunks: list[ParsedChunk]) -> list[ParsedChunk]:
+def filter_degenerate_table_chunks(
+    chunks: list[ParsedChunk],
+    profile: "DocumentFamilyProfile | None" = None,
+) -> list[ParsedChunk]:
     """Demote single-column tables whose header reads like a sentence to paragraphs.
 
     Docling sometimes misclassifies definition lists as 1-column tables where the
     "header" is the full first definition sentence rather than a column label.
+    Pass *profile* to enable conservative mode for document families (e.g. DIN, DNV)
+    where structural heuristics are too aggressive.
     """
     result = []
     for chunk in chunks:
-        if chunk.chunk_type == "table" and _is_degenerate_table(chunk):
+        if chunk.chunk_type == "table" and _is_degenerate_table(chunk, profile=profile):
             result.append(replace(chunk, chunk_type="paragraph"))
         else:
             result.append(chunk)
@@ -142,7 +154,8 @@ def _validate_table_structure(chunk: ParsedChunk) -> bool:
         return False
 
     # Check cell density: actual cells / (rows × cols)
-    cells = chunk.metadata.get("table_cells") or []
+    # Cells are stored at metadata["table_structure"]["cells"], not at the top level.
+    cells = (chunk.metadata.get("table_structure") or {}).get("cells") or []
     expected_cells = num_rows * num_cols
     cell_fill_percent = (len(cells) / expected_cells * 100) if expected_cells > 0 else 0
 
@@ -158,7 +171,7 @@ def _is_list_like_table(chunk: ParsedChunk) -> bool:
     Returns:
         True if content appears list-like, False if it appears table-like.
     """
-    cells = chunk.metadata.get("table_cells") or []
+    cells = (chunk.metadata.get("table_structure") or {}).get("cells") or []
     if not cells:
         return False
 
@@ -184,13 +197,16 @@ def _is_list_like_table(chunk: ParsedChunk) -> bool:
     return False
 
 
-def _is_degenerate_table(chunk: ParsedChunk) -> bool:
+def _is_degenerate_table(
+    chunk: ParsedChunk,
+    profile: "DocumentFamilyProfile | None" = None,
+) -> bool:
     ts = chunk.metadata.get("table_structure") or {}
     num_cols = int(ts.get("num_cols") or 0)
     section = str(chunk.section_path or "")
 
-    # A numbered caption ("Tabelle N") anywhere in the section path means Docling
-    # confirmed this as a captioned real table — never demote it.
+    # A numbered caption ("Tabelle N" / "Table N") anywhere in the section path means
+    # Docling confirmed this as a captioned real table — never demote it.
     if _TABLE_CAPTION_NUM_RE.search(section):
         return False
 
@@ -199,13 +215,19 @@ def _is_degenerate_table(chunk: ParsedChunk) -> bool:
     if _REFERENCE_SECTION_RE.search(section):
         return True
 
-    # NEW: Structural validation - reject sparse/minimal tables
-    if not _validate_table_structure(chunk):
-        return True
+    # Conservative mode: technical standard families (DIN, DNV) very rarely produce
+    # genuinely degenerate tables. Skip structural/list heuristics — only the
+    # sentence-header check below applies.
+    conservative = profile is not None and getattr(profile, "conservative_table_filter", False)
 
-    # NEW: Content heuristics - detect list-like patterns
-    if _is_list_like_table(chunk):
-        return True
+    if not conservative:
+        # Structural validation - reject sparse/minimal tables
+        if not _validate_table_structure(chunk):
+            return True
+
+        # Content heuristics - detect list-like patterns
+        if _is_list_like_table(chunk):
+            return True
 
     # Single-column table whose header reads like a sentence (not a column label)
     # is almost certainly a definition list that Docling misclassified as a table.

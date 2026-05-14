@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from io import BytesIO
 from typing import Any, Optional
 
@@ -49,7 +50,8 @@ class DoclingAdapter:
             settings.docling_cuda_use_flash_attention2
         )
         pdf_options.ocr_options = OcrAutoOptions(force_full_page_ocr=False)
-
+        pdf_options.layout_batch_size = 64
+        pdf_options.table_batch_size = 4
         if force_full_page_ocr:
             pdf_options.ocr_options = TesseractCliOcrOptions(
                 force_full_page_ocr=True,
@@ -84,11 +86,15 @@ class DoclingAdapter:
 
         stream = BytesIO(content)
         source = DocumentStream(name=filename, stream=stream)
+        start_time = time.time()
         result = converter.convert(source)
-
+        pipeline_runtime = time.time() - start_time
         if not result.document:
             raise RuntimeError(f"Docling conversion failed for {filename}")
 
+        num_pages = len(result.pages)
+        logger.info(f"Document converted in {pipeline_runtime:.2f} seconds.")
+        logger.info(f"  {num_pages / pipeline_runtime:.2f} pages/second.")
         doc = result.document
         continuation_hints = self._detect_multi_page_continuations(doc)
         if continuation_hints:
@@ -147,6 +153,10 @@ class DoclingAdapter:
             headers1 = _header_texts(t1)
             # Check whether the first row of t2 repeats headers from t1
             first_row2 = _header_texts(t2)
-            if headers1 and first_row2 and len(headers1 & first_row2) / len(headers1) >= 0.6:
+            if (
+                headers1
+                and first_row2
+                and len(headers1 & first_row2) / len(headers1) >= 0.6
+            ):
                 hints.append((i, i + 1))
         return hints

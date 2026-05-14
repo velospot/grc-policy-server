@@ -33,6 +33,7 @@ from grc_policy_server.services.comparison.change_records import (
     is_reference_number_only_change,
 )
 from grc_policy_server.services.comparison.severity_classifier import (
+    AuditDisposition,
     ClassificationContext,
     SeverityClassifier,
 )
@@ -59,6 +60,69 @@ from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Normative strength helpers (Phase E2)
+# ---------------------------------------------------------------------------
+
+def _extract_normative_strength(text: str) -> int:
+    """Return the numeric strength of the strongest obligation term found in *text*.
+
+    Uses NormalizedFactExtractor for fact-level precision, falling back to -1
+    (unknown) if no normative term is found or the extractor is unavailable.
+    Strength scale from OBLIGATION_STRENGTH in policy_semantics.py:
+      may=0, should=1, recommended=2, required=3, must=4, shall=5
+    """
+    try:
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import NormalizedFactExtractor
+        from grc_policy_server.services.comparison.policy_semantics import OBLIGATION_STRENGTH
+        extractor = NormalizedFactExtractor()
+        facts = extractor.extract_from_cell(text or "", column_name="")
+        strengths = [
+            OBLIGATION_STRENGTH.get((f.value or "").lower(), -1)
+            for f in facts
+            if getattr(f, "fact_type", "") == "normative_term"
+        ]
+        return max(strengths) if strengths else -1
+    except Exception:
+        return -1
+
+
+def _evidence_from_node(node: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Build an evidence record from a canonical node dict for citation attachment.
+
+    Returns a dict with node_id, page, section, heading_path, and node_type
+    so auditors can trace every ChangeRecord back to its source PDF location.
+    """
+    if not node:
+        return None
+    return {
+        "node_id": str(node.get("node_id") or ""),
+        "node_type": str(node.get("node_type") or ""),
+        "page": node.get("page_from") or node.get("page") or None,
+        "section": str(
+            (node.get("section_path") or node.get("heading_path") or ["Unknown"])[-1]
+        ),
+        "heading_path": node.get("heading_path") or node.get("section_path") or [],
+    }
+
+
+def _normative_strength_change(left_text: str, right_text: str) -> dict[str, str] | None:
+    """Compare normative strength between old and new text using fact extraction.
+
+    Returns a dict with "old_strength", "new_strength", "direction" when a
+    meaningful strength change is detected, or None when unchanged / indeterminate.
+    Complements text-level `detect_requirement_verb_change` for obligation terms
+    that appear inside tables rather than free-form clause prose.
+    """
+    old_s = _extract_normative_strength(left_text)
+    new_s = _extract_normative_strength(right_text)
+    if old_s < 0 or new_s < 0 or old_s == new_s:
+        return None
+    direction = "strengthened" if new_s > old_s else "weakened"
+    return {"old_strength": str(old_s), "new_strength": str(new_s), "direction": direction}
+
 
 # Caption row: a table row 0 whose single spanning cell is "Table N …" / "Figure N …"
 _CAPTION_ROW_RE = re.compile(r"^(?:table|tbl\.?|figure|fig\.?)\s*\d", re.IGNORECASE)
@@ -110,6 +174,8 @@ class RealDiffEngine:
         doc1: Document,
         doc2: Document,
         force_re_extract: bool = False,
+        audit_mode: bool = True,
+        save_to_db: bool = False,
     ) -> ComparisonResult:
         left_nodes = self._load_comparison_nodes(doc1.id)
         right_nodes = self._load_comparison_nodes(doc2.id)
@@ -273,13 +339,29 @@ class RealDiffEngine:
             follow_up_questions=follow_up_questions,
         )
 
-        return ComparisonResult(
+        hidden_diffs_count = 0
+        if not audit_mode:
+            visible_diffs = [d for d in diffs if d.changeSeverity != "low"]
+            hidden_diffs_count = len(diffs) - len(visible_diffs)
+            diffs = visible_diffs
+
+        require_human_review = any(d.requiresHumanReview for d in diffs)
+
+        result = ComparisonResult(
             summary=summary,
             keyDifferences=diffs,
             actionPlan=self._action_plan(diffs),
             followUpQuestions=follow_up_questions,
             accuracyMetrics=accuracy_metrics,
+            comparisonMode="auditor_grade" if audit_mode else "simple",
+            requireHumanReview=require_human_review,
+            hiddenDiffsCount=hidden_diffs_count,
         )
+
+        if save_to_db:
+            self._try_save_comparison_to_postgres(doc1.id, doc2.id, result, audit_mode)
+
+        return result
 
     def _load_comparison_nodes(self, document_id: str) -> list[dict]:
         if self.canonical_store is not None:
@@ -561,8 +643,12 @@ class RealDiffEngine:
             return False
         node_type = str(prev.get("node_type") or "")
         if node_type == "table":
-            # Different column count → structurally different table, never a continuation
-            if prev.get("table_num_cols") != curr.get("table_num_cols"):
+            # Allow up to 1-column discrepancy to handle Docling merged-cell artifacts
+            # where continuation pages may report N±1 columns.  Larger differences
+            # indicate structurally distinct tables and block stitching.
+            prev_cols = int(prev.get("table_num_cols") or 0)
+            curr_cols = int(curr.get("table_num_cols") or 0)
+            if prev_cols > 0 and curr_cols > 0 and abs(prev_cols - curr_cols) > 1:
                 return False
             # A continuation fragment has NO header cells at row 0 (the header is on the
             # previous page). An independent new table always starts with is_header=True at row 0.
@@ -687,6 +773,9 @@ class RealDiffEngine:
         right_src = self._source_text(right)
         numeric_changes = detect_numeric_changes(left_src, right_src)
         requirement_verb_change = detect_requirement_verb_change(left_src, right_src)
+        # Supplement text-level verb detection with fact-level normative strength check
+        if requirement_verb_change is None:
+            requirement_verb_change = _normative_strength_change(left_src, right_src)
         cosmetic_change = is_cosmetic_text_change(left_src, right_src)
         ref_num_only = (
             bool(numeric_changes)
@@ -717,6 +806,12 @@ class RealDiffEngine:
         impact = classification.impact
         severity = classification.severity
         reasons = classification.reasons
+        severity_confidence = classification.severity_confidence
+        requires_human_review = (
+            classification.audit_disposition == AuditDisposition.REQUIRES_HUMAN_REVIEW
+            or (severity == "high" and severity_confidence < 0.85)
+            or (severity == "medium" and severity_confidence < 0.70)
+        )
         section = (
             (left_ref.section if left_ref else None)
             or (right_ref.section if right_ref else None)
@@ -725,6 +820,8 @@ class RealDiffEngine:
         confidence = 0.0 if distance is None else max(0.0, min(1.0, 1.0 - distance))
         if change_type in {"ADDED", "REMOVED"}:
             confidence = 1.0
+        v1_evidence = [e for n in left_nodes if (e := _evidence_from_node(n)) is not None]
+        v2_evidence = [e for n in right_nodes if (e := _evidence_from_node(n)) is not None]
         return ChangeRecord(
             change_id=self._change_id(change_type, left_nodes, right_nodes),
             change_type=change_type,  # type: ignore[arg-type]
@@ -747,7 +844,10 @@ class RealDiffEngine:
             significance=significance,
             impact=impact,
             severity=severity,
+            requires_human_review=requires_human_review,
             significance_reasons=reasons,
+            v1_evidence=v1_evidence,
+            v2_evidence=v2_evidence,
         )
 
     def _record_changes(
@@ -811,6 +911,7 @@ class RealDiffEngine:
             doc2Reference=record.doc2_reference,
             nodeType=record.node_type,
             changes=record.changes,
+            requiresHumanReview=record.requires_human_review,
         )
 
     def _alignment_type(self, match: ClauseMatch) -> str:
@@ -895,6 +996,48 @@ class RealDiffEngine:
         left_ids = ",".join(str(node.get("chunk_id") or "") for node in left_nodes)
         right_ids = ",".join(str(node.get("chunk_id") or "") for node in right_nodes)
         return f"{change_type}:{left_ids}:{right_ids}"
+
+    def _try_save_comparison_to_postgres(
+        self,
+        doc1_id: str,
+        doc2_id: str,
+        result: ComparisonResult,
+        audit_mode: bool,
+    ) -> None:
+        try:
+            import psycopg
+        except ImportError:
+            logger.debug("psycopg not available; skipping comparison_results DB save")
+            return
+
+        from grc_policy_server.core.config import settings as _settings
+        db_url = _settings.database_url
+        if not db_url:
+            return
+
+        result_json = result.model_dump_json()
+        comparison_mode = "auditor_grade" if audit_mode else "simple"
+        try:
+            with psycopg.connect(db_url) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS comparison_results (
+                        id BIGSERIAL PRIMARY KEY,
+                        doc1_id TEXT NOT NULL,
+                        doc2_id TEXT NOT NULL,
+                        comparison_mode TEXT NOT NULL,
+                        result_json JSONB NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                """)
+                conn.execute(
+                    "INSERT INTO comparison_results"
+                    " (doc1_id, doc2_id, comparison_mode, result_json)"
+                    " VALUES (%s, %s, %s, %s::jsonb)",
+                    (doc1_id, doc2_id, comparison_mode, result_json),
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("comparison_results DB save failed: %s", exc)
 
     def _save_compare_trace(
         self,

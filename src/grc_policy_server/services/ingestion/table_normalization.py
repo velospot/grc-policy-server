@@ -10,6 +10,32 @@ from typing import Any
 from grc_policy_server.utils.hashing import normalize_for_comparison
 
 
+_HYPHEN_AT_END_RE = re.compile(r"-\s*$")
+
+
+def _fuse_hyphenated_headers(headers: list[str]) -> list[str]:
+    """Fuse adjacent header fragments produced by PDF word-break hyphenation.
+
+    When the PDF extractor reads a cell whose text was visually broken by a
+    soft hyphen across columns (e.g. "grenz-" | "wert u in db"), the result
+    is two separate column headers instead of one.  This pass merges each
+    hyphen-terminated header with its successor.
+    """
+    if len(headers) < 2:
+        return headers
+    result = list(headers)
+    i = 0
+    while i < len(result) - 1:
+        if _HYPHEN_AT_END_RE.search(result[i]):
+            fused = _HYPHEN_AT_END_RE.sub("", result[i]).strip() + result[i + 1]
+            result[i] = fused.strip()
+            result[i + 1] = ""
+            i += 2
+        else:
+            i += 1
+    return result
+
+
 def normalize_cell(value: Any) -> str:
     if value is None:
         return ""
@@ -128,6 +154,7 @@ def extract_headers_from_cells(
             combined = f"column_{col + 1}"
 
         headers.append(normalize_header(combined))
+    headers = _fuse_hyphenated_headers(headers)
     return headers, header_depth
 
 
@@ -173,10 +200,14 @@ def enrich_table_with_facts(table: Any) -> None:
                module level; the function handles missing attributes gracefully)
     """
     try:
-        from grc_policy_server.services.ingestion.ontology.column_mapper import map_header
+        from grc_policy_server.services.ingestion.ontology.column_mapper import (
+            ENTITY_TYPE_DEFAULT_UNIT,
+            map_header,
+        )
         from grc_policy_server.services.ingestion.ontology.emc_ontology import (
             EMCTestClassifier,
             NormalizedFactExtractor,
+            OntologyEntityType,
         )
     except ImportError:
         return  # Ontology module not available — skip enrichment silently
@@ -201,11 +232,11 @@ def enrich_table_with_facts(table: Any) -> None:
         meta["emc_test_type"] = test_type.value
 
     # Build column index → entity type map
-    col_entity_map: dict[int, str] = {}
+    col_entity_map: dict[int, OntologyEntityType] = {}
     for col in columns:
         entity = map_header(getattr(col, "name", ""))
         if entity is not None:
-            col_entity_map[getattr(col, "index", 0)] = entity.value
+            col_entity_map[getattr(col, "index", 0)] = entity
 
     # Enrich each cell
     rows = getattr(table, "rows", []) or []
@@ -213,7 +244,7 @@ def enrich_table_with_facts(table: Any) -> None:
         cells = getattr(row, "cells", []) or []
         for cell in cells:
             col_idx = getattr(cell, "col", 0)
-            entity_type_str = col_entity_map.get(col_idx)
+            entity_type = col_entity_map.get(col_idx)
             col_name = ""
             if col_idx < len(columns):
                 col_name = getattr(columns[col_idx], "name", "")
@@ -224,12 +255,28 @@ def enrich_table_with_facts(table: Any) -> None:
                 column_name=col_name,
                 owner_object_id=table_uid,
             )
+
+            # Column-unit inheritance: bare numeric + typed column → synthesise fact
+            if not facts and entity_type is not None:
+                inherited_unit = ENTITY_TYPE_DEFAULT_UNIT.get(entity_type)
+                if inherited_unit:
+                    fact_type_map = {
+                        OntologyEntityType.EMISSION_LIMIT: "emission_limit",
+                        OntologyEntityType.FIELD_STRENGTH: "field_strength",
+                        OntologyEntityType.FREQUENCY_RANGE: "frequency_range",
+                    }
+                    fact_type = fact_type_map.get(entity_type)
+                    if fact_type:
+                        facts = extractor.extract_bare_numeric_with_unit(
+                            cell_text, inherited_unit, fact_type, owner_object_id=table_uid
+                        )
+
             if facts:
                 cell.normalized_facts = facts
 
             # Populate semantic_key from entity type
-            if entity_type_str and not getattr(cell, "semantic_key", ""):
-                cell.semantic_key = entity_type_str
+            if entity_type is not None and not getattr(cell, "semantic_key", ""):
+                cell.semantic_key = entity_type.value
 
 
 def table_text_projection(
