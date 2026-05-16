@@ -61,6 +61,23 @@ from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# PII masking — applied to content fields in key_difference output
+# ---------------------------------------------------------------------------
+_PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b[\w.+-]+@[\w-]+\.[a-z]{2,}\b", re.IGNORECASE), "[EMAIL]"),
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN]"),  # SSN before PHONE (more specific)
+    (re.compile(r"\b(?:\+?\d[\d\s\-().]{7,}\d)\b"), "[PHONE]"),
+]
+
+
+def _mask_pii(text: str | None) -> str | None:
+    if not text:
+        return text
+    for pat, placeholder in _PII_PATTERNS:
+        text = pat.sub(placeholder, text)
+    return text
+
 
 # ---------------------------------------------------------------------------
 # Normative strength helpers (Phase E2)
@@ -289,12 +306,23 @@ class RealDiffEngine:
         diffs = filtered_diffs
         change_records = filtered_records
 
+        _IMPACT_ORDER = {"High": 0, "Medium": 1, "Low": 2}
+
+        def _diff_min_page(diff: KeyDifference) -> int:
+            pages = []
+            for ref in [diff.doc1Reference, diff.doc2Reference]:
+                if ref is not None:
+                    try:
+                        pages.append(int(ref.page))
+                    except (TypeError, ValueError):
+                        pass
+            return min(pages, default=9999)
+
         paired = sorted(
             zip(diffs, change_records),
             key=lambda pair: (
-                ("High", "Medium", "Low").index(pair[0].impact)
-                if pair[0].impact in ("High", "Medium", "Low")
-                else 2
+                _diff_min_page(pair[0]),
+                _IMPACT_ORDER.get(pair[0].impact, 2),
             ),
         )
         diffs, change_records = (list(x) for x in zip(*paired)) if paired else ([], [])
@@ -903,8 +931,8 @@ class RealDiffEngine:
         return KeyDifference(
             changeType=record.change_type,
             section=record.section,
-            doc1Content=record.doc1_content,
-            doc2Content=record.doc2_content,
+            doc1Content=_mask_pii(record.doc1_content),
+            doc2Content=_mask_pii(record.doc2_content),
             impact=record.impact,
             changeSeverity=record.severity,
             doc1Reference=record.doc1_reference,
@@ -1699,8 +1727,15 @@ class RealDiffEngine:
         if page is None:
             page = chunk.get("page")
         source_text = self._reference_source_text(chunk)
+        section = str(chunk.get("section_path") or "")
+        # Replace dimension-only fallback labels like "3 rows × 4 columns" with
+        # a meaningful ancestor heading so references are readable in the report.
+        if not section or re.fullmatch(r"\d+\s*(?:rows?\s*[×x]\s*\d+\s*col|col[^\s]*)", section, re.IGNORECASE):
+            heading_path = chunk.get("heading_path") or []
+            ancestor = next((str(h) for h in reversed(heading_path) if str(h).strip()), "")
+            section = ancestor or "[Untitled Table]"
         return DocumentReference(
-            section=str(chunk.get("section_path") or "Unknown Section"),
+            section=section,
             page=int(page or 0),
             lineStart=chunk.get("line_start"),
             lineEnd=chunk.get("line_end"),

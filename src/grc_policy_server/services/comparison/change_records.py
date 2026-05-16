@@ -268,23 +268,25 @@ def is_cosmetic_text_change(left_text: str | None, right_text: str | None) -> bo
     )
 
 
+_CAMEL_SPLIT_RE = re.compile(r'(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])')
+
+
 def _normalize_cosmetic_text(text: str) -> str:
+    text = _CAMEL_SPLIT_RE.sub(' ', text)
     translated = text.casefold().translate(
         {
             ord("“"): '"',
             ord("”"): '"',
-            ord("‘"): "'",
-            ord("’"): "'",
-            ord("–"): "-",
-            ord("—"): "-",
-            ord("−"): "-",
-            ord("…"): "...",
+            ord("‘"): ''',
+            ord("’"): ''',
+            ord("–"): '-',
+            ord("—"): '-',
+            ord("−"): '-',
+            ord("…"): '...',
         }
     )
-    chars = [char if char.isalnum() else " " for char in translated]
-    return re.sub(r"\s+", " ", "".join(chars)).strip()
-
-
+    chars = [char if char.isalnum() else ' ' for char in translated]
+    return re.sub(r'\s+', ' ', ''.join(chars)).strip()
 def _compact_alnum(text: str) -> str:
     return "".join(char for char in text.casefold() if char.isalnum())
 

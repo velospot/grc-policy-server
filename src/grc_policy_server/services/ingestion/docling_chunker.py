@@ -200,20 +200,24 @@ def _table_structure_to_clean_text(
 
 
 _TABLE_PREFIX_RE = re.compile(
-    r"^(?:table|fig(?:ure)?|exhibit|appendix|annex|tbl\.?)\s*[A-Z]?[\d.]*[:\s\-]*",
+    r"^(?:table|tabelle|tabella|tableau|tab\.?|fig(?:ure)?|abbildung|exhibit|appendix|anhang|annex|tbl\.?)"
+    r"\s*(?:[A-Za-z]{1,2}\.?)?[\d.]*[:\s\-–—]*",
     re.IGNORECASE,
 )
+
+_MD_DECO_RE = re.compile(r"\*{1,3}|_{1,3}")
 
 
 def _normalize_table_caption(caption: str) -> str:
     """Return a normalized caption suitable for cross-document title matching.
 
-    Strips leading 'Table N:', 'Figure 3 -', etc. then lowercases and
-    collapses whitespace so captions like "Table 3: Risk Matrix" and
-    "Table 7: Risk Matrix" compare as equal.
+    Strips markdown decoration, leading 'Table N:'/'Tabelle C -', etc. then
+    lowercases and collapses whitespace so captions like "Table 3: Risk Matrix"
+    and "**Tabelle C – Risk Matrix**" compare as equal.
     """
-    stripped = _TABLE_PREFIX_RE.sub("", caption).strip()
-    return " ".join((stripped or caption).lower().split())
+    clean = _MD_DECO_RE.sub("", caption)
+    stripped = _TABLE_PREFIX_RE.sub("", clean).strip()
+    return " ".join((stripped or clean).lower().split())
 
 
 _HEADER_FOOTER_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -269,6 +273,19 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
         if any(item.label == DocItemLabel.TABLE for item in doc_chunk.meta.doc_items):
             chunk_type = "table"
             title = captions[0] if captions else None
+            # Fallback: scan doc_items for a nearby paragraph that looks like a
+            # table caption (e.g. TL docs where "Tabelle C – ..." is a TEXT item).
+            if not title:
+                for item in doc_chunk.meta.doc_items:
+                    item_label = getattr(item, "label", None)
+                    label_name = _item_label_name(item_label) if item_label is not None else ""
+                    if label_name in ("text", "paragraph", "caption"):
+                        raw_text = ""
+                        if hasattr(item, "text"):
+                            raw_text = str(item.text or "").strip()
+                        if raw_text and _TABLE_PREFIX_RE.match(raw_text):
+                            title = raw_text
+                            break
             if title:
                 metadata["normalized_caption"] = _normalize_table_caption(title)
 

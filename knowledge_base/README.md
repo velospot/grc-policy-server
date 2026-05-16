@@ -102,10 +102,3 @@ Serving: Ollama for MVP; llama.cpp server or vLLM for production tuning
 5. The user-facing explanation language must match the document language.
 6. No internet calls at runtime.
 7. Reproducibility must be possible from stored PDF hashes, parser versions, model versions, prompt versions, and comparison algorithm versions.
-8. - use [@knowledge_base](file:///Users/navm/projects/grc-policy-server/knowledge_base/) [@evaluation_results](file:///Users/navm/projects/grc-policy-server/evaluation_results/) 
-- use data/uploads/old as archieved comparision results
-- use data/uploads/_comparison* as new comparision results
-- use data/uploads/<id>/*.pdf as golden sample source pdfs for EMC or EMC compliances guidelines
-- DIN*.pdf and DNV based pdfs  ingestion identified falsely some tables as paragraph.
-- Revaluate document structural ingestion and comparison.
-- improve accuracy of structural ingestion and comparison.
