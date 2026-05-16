@@ -1,85 +1,98 @@
 #version: "3.9"
 
 services:
-  postgres:
-    container_name: grc_postgres
-    image: postgres:17.9
-    restart: always
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grc_admin}
-      POSTGRES_USER: ${POSTGRES_USER:-grc_admin}
-      POSTGRES_DB: ${POSTGRES_DB:-grc_db}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test:
-        ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
-      interval: 5s
-      timeout: 5s
-      retries: 10
+    postgres:
+        container_name: grc_postgres
+        image: postgres:17.9
+        restart: always
+        environment:
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grc_admin}
+            POSTGRES_USER: ${POSTGRES_USER:-grc_admin}
+            POSTGRES_DB: ${POSTGRES_DB:-grc_db}
+        ports:
+            - "${POSTGRES_PORT:-5432}:5432"
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
 
-  redis:
-    container_name: grc_redis
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    restart: always
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"',
+                ]
+            interval: 5s
+            timeout: 5s
+            retries: 10
 
-  # neo4j:
-  #   container_name: rag_neo4j
-  #   image: neo4j:community-trixie
-  #   volumes:
-  #     - ./neo4j/logs:/logs
-  #     - ./neo4j/config:/config
-  #     - ./neo4j/data:/data
-  #     - ./neo4j/plugins:/plugins
-  #   environment:
-  #     - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
-  #   ports:
-  #     - "7474:7474"
-  #     - "7687:7687"
-  #   restart: always
+    redis:
+        container_name: grc_redis
+        image: redis:7-alpine
+        ports:
+            - "6379:6379"
+        restart: always
+        networks:
+            - grc_shared_net
 
-  weaviate:
-    container_name: weaviate_chat_db
-    command:
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --scheme
-      - http
-    image: cr.weaviate.io/semitechnologies/weaviate:1.31.5
-    ports:
-      - 8080:8080
-      - 50051:50051
-    volumes:
-      - ./weaviate_data:/var/lib/weaviate
-    restart: on-failure:2
-    environment:
-      DISABLE_TELEMETRY: true
-      QUERY_DEFAULTS_LIMIT: 25
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
-      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-      ENABLE_API_BASED_MODULES: "true"
-      # ENABLE_MODULES: "text2vec-ollama,generative-ollama"
-      ENABLE_MODULES: "text2vec-ollama,text2vec-huggingface,generative-ollama"
-      DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
-      HUGGINGFACE_APIKEY: ${HUGGINGFACE_APIKEY:-}
-      CLUSTER_HOSTNAME: "node1"
+    # neo4j:
+    #   container_name: rag_neo4j
+    #   image: neo4j:community-trixie
+    #   volumes:
+    #     - ./neo4j/logs:/logs
+    #     - ./neo4j/config:/config
+    #     - ./neo4j/data:/data
+    #     - ./neo4j/plugins:/plugins
+    #   environment:
+    #     - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
+    #   ports:
+    #     - "7474:7474"
+    #     - "7687:7687"
+    #   restart: always
 
-  # OpenDataLoader hybrid backend — routes complex/table pages to docling for higher accuracy.
-  # Set OPENDATALOADER_HYBRID_URL=http://opendataloader-hybrid:5002 in your .env to enable.
-  opendataloader-hybrid:
-    build:
-      context: .
-      dockerfile: Dockerfile.hybrid
-    container_name: opendataloader_hybrid
-    ports:
-      - "5002:5002"
-    restart: unless-stopped
+    weaviate:
+        container_name: weaviate_chat_db
+        command:
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8080"
+            - --scheme
+            - http
+        image: cr.weaviate.io/semitechnologies/weaviate:1.31.5
+        ports:
+            - 8080:8080
+            - 50051:50051
+        volumes:
+            - ./weaviate_data:/var/lib/weaviate
+        restart: on-failure:2
+        networks:
+            - grc_shared_net
+        environment:
+            DISABLE_TELEMETRY: true
+            QUERY_DEFAULTS_LIMIT: 25
+            AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+            PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+            ENABLE_API_BASED_MODULES: "true"
+            # ENABLE_MODULES: "text2vec-ollama,generative-ollama"
+            ENABLE_MODULES: "text2vec-ollama,generative-ollama"
+            DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
+            #HUGGINGFACE_APIKEY: ${HUGGINGFACE_APIKEY:-}
+            CLUSTER_HOSTNAME: "node1"
+
+    # OpenDataLoader hybrid backend — routes complex/table pages to docling for higher accuracy.
+    # Set OPENDATALOADER_HYBRID_URL=http://opendataloader-hybrid:5002 in your .env to enable.
+    opendataloader-hybrid:
+        build:
+            context: .
+            dockerfile: Dockerfile.hybrid
+        container_name: opendataloader_hybrid
+        ports:
+            - "5002:5002"
+        restart: unless-stopped
+        networks:
+            - grc_shared_net
 
 volumes:
-  postgres_data:
+    postgres_data:
+networks:
+    grc_shared_net:
+        external: true
