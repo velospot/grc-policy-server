@@ -31,6 +31,7 @@ from grc_policy_server.services.comparison.change_records import (
     is_cosmetic_text_change,
     is_formatting_only_change,
     is_reference_number_only_change,
+    is_structural_label_change,
 )
 from grc_policy_server.services.comparison.severity_classifier import (
     AuditDisposition,
@@ -54,6 +55,7 @@ from grc_policy_server.services.comparison.policy_semantics import (
 from grc_policy_server.services.documents.canonical_models import (
     TEXT_COMPARISON_NODE_TYPES,
 )
+from grc_policy_server.utils.hashing import pure_text_hash as _pure_text_hash
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.base import BaseLLM
@@ -306,23 +308,12 @@ class RealDiffEngine:
         diffs = filtered_diffs
         change_records = filtered_records
 
-        _IMPACT_ORDER = {"High": 0, "Medium": 1, "Low": 2}
-
-        def _diff_min_page(diff: KeyDifference) -> int:
-            pages = []
-            for ref in [diff.doc1Reference, diff.doc2Reference]:
-                if ref is not None:
-                    try:
-                        pages.append(int(ref.page))
-                    except (TypeError, ValueError):
-                        pass
-            return min(pages, default=9999)
-
         paired = sorted(
             zip(diffs, change_records),
             key=lambda pair: (
-                _diff_min_page(pair[0]),
-                _IMPACT_ORDER.get(pair[0].impact, 2),
+                ("High", "Medium", "Low").index(pair[0].impact)
+                if pair[0].impact in ("High", "Medium", "Low")
+                else 2
             ),
         )
         diffs, change_records = (list(x) for x in zip(*paired)) if paired else ([], [])
@@ -727,6 +718,36 @@ class RealDiffEngine:
                 and not cosmetic_change
             ):
                 continue
+            # Cosmetic changes (trailing punctuation, casing, etc.) pass through here and
+            # are classified as LOW by the severity engine below.  They are intentionally
+            # not filtered so auditors can see them.
+            # Skip diff when pure-text hashes match (identical alphanumeric content).
+            # Guarded by meaning_change == "unchanged" because pure_text_hash strips
+            # punctuation — without the guard, "3.5 V" ≡ "35 V" could be suppressed.
+            if alignment_type != "moved" and meaning_change == "unchanged":
+                left_node = match.left or {}
+                right_node = match.right or {}
+                left_hash = (
+                    left_node.get("pure_text_hash")
+                    or left_node.get("metadata", {}).get("pure_text_hash")
+                    or _pure_text_hash(left_node.get("text") or left_node.get("clean_text") or "")
+                )
+                right_hash = (
+                    right_node.get("pure_text_hash")
+                    or right_node.get("metadata", {}).get("pure_text_hash")
+                    or _pure_text_hash(right_node.get("text") or right_node.get("clean_text") or "")
+                )
+                if left_hash and right_hash and left_hash == right_hash:
+                    continue
+                # For table nodes: also deduplicate by structural fingerprint when cell text
+                # has minor whitespace/formatting differences that break the text hash.
+                if left_node.get("node_type") == "table" == right_node.get("node_type"):
+                    lsig = left_node.get("table_schema_signature", "")
+                    rsig = right_node.get("table_schema_signature", "")
+                    lfp = left_node.get("table_row_fingerprints") or []
+                    rfp = right_node.get("table_row_fingerprints") or []
+                    if lsig and rsig and lsig == rsig and lfp and lfp == rfp:
+                        continue
             records.append(
                 self._change_record_for_pair(
                     change_type="MODIFIED",
@@ -810,6 +831,7 @@ class RealDiffEngine:
             and is_reference_number_only_change(left_src, right_src)
         )
         formatting_only = is_formatting_only_change(left_src, right_src)
+        structural_label = is_structural_label_change(left_src, right_src)
         table_changes = [
             change.model_dump(mode="json")
             for change in changes
@@ -828,6 +850,7 @@ class RealDiffEngine:
                 cosmetic_change=cosmetic_change,
                 reference_number_only_change=ref_num_only,
                 formatting_only_change=formatting_only,
+                structural_label_change=structural_label,
             )
         )
         significance = classification.severity
@@ -1615,6 +1638,27 @@ class RealDiffEngine:
 
         return "modified"
 
+    def _render_cells_preview(self, cells: list[dict], max_rows: int = 5) -> str:
+        """Render first `max_rows` rows of table cells as pipe-delimited text."""
+        from collections import defaultdict
+        rows: dict[int, list[tuple[int, str]]] = defaultdict(list)
+        for c in cells:
+            row = int(c.get("row", c.get("row_index", 0)))
+            col = int(c.get("col", c.get("col_index", 0)))
+            text = str(c.get("text") or "").strip()
+            rows[row].append((col, text))
+        if not rows:
+            return ""
+        lines = []
+        for row_idx in sorted(rows.keys())[:max_rows]:
+            cols = sorted(rows[row_idx], key=lambda x: x[0])
+            line = " | ".join(v for _, v in cols)
+            lines.append(line)
+        remaining = len(rows) - max_rows
+        if remaining > 0:
+            lines.append(f"... ({remaining} more rows)")
+        return "\n".join(lines)
+
     def _format_table_content(self, node: dict) -> str:
         """Format table content for display in diffs."""
         title = node.get("title") or node.get("table_normalized_caption") or ""
@@ -1626,17 +1670,25 @@ class RealDiffEngine:
         if self._has_caption_row(node):
             num_rows = max(0, (num_rows or 0) - 1)
 
-        if num_rows and num_cols:
-            table_desc = f"Table ({num_rows} rows × {num_cols} cols)"
-            if title:
-                table_desc = f"{title}: {table_desc}"
-            return table_desc
-
-        # Fallback to markdown or text
+        # 1. Try markdown first (best quality)
         markdown = node.get("markdown_text") or ""
         if markdown:
-            lines = markdown.strip().split("\n")[:4]
-            return "\n".join(lines) + ("..." if len(markdown.split("\n")) > 4 else "")
+            lines = markdown.strip().split("\n")[:8]
+            return "\n".join(lines) + ("..." if len(markdown.split("\n")) > 8 else "")
+
+        # 2. Try cell preview from table_cells
+        cells = node.get("table_cells") or []
+        if cells:
+            preview = self._render_cells_preview(cells, max_rows=5)
+            if preview:
+                header = f"{title}\n" if title else ""
+                dim = f"({num_rows} rows × {num_cols} cols)\n" if num_rows and num_cols else ""
+                return f"{header}{dim}{preview}"
+
+        # 3. Dimensions-only fallback
+        if num_rows and num_cols:
+            table_desc = f"Table ({num_rows} rows × {num_cols} cols)"
+            return f"{title}: {table_desc}" if title else table_desc
 
         return self._short(str(node.get("text") or ""), n=120)
 

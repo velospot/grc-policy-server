@@ -311,6 +311,9 @@ class ClauseMatcher:
                 if not right_id or right_id in matched_right_ids:
                     continue
                 score = self._clause_score(left_node, right_node)
+                # Prefer same-type matches (tables→tables, sections→sections)
+                if left_node.get("node_type") == right_node.get("node_type"):
+                    score = min(1.0, score + 0.05)
                 if score >= self.thresholds.min_clause_score:
                     candidate_edges.append(
                         (score, left_id, right_id, left_node, right_node)
@@ -547,7 +550,7 @@ class ClauseMatcher:
     # Matches leading section numbers like "3.", "3.1", "3.1.2", "A.1", "B.2.1" or
     # keyword prefixes like "Section 4", "Article 2.1", "Annex A.1", "Chapter 3 -"
     _SECTION_NUMBER_RE = re.compile(
-        r'^(?:(?:section|article|chapter|part|annex|appendix)\s+)?(?:[A-Z]\.)?[\d.]+\s*[-–:.]?\s*',
+        r'^(?:(?:section|article|chapter|clause|part|annex|appendix)\s+)?(?:[A-Z]\.)?[\d.]+\s*[-–:.]?\s*',
         re.IGNORECASE,
     )
     # Extracts the pure numeric portion of a section number (e.g. "3.2.1" from "3.2.1 Title")

@@ -44,6 +44,7 @@ class HierarchyNode:
     source: str
     lineage: list[str]
     lineage_ids: list[str]
+    pure_text_hash: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod

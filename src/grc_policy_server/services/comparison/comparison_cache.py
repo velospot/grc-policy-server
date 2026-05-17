@@ -24,8 +24,11 @@ class ComparisonCacheStore:
         self.cache_dir = self.upload_root / "_comparison_cache"
         self.cache_ttl_sec = cache_ttl_sec if cache_ttl_sec is not None else self.default_ttl_sec
 
+    # Bump when the comparison algorithm changes to auto-invalidate stale cached results.
+    CACHE_VERSION = "v2"
+
     def cache_key_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
-        normalized = f"{doc1_id.strip()}::{doc2_id.strip()}"
+        normalized = f"{self.CACHE_VERSION}::{doc1_id.strip()}::{doc2_id.strip()}"
         return sha256(normalized.encode("utf-8")).hexdigest()
 
     def cached_job_id_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:

@@ -263,9 +263,16 @@ def is_cosmetic_text_change(left_text: str | None, right_text: str | None) -> bo
     right = (right_text or "").strip()
     if not left or not right or left == right:
         return False
-    return _normalize_cosmetic_text(left) == _normalize_cosmetic_text(right) or (
-        _compact_alnum(left) == _compact_alnum(right)
-    )
+    if _normalize_cosmetic_text(left) == _normalize_cosmetic_text(right):
+        return True
+    # _compact_alnum fallback strips decimal points, making "3.5 V" ≡ "35 V".
+    # Only apply when numeric sequences (with decimals) are identical.
+    if _compact_alnum(left) == _compact_alnum(right):
+        left_nums = re.findall(r'\d+(?:[.,]\d+)*', left)
+        right_nums = re.findall(r'\d+(?:[.,]\d+)*', right)
+        if left_nums == right_nums:
+            return True
+    return False
 
 
 _CAMEL_SPLIT_RE = re.compile(r'(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])')
@@ -289,6 +296,53 @@ def _normalize_cosmetic_text(text: str) -> str:
     return re.sub(r'\s+', ' ', ''.join(chars)).strip()
 def _compact_alnum(text: str) -> str:
     return "".join(char for char in text.casefold() if char.isalnum())
+
+
+_SECTION_NUM_PREFIX_RE = re.compile(
+    r'^\s*(?:\d+\.)*\d+\.?\s+'
+    r'|^\s*(?:chapter|section|annex|part|clause)\s+(?:[A-Z]\.)?[\d.]+[:\s]+',
+    re.IGNORECASE,
+)
+
+
+def is_structural_label_change(
+    left_text: str | None, right_text: str | None
+) -> bool:
+    """True when only the structural label differs (section/table/figure number prefix)
+    and the underlying semantic content is identical after stripping those prefixes.
+
+    Also handles minor wording differences (prepositions, articles ≤4 chars) in section
+    headings where the semantic topic is the same — e.g. "an Störfestigkeitsprüfungen"
+    vs "für die Störfestigkeitsprüfungen" (German preposition/article swap).
+    """
+    from difflib import SequenceMatcher
+    left = (left_text or '').strip()
+    right = (right_text or '').strip()
+    if not left or not right or left == right:
+        return False
+    left_s = _SECTION_NUM_PREFIX_RE.sub('', left).strip()
+    right_s = _SECTION_NUM_PREFIX_RE.sub('', right).strip()
+    # Also strip table/figure caption prefix (e.g. "Table 3:" or "Tabelle C –")
+    try:
+        from grc_policy_server.services.ingestion.docling_chunker import _TABLE_PREFIX_RE
+        left_s = _TABLE_PREFIX_RE.sub('', left_s).strip()
+        right_s = _TABLE_PREFIX_RE.sub('', right_s).strip()
+    except ImportError:
+        pass
+    if not left_s or not right_s:
+        return False
+    if _compact_alnum(left_s) == _compact_alnum(right_s):
+        return True
+    # Secondary: high-similarity titles that differ only in short stop-words
+    # (prepositions/articles ≤4 chars) are still structural — e.g. "an X" vs "für die X".
+    ratio = SequenceMatcher(None, _compact_alnum(left_s), _compact_alnum(right_s)).ratio()
+    if ratio >= 0.88:
+        left_words = set(left_s.lower().split())
+        right_words = set(right_s.lower().split())
+        differing = left_words.symmetric_difference(right_words)
+        if differing and all(len(w) <= 4 for w in differing):
+            return True
+    return False
 
 
 def _heading_path(nodes: list[dict[str, Any]]) -> list[str]:

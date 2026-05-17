@@ -51,6 +51,9 @@ async def main() -> None:
             "section_coverage_pct": m.section_coverage_pct,
             "header_quality_pct": m.header_quality_pct,
             "reference_section_filter_pct": m.reference_section_filter_pct,
+            "raw_docling_table_count": m.raw_docling_table_count,
+            "lost_tables_count": m.lost_tables_count,
+            "lost_table_pages": m.lost_table_pages,
             "errors": m.errors,
         }
         for m in metrics

@@ -414,6 +414,10 @@ async def test_real_diff_engine_records_moved_semantic_changes_as_high():
 
 @pytest.mark.anyio
 async def test_real_diff_engine_records_cosmetic_text_changes_as_low():
+    # "record-keeping logs." vs "record keeping logs:" — differs only in hyphen and terminal
+    # punctuation.  Both have identical alnum content, so the pure-text hash filter now
+    # suppresses this pair entirely rather than surfacing it as LOW.  The test verifies
+    # that these cosmetic-only differences produce no key differences (no auditor noise).
     left = _node(
         node_id="doc-1-node",
         document_id="doc-1",
@@ -435,11 +439,8 @@ async def test_real_diff_engine_records_cosmetic_text_changes_as_low():
 
     result = await engine.compare(_doc("doc-1"), _doc("doc-2"))
 
-    assert len(result.keyDifferences) == 1
-    diff = result.keyDifferences[0]
-    assert diff.changeType == "MODIFIED"
-    assert diff.impact == "Low"
-    assert diff.changeSeverity == "low"
+    # Pure-text hash filter suppresses pairs whose alnum content is identical.
+    assert len(result.keyDifferences) == 0
 
 
 @pytest.mark.anyio

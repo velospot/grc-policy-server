@@ -34,12 +34,17 @@ class ExtractionMetrics:
     section_coverage_pct: float = 0.0   # % nodes with non-empty heading_path
     header_quality_pct: float = 0.0     # % tables with no column_N fallback headers
     reference_section_filter_pct: float = 0.0  # % tables excluded (lower = better)
+    # Lost table detection
+    raw_docling_table_count: int = 0
+    lost_tables_count: int = 0          # raw_docling_table_count - total_tables (floor 0)
+    lost_table_pages: list[int] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
+        lost = f" lost={self.lost_tables_count}" if self.lost_tables_count else ""
         return (
-            f"{self.filename} | nodes={self.total_nodes} tables={self.total_tables} "
-            f"clauses={self.total_clauses} stitched={self.tables_multi_page_stitched} "
+            f"{self.filename} | nodes={self.total_nodes} tables={self.total_tables}"
+            f"{lost} stitched={self.tables_multi_page_stitched} "
             f"ocr={self.ocr_node_count} hdr_qual={self.header_quality_pct:.0%} "
             f"sec_cov={self.section_coverage_pct:.0%}"
         )
@@ -50,6 +55,17 @@ class ExtractionValidator:
 
     def __init__(self, upload_root: Path) -> None:
         self.upload_root = upload_root
+
+    @staticmethod
+    def _count_docling_tables(raw_docling: dict) -> tuple[int, list[int]]:
+        """Count table items in raw docling output; return (count, page_list)."""
+        tables = raw_docling.get("tables") or []
+        pages: list[int] = []
+        for t in tables:
+            provs = t.get("prov") or []
+            if provs:
+                pages.append(int(provs[0].get("page_no") or provs[0].get("page") or 0))
+        return len(tables), pages
 
     def validate_document(self, document_id: str) -> ExtractionMetrics:
         """Load canonical_nodes.json from document directory and compute metrics."""
@@ -79,6 +95,17 @@ class ExtractionValidator:
             return metrics
 
         metrics.total_nodes = len(nodes)
+
+        # Count raw docling tables to detect pipeline losses
+        raw_docling_file = doc_dir / "raw_docling.json"
+        _docling_pages: list[int] = []
+        if raw_docling_file.exists():
+            try:
+                raw_dl = json.loads(raw_docling_file.read_text(encoding="utf-8"))
+                docling_count, _docling_pages = self._count_docling_tables(raw_dl)
+                metrics.raw_docling_table_count = docling_count
+            except Exception as e:
+                metrics.errors.append(f"raw_docling read error: {e}")
 
         col_counts: list[int] = []
         tables_with_fallback_headers = 0
@@ -125,6 +152,13 @@ class ExtractionValidator:
 
             if node.get("ocr_used") or meta.get("ocr_used"):
                 metrics.ocr_node_count += 1
+
+        # Compute lost tables (raw docling count minus canonical count, floor 0)
+        if metrics.raw_docling_table_count > 0:
+            lost = max(0, metrics.raw_docling_table_count - metrics.total_tables)
+            metrics.lost_tables_count = lost
+            if lost > 0:
+                metrics.lost_table_pages = _docling_pages
 
         # Compute derived metrics
         if metrics.total_nodes > 0:
@@ -194,20 +228,23 @@ class ExtractionValidator:
         print("EXTRACTION VALIDATION REPORT")
         print("=" * 100)
         header = (
-            f"{'Document':<40} {'Nodes':>6} {'Tables':>7} {'Stitched':>9} "
+            f"{'Document':<40} {'Nodes':>6} {'Tables':>7} {'Lost':>5} {'Stitched':>9} "
             f"{'OCR':>5} {'HdrQual':>8} {'SecCov':>7} {'Errors':>6}"
         )
         print(header)
-        print("-" * 100)
+        print("-" * 110)
         for m in metrics:
             name = m.filename[:38]
             err_count = len(m.errors)
+            lost_marker = f"{'!' if m.lost_tables_count else ' '}{m.lost_tables_count:>4}"
             print(
-                f"{name:<40} {m.total_nodes:>6} {m.total_tables:>7} "
+                f"{name:<40} {m.total_nodes:>6} {m.total_tables:>7} {lost_marker:>5} "
                 f"{m.tables_multi_page_stitched:>9} {m.ocr_node_count:>5} "
                 f"{m.header_quality_pct:>7.0%} {m.section_coverage_pct:>6.0%} "
                 f"{err_count:>6}"
             )
+            if m.lost_tables_count:
+                print(f"  ^ lost {m.lost_tables_count} tables on pages: {sorted(set(m.lost_table_pages))}")
             for err in m.errors:
                 print(f"  ! {err}")
         print("=" * 100)

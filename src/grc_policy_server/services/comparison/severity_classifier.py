@@ -163,6 +163,7 @@ class ClassificationContext:
     cosmetic_change: bool = False
     reference_number_only_change: bool = False
     formatting_only_change: bool = False
+    structural_label_change: bool = False
     # Ontology-backed enrichment fields (populated by Phase C ontology module)
     normalized_facts: list[dict[str, Any]] = field(default_factory=list)
     ontology_entity_type: str = (
@@ -257,6 +258,25 @@ def _has_content_signal(ctx: ClassificationContext) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule implementations  (priority: top → bottom, matching rule table in module doc)
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+class StructuralLabelRule:
+    """Rule 0 — Structural label change (section/table/figure/chapter number) → LOW.
+
+    Fires on MODIFIED nodes when the only difference is in the structural label
+    prefix (e.g. "3.1 Introduction" → "4.1 Introduction", "Table 5: Limits" →
+    "Table 7: Limits", "Chapter 3:" → "Chapter 4:").  The semantic content after
+    stripping those prefixes must be identical.
+
+    This keeps pure renumbering out of the MEDIUM/HIGH bucket.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if ctx.structural_label_change and ctx.change_type == "MODIFIED":
+            return ClassificationResult(
+                severity="low", reasons=["structural_label_change"]
+            )
+        return None
 
 
 class ReferenceNumberOnlyRule:
@@ -603,6 +623,7 @@ class RuleEngine:
 # Module-level singleton — rules are stateless, safe to share across threads.
 _DEFAULT_ENGINE = RuleEngine(
     [
+        StructuralLabelRule(),      # Rule 0   — structural label change      → low
         ReferenceNumberOnlyRule(),  # Rule 1   — reference-number-only       → low
         FormattingOnlyRule(),  # Rule 2   — formatting-only              → low
         CosmeticOnlyRule(),  # Rule 3   — cosmetic MODIFIED            → low

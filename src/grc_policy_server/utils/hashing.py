@@ -63,6 +63,20 @@ def normalize_for_comparison(value: str) -> str:
     return text.lower().strip()
 
 
+def pure_text_hash(text: str) -> str:
+    """SHA256 of alphanumeric-only lowercase text.
+
+    Strips whitespace, punctuation, and symbols so that cosmetic differences like
+    "...occur." vs "...occur.." produce the same hash.
+
+    IMPORTANT: Only use to skip diffs when meaning_change == "unchanged" has already
+    been confirmed — stripping punctuation conflates "3.5" and "35", so numeric-limit
+    changes must be guarded at the call site.
+    """
+    normalized = "".join(c for c in (text or "").lower() if c.isalnum())
+    return sha256_hex(normalized.encode("utf-8")) if normalized else ""
+
+
 def slugify_text(value: str) -> str:
     normalized = _NON_WORD_RE.sub("-", normalize_text(value))
     return normalized.strip("-")

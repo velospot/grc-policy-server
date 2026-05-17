@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from grc_policy_server.utils.hashing import normalize_for_comparison
+from grc_policy_server.utils.hashing import normalize_for_comparison, pure_text_hash as _pure_text_hash
 
 _SECTION_LABEL_RE = re.compile(
     r"^\s*(?:section|clause|article|chapter|annex|appendix)?\s*"
@@ -236,6 +236,7 @@ class CanonicalNode:
             "table_row_fingerprints": list(metadata.get("table_row_fingerprints") or []),
             "table_normalized_caption": str(metadata.get("normalized_caption") or ""),
             "canonical_metadata": metadata,
+            "pure_text_hash": _pure_text_hash(self.raw_text or ""),
         }
 
 

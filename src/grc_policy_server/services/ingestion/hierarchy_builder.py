@@ -11,7 +11,7 @@ from grc_policy_server.services.ingestion.hierarchy_models import (
     HierarchyNode,
     ParsedChunk,
 )
-from grc_policy_server.utils.hashing import normalize_text, sha256_hex, slugify_text, stable_uuid
+from grc_policy_server.utils.hashing import normalize_text, pure_text_hash as _pure_text_hash, sha256_hex, slugify_text, stable_uuid
 
 _TOC_TITLES = {
     "contents",
@@ -258,6 +258,7 @@ def build_document_hierarchy(
             # Persist full markdown table as primary content for retrieval/comparison.
             node_text = chunk.markdown_text.strip()
         content_digest = sha256_hex(normalized_text.encode("utf-8")) if normalized_text else ""
+        pure_hash = _pure_text_hash(clean_text or chunk.text)
         stable_id = stable_uuid(
             f"{chunk.chunk_type}::{doc_family}::{section_path}::{anchor_text}"
         )
@@ -290,6 +291,7 @@ def build_document_hierarchy(
             node_id=node_id,
             stable_id=stable_id,
             content_hash=content_digest,
+            pure_text_hash=pure_hash,
             document_id=document_id,
             document_stable_id=document_stable_id,
             node_type=chunk.chunk_type,
