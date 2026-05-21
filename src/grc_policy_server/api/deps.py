@@ -67,15 +67,19 @@ def require_api_bearer_token(
         )
 
 
-def get_weaviate_client() -> Generator[WeaviateClient, None, None]:
-    client = WeaviateClient()
+def get_weaviate_client() -> Generator[WeaviateClient | None, None, None]:
     try:
-        yield client
-    finally:
+        client = WeaviateClient()
         try:
-            client.close()
-        except Exception:
-            logger.exception("failed to close Weaviate client")
+            yield client
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+    except Exception:
+        logger.warning("Weaviate unavailable — comparison will use local fallback")
+        yield None
 
 
 def get_neo4j_client() -> Generator[Neo4jClient | None, None, None]:
@@ -107,7 +111,9 @@ async def get_ollama_client() -> AsyncGenerator[OllamaClient, None]:
             base_url=settings.ollama_url,
             chat_model=settings.ollama_chat_model,
             embed_model=settings.ollama_embed_model,
+            connect_timeout_sec=settings.ollama_connect_timeout_sec,
             read_timeout_sec=settings.ollama_timeout_sec,
+            write_timeout_sec=settings.ollama_write_timeout_sec,
             opik_enabled=settings.opik_enabled,
             opik_url=settings.opik_url_override,
             opik_project_name=settings.opik_project_name,
@@ -157,7 +163,7 @@ def get_storage_provider_store() -> StorageProviderStore:
 
 
 def get_diff_engine(
-    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
@@ -173,7 +179,7 @@ def get_diff_engine(
 
 
 def get_diff_engine_stream(
-    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
@@ -185,6 +191,7 @@ def get_diff_engine_stream(
         llm=llm,
         canonical_store=canonical_store,
         trace_store=trace_store,
+        inter_diff_delay_ms=settings.llm_stream_inter_diff_delay_ms,
     )
 
 
@@ -194,7 +201,7 @@ def get_document_repository() -> DocumentRepository:
 
 def get_document_ingestion_service(
     docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
-    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
@@ -211,7 +218,7 @@ def get_document_ingestion_service(
 
 def get_document_ingestion_service_factory(
     docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
-    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),

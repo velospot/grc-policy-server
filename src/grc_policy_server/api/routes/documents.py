@@ -476,7 +476,7 @@ def download_document_pdf(
 def delete_documents(
     payload: DeleteDocumentsRequest,
     repository: DocumentRepository = Depends(get_document_repository),
-    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
 ):
     """Delete local document artifacts and associated vector and graph records."""
@@ -512,6 +512,15 @@ def delete_documents(
             continue
         seen_document_ids.add(document_id)
 
+        if weaviate is None:
+            results.append(
+                DeleteDocumentResult(
+                    documentId=document_id,
+                    deleted=False,
+                    error="Weaviate is unavailable — vector records not deleted",
+                )
+            )
+            continue
         try:
             deleted_chunks = weaviate.delete_chunks_by_document(document_id)
         except Exception:
@@ -601,9 +610,14 @@ def delete_documents(
 )
 def hybrid_search_documents(
     payload: HybridSearchRequest,
-    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
 ):
     """Run hybrid retrieval in Weaviate for two documents and return matched chunks."""
+    if weaviate is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Weaviate is not available — hybrid search requires vector storage",
+        )
     document_id_1 = payload.documentId1.strip()
     document_id_2 = payload.documentId2.strip()
     query_string = payload.query.strip()

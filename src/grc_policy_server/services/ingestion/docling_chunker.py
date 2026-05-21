@@ -6,8 +6,11 @@ from typing import Any, Dict, Iterable, Optional
 
 from docling_core.transforms.chunker.doc_chunk import DocChunk
 from docling_core.transforms.chunker.hierarchical_chunker import (
+    ChunkingDocSerializer,
+    ChunkingSerializerProvider,
     HierarchicalChunker,
 )
+from docling_core.transforms.serializer.markdown import MarkdownTableSerializer
 from docling_core.types.doc.labels import DocItemLabel
 
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
@@ -20,6 +23,14 @@ from grc_policy_server.services.ingestion.table_normalization import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MDTableSerializerProvider(ChunkingSerializerProvider):
+    def get_serializer(self, doc):
+        return ChunkingDocSerializer(
+            doc=doc,
+            table_serializer=MarkdownTableSerializer(),  # configuring a different table serializer
+        )
 
 
 def _extract_table_structure(doc_chunk: DocChunk, dl_doc: Any) -> dict[str, Any] | None:
@@ -238,7 +249,9 @@ _HEADER_FOOTER_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 def chunk_document(dl_doc, *, merge_list_items: bool) -> list[Any]:
     chunker = HierarchicalChunker(
-        merge_list_items=merge_list_items, always_emit_headings=True
+        merge_list_items=merge_list_items,
+        always_emit_headings=True,
+        serializer_provider=MDTableSerializerProvider(),
     )
     chunks_list = list(chunker.chunk(dl_doc))
     return chunks_list
@@ -278,7 +291,9 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
             if not title:
                 for item in doc_chunk.meta.doc_items:
                     item_label = getattr(item, "label", None)
-                    label_name = _item_label_name(item_label) if item_label is not None else ""
+                    label_name = (
+                        _item_label_name(item_label) if item_label is not None else ""
+                    )
                     if label_name in ("text", "paragraph", "caption"):
                         raw_text = ""
                         if hasattr(item, "text"):
@@ -308,7 +323,11 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
                     table_struct.get("cells", []),
                     int(table_struct.get("num_cols") or 0),
                 )
-                rows = rows_from_cells(table_struct.get("cells", []), headers=headers, header_depth=header_depth)
+                rows = rows_from_cells(
+                    table_struct.get("cells", []),
+                    headers=headers,
+                    header_depth=header_depth,
+                )
                 metadata["table_structure"] = {
                     "num_rows": table_struct.get("num_rows", 0),
                     "num_cols": table_struct.get("num_cols", 0),

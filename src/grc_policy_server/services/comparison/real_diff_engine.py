@@ -18,25 +18,23 @@ from grc_policy_server.models.schemas import (
     KeyDifference,
     SectionAccuracyMetrics,
 )
-from grc_policy_server.services.comparison.clause_matcher import (
-    ClauseMatch,
-    ClauseMatcher,
-    ClauseMatchingResult,
-    MatchThresholds,
-)
 from grc_policy_server.services.comparison.change_records import (
     ChangeRecord,
+    detect_emc_entity_type,
     detect_numeric_changes,
     detect_requirement_verb_change,
+    detect_test_procedure_change,
+    detect_test_setup_change,
     is_cosmetic_text_change,
     is_formatting_only_change,
     is_reference_number_only_change,
     is_structural_label_change,
 )
-from grc_policy_server.services.comparison.severity_classifier import (
-    AuditDisposition,
-    ClassificationContext,
-    SeverityClassifier,
+from grc_policy_server.services.comparison.clause_matcher import (
+    ClauseMatch,
+    ClauseMatcher,
+    ClauseMatchingResult,
+    MatchThresholds,
 )
 from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
 from grc_policy_server.services.comparison.diff_postprocessor import (
@@ -49,17 +47,23 @@ from grc_policy_server.services.comparison.policy_semantics import (
     compare_clause_meaning,
     ends_with_terminal_punctuation,
     extract_clause_meaning,
+    is_docling_orphan_fragment,
     is_non_semantic_content,
     starts_with_lowercase,
+)
+from grc_policy_server.services.comparison.severity_classifier import (
+    AuditDisposition,
+    ClassificationContext,
+    SeverityClassifier,
 )
 from grc_policy_server.services.documents.canonical_models import (
     TEXT_COMPARISON_NODE_TYPES,
 )
-from grc_policy_server.utils.hashing import pure_text_hash as _pure_text_hash
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.utils.hashing import pure_text_hash as _pure_text_hash
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +75,21 @@ _PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN]"),  # SSN before PHONE (more specific)
     (re.compile(r"\b(?:\+?\d[\d\s\-().]{7,}\d)\b"), "[PHONE]"),
 ]
+
+
+_SKIP_HEADING_RE = re.compile(
+    r"^\s*(?:"
+    r"preface|foreword|acknowledgements?|table\s+of\s+contents|list\s+of\s+(?:figures|tables)"
+    r"|revision\s+history|document\s+history|change\s+log|changelog|change\s+record"
+    r"|copyright|intellectual\s+property|legal\s+notice|disclaimer|signature"
+    r"|blank\s+page|intentionally\s+left\s+blank"
+    r"|vorwort|danksagung|inhaltsverzeichnis|abbildungsverzeichnis|tabellenverzeichnis"
+    r"|revisionshistorie?|änderungsverzeichnis|urheberrecht|impressum"
+    r"|avant-propos|remerciements|table\s+des\s+matières|liste\s+des\s+figures"
+    r"|historique\s+des\s+révisions|mentions\s+légales"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _mask_pii(text: str | None) -> str | None:
@@ -85,6 +104,7 @@ def _mask_pii(text: str | None) -> str | None:
 # Normative strength helpers (Phase E2)
 # ---------------------------------------------------------------------------
 
+
 def _extract_normative_strength(text: str) -> int:
     """Return the numeric strength of the strongest obligation term found in *text*.
 
@@ -94,8 +114,13 @@ def _extract_normative_strength(text: str) -> int:
       may=0, should=1, recommended=2, required=3, must=4, shall=5
     """
     try:
-        from grc_policy_server.services.ingestion.ontology.emc_ontology import NormalizedFactExtractor
-        from grc_policy_server.services.comparison.policy_semantics import OBLIGATION_STRENGTH
+        from grc_policy_server.services.comparison.policy_semantics import (
+            OBLIGATION_STRENGTH,
+        )
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import (
+            NormalizedFactExtractor,
+        )
+
         extractor = NormalizedFactExtractor()
         facts = extractor.extract_from_cell(text or "", column_name="")
         strengths = [
@@ -127,7 +152,9 @@ def _evidence_from_node(node: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def _normative_strength_change(left_text: str, right_text: str) -> dict[str, str] | None:
+def _normative_strength_change(
+    left_text: str, right_text: str
+) -> dict[str, str] | None:
     """Compare normative strength between old and new text using fact extraction.
 
     Returns a dict with "old_strength", "new_strength", "direction" when a
@@ -140,7 +167,11 @@ def _normative_strength_change(left_text: str, right_text: str) -> dict[str, str
     if old_s < 0 or new_s < 0 or old_s == new_s:
         return None
     direction = "strengthened" if new_s > old_s else "weakened"
-    return {"old_strength": str(old_s), "new_strength": str(new_s), "direction": direction}
+    return {
+        "old_strength": str(old_s),
+        "new_strength": str(new_s),
+        "direction": direction,
+    }
 
 
 # Caption row: a table row 0 whose single spanning cell is "Table N …" / "Figure N …"
@@ -175,10 +206,72 @@ def severity_from_distance(distance: Optional[float], change_type: str) -> str:
     return "low"
 
 
+def _reconstruct_canonical_table(node: dict) -> "Any | None":
+    """Reconstruct a minimal CanonicalTable from a comparison-record node dict.
+
+    Returns None if the node has no cell data (non-table or missing structure).
+    """
+    try:
+        from grc_policy_server.services.documents.canonical_table_model import (
+            CanonicalTable,
+            TableCell,
+            TableColumn,
+            TableRow,
+        )
+
+        meta = node.get("metadata") or {}
+        ts = meta.get("table_structure") or {}
+        cells_raw = ts.get("cells") or node.get("table_cells") or []
+        headers_raw = ts.get("headers") or []
+        if not cells_raw:
+            return None
+
+        headers = [str(h) for h in headers_raw]
+        cols = [
+            TableColumn(index=i, name=h, normalized=h.lower())
+            for i, h in enumerate(headers)
+        ]
+
+        rows_by_idx: dict[int, list[dict]] = {}
+        for c in cells_raw:
+            r = int(c.get("row", 0))
+            rows_by_idx.setdefault(r, []).append(c)
+
+        canonical_rows = []
+        for r_idx in sorted(rows_by_idx):
+            row_cells = [
+                TableCell(
+                    row=r_idx,
+                    col=int(c.get("col", 0)),
+                    text=str(c.get("text", "") or ""),
+                    is_header=bool(c.get("is_header", False)),
+                )
+                for c in rows_by_idx[r_idx]
+            ]
+            canonical_rows.append(TableRow(row_number=r_idx, cells=row_cells))
+
+        caption = str(meta.get("caption") or node.get("heading_text") or "")
+        return CanonicalTable(
+            table_uid=str(node.get("node_id") or ""),
+            caption_original=caption,
+            caption_normalized=caption.lower(),
+            section_path=list(node.get("section_path") or []),
+            pages=[int(node.get("page_from") or 1)],
+            columns=cols,
+            rows=canonical_rows,
+            metadata={
+                "language": str(node.get("detected_language") or ""),
+                "emc_test_type": str(meta.get("emc_test_type") or ""),
+            },
+        )
+    except Exception:
+        logger.debug("_reconstruct_canonical_table failed", exc_info=True)
+        return None
+
 
 @dataclass
 class RealDiffEngine:
-    weaviate: WeaviateClient
+    weaviate: WeaviateClient | None
     neo4j: Neo4jClient | None
     llm: BaseLLM
     canonical_store: CanonicalDocumentStore | None = None
@@ -195,6 +288,7 @@ class RealDiffEngine:
         force_re_extract: bool = False,
         audit_mode: bool = True,
         save_to_db: bool = False,
+        testing_department: str = "",
     ) -> ComparisonResult:
         left_nodes = self._load_comparison_nodes(doc1.id)
         right_nodes = self._load_comparison_nodes(doc2.id)
@@ -211,12 +305,16 @@ class RealDiffEngine:
         right_nodes = await self._enrich_nodes_with_semantics(
             right_nodes, force_re_extract=force_re_extract, language=language
         )
+        left_nodes = self._filter_non_compliance_nodes(left_nodes)
+        right_nodes = self._filter_non_compliance_nodes(right_nodes)
         logger.info(
             "compare left_nodes=%s right_nodes=%s", len(left_nodes), len(right_nodes)
         )
 
         matcher = ClauseMatcher(
-            search_fn=self.weaviate.search_section_in_document,
+            search_fn=self.weaviate.search_section_in_document
+            if self.weaviate
+            else None,
             thresholds=self.thresholds,
             topk=self.topk,
             language=language,
@@ -235,7 +333,9 @@ class RealDiffEngine:
             matcher=matcher,
         )
 
-        change_records = self._build_change_records(matching, language=language)
+        change_records = self._build_change_records(
+            matching, language=language, testing_department=testing_department
+        )
         for alignment_type, left_group, right_group, distance in grouped_alignments:
             change_records.append(
                 self._change_record_for_pair(
@@ -245,6 +345,7 @@ class RealDiffEngine:
                     right_nodes=right_group,
                     distance=distance,
                     meaning_change="modified",
+                    testing_department=testing_department,
                 )
             )
         diffs = [self._key_difference_from_record(record) for record in change_records]
@@ -252,7 +353,10 @@ class RealDiffEngine:
         # Filter non-semantic diffs and their corresponding change_records together
         # to avoid pairing mismatches after filtering
         import re
-        from grc_policy_server.services.comparison.diff_postprocessor import canonicalize_text_content
+
+        from grc_policy_server.services.comparison.diff_postprocessor import (
+            canonicalize_text_content,
+        )
 
         _REFERENCE_SECTION_RE = re.compile(
             r"\b(legende|symbole?|abkürzung(?:en)?|definitionen?|begriffe?|inhalt"
@@ -270,12 +374,16 @@ class RealDiffEngine:
                 section = str(diff.doc2Reference.section or "")
 
             # Drop reference-section diffs unless they have a numbered caption
-            if _REFERENCE_SECTION_RE.search(section) and not _TABLE_CAPTION_NUM_RE.search(section):
+            if _REFERENCE_SECTION_RE.search(
+                section
+            ) and not _TABLE_CAPTION_NUM_RE.search(section):
                 return True
 
             # Don't filter diffs that have structural changes
             has_structural_change = any(
-                change.location == "structure" or "split" in change.text.lower() or "merge" in change.text.lower()
+                change.location == "structure"
+                or "split" in change.text.lower()
+                or "merge" in change.text.lower()
                 for change in (diff.changes or [])
             )
             if has_structural_change:
@@ -283,11 +391,17 @@ class RealDiffEngine:
 
             # Drop MODIFIED diffs with identical content in the SAME section (pure cosmetic change)
             # But keep diffs where section or location changed (semantic difference)
-            if diff.changeType == "MODIFIED" and diff.doc1Reference and diff.doc2Reference:
+            if (
+                diff.changeType == "MODIFIED"
+                and diff.doc1Reference
+                and diff.doc2Reference
+            ):
                 # Check if section/location is the same
                 old_section = str(diff.doc1Reference.section or "").strip()
                 new_section = str(diff.doc2Reference.section or "").strip()
-                if old_section == new_section and old_section:  # Same location, check content
+                if (
+                    old_section == new_section and old_section
+                ):  # Same location, check content
                     old_text_src = diff.doc1Reference.sourceText
                     new_text_src = diff.doc2Reference.sourceText
                     # Only filter if we have identical source text (purely cosmetic)
@@ -325,7 +439,9 @@ class RealDiffEngine:
             language=language,
         )
 
-        await self._populate_markdown_diff_summaries(diffs, change_records, language=language)
+        await self._populate_markdown_diff_summaries(
+            diffs, change_records, language=language
+        )
 
         summary = await self._summary_from_change_records(
             doc1_name=doc1.name,
@@ -382,6 +498,150 @@ class RealDiffEngine:
 
         return result
 
+    async def compare_records_only(
+        self,
+        doc1: Document,
+        doc2: Document,
+        *,
+        force_re_extract: bool = False,
+        testing_department: str = "",
+    ) -> tuple[
+        list[KeyDifference], str, str, str, list[dict], ComparisonAccuracyMetrics
+    ]:
+        """Run the comparison pipeline without LLM markdown generation.
+
+        Returns (key_differences, doc1_name, doc2_name, language,
+                 no_change_coverage, accuracy_metrics).
+        Used by the streaming path to generate markdown per-diff inline.
+        """
+        left_nodes = self._load_comparison_nodes(doc1.id)
+        right_nodes = self._load_comparison_nodes(doc2.id)
+        left_nodes = self._stitch_page_fragments(left_nodes)
+        right_nodes = self._stitch_page_fragments(right_nodes)
+
+        language = await self._detect_document_language(left_nodes)
+
+        left_nodes = await self._enrich_nodes_with_semantics(
+            left_nodes, force_re_extract=force_re_extract, language=language
+        )
+        right_nodes = await self._enrich_nodes_with_semantics(
+            right_nodes, force_re_extract=force_re_extract, language=language
+        )
+        left_nodes = self._filter_non_compliance_nodes(left_nodes)
+        right_nodes = self._filter_non_compliance_nodes(right_nodes)
+
+        matcher = ClauseMatcher(
+            search_fn=self.weaviate.search_section_in_document
+            if self.weaviate
+            else None,
+            thresholds=self.thresholds,
+            topk=self.topk,
+            language=language,
+        )
+        matching = matcher.match(
+            left_nodes=left_nodes,
+            right_nodes=right_nodes,
+            target_document_id=doc2.id,
+        )
+        matching = self._detect_moves(matching, matcher=matcher)
+        matching, grouped_alignments = self._detect_split_merge_alignments(
+            matching, matcher=matcher
+        )
+
+        change_records = self._build_change_records(
+            matching, language=language, testing_department=testing_department
+        )
+        for alignment_type, left_group, right_group, distance in grouped_alignments:
+            change_records.append(
+                self._change_record_for_pair(
+                    change_type="MODIFIED",
+                    alignment_type=alignment_type,
+                    left_nodes=left_group,
+                    right_nodes=right_group,
+                    distance=distance,
+                    meaning_change="modified",
+                    testing_department=testing_department,
+                )
+            )
+        diffs = [self._key_difference_from_record(record) for record in change_records]
+
+        import re as _re
+
+        from grc_policy_server.services.comparison.diff_postprocessor import (
+            canonicalize_text_content,
+        )
+
+        _REF_SECTION_RE = _re.compile(
+            r"\b(legende|symbole?|abkürzung(?:en)?|definitionen?|begriffe?|inhalt"
+            r"|glossar|annex|anhang|abbreviation|legend|symbol|glossary|definition)\b",
+            _re.IGNORECASE,
+        )
+        _TBL_CAP_RE = _re.compile(r"\bTabell?e\s+\d+", _re.IGNORECASE)
+
+        def _should_filter(diff: KeyDifference) -> bool:
+            section = str(diff.section or "")
+            if not section and diff.doc1Reference:
+                section = str(diff.doc1Reference.section or "")
+            if not section and diff.doc2Reference:
+                section = str(diff.doc2Reference.section or "")
+            if _REF_SECTION_RE.search(section) and not _TBL_CAP_RE.search(section):
+                return True
+            has_structural = any(
+                change.location == "structure"
+                or "split" in change.text.lower()
+                or "merge" in change.text.lower()
+                for change in (diff.changes or [])
+            )
+            if has_structural:
+                return False
+            if (
+                diff.changeType == "MODIFIED"
+                and diff.doc1Reference
+                and diff.doc2Reference
+            ):
+                old_sec = str(diff.doc1Reference.section or "").strip()
+                new_sec = str(diff.doc2Reference.section or "").strip()
+                if old_sec == new_sec and old_sec:
+                    old_t = diff.doc1Reference.sourceText
+                    new_t = diff.doc2Reference.sourceText
+                    if old_t and new_t:
+                        if canonicalize_text_content(
+                            str(old_t)
+                        ) == canonicalize_text_content(str(new_t)):
+                            return True
+            return False
+
+        filtered = [
+            (d, r) for d, r in zip(diffs, change_records) if not _should_filter(d)
+        ]
+        diffs, change_records = (
+            (list(x) for x in zip(*filtered)) if filtered else ([], [])
+        )
+
+        paired = sorted(
+            zip(diffs, change_records),
+            key=lambda pair: (
+                ("High", "Medium", "Low").index(pair[0].impact)
+                if pair[0].impact in ("High", "Medium", "Low")
+                else 2
+            ),
+        )
+        diffs = [d for d, _ in paired] if paired else []
+        final_change_records = [r for _, r in paired] if paired else []
+
+        no_change_coverage = self._compute_no_change_coverage(
+            matching, final_change_records
+        )
+        accuracy_metrics = self._compute_accuracy_metrics(matching.matches)
+        return (
+            diffs,
+            doc1.name,
+            doc2.name,
+            language,
+            no_change_coverage,
+            accuracy_metrics,
+        )
+
     def _load_comparison_nodes(self, document_id: str) -> list[dict]:
         if self.canonical_store is not None:
             canonical_nodes = self.canonical_store.load_comparison_nodes(document_id)
@@ -397,6 +657,11 @@ class RealDiffEngine:
                 f"{document_id}. Re-ingest the document before comparing."
             )
 
+        if self.weaviate is None:
+            raise ValueError(
+                f"No data source available for document {document_id}. "
+                "Ensure canonical_store is configured."
+            )
         logger.warning(
             "canonical comparison nodes unavailable; falling back to Weaviate "
             "document_id=%s",
@@ -514,7 +779,9 @@ class RealDiffEngine:
             right_group, distance = split
             alignments.append(("split", [left_node], right_group, distance))
             consumed_left.add(left_id)
-            consumed_right.update(str(node.get("chunk_id") or "") for node in right_group)
+            consumed_right.update(
+                str(node.get("chunk_id") or "") for node in right_group
+            )
 
         for right_node in matching.added:
             right_id = str(right_node.get("chunk_id") or "")
@@ -611,22 +878,29 @@ class RealDiffEngine:
         """
         if not nodes:
             return nodes
-        ordered = sorted(nodes, key=lambda n: (
-            str(n.get("section_path") or ""),
-            int(n.get("page_number") or 0),
-            int(n.get("chunk_index") or 0),
-        ))
+        ordered = sorted(
+            nodes,
+            key=lambda n: (
+                str(n.get("section_path") or ""),
+                int(n.get("page_number") or 0),
+                int(n.get("chunk_index") or 0),
+            ),
+        )
         result: list[dict] = []
         i = 0
         stitched_count = 0
         while i < len(ordered):
             node = ordered[i]
-            if i + 1 < len(ordered) and self._is_page_continuation(node, ordered[i + 1]):
+            if i + 1 < len(ordered) and self._is_page_continuation(
+                node, ordered[i + 1]
+            ):
                 first_stable_id = node.get("stable_id")
                 merged = self._combined_node([node, ordered[i + 1]])
                 merged["stable_id"] = first_stable_id
                 j = i + 2
-                while j < len(ordered) and self._is_page_continuation(merged, ordered[j]):
+                while j < len(ordered) and self._is_page_continuation(
+                    merged, ordered[j]
+                ):
                     merged = self._combined_node([merged, ordered[j]])
                     merged["stable_id"] = first_stable_id
                     j += 1
@@ -654,7 +928,9 @@ class RealDiffEngine:
             if prev_titles != curr_titles:
                 return False
         else:
-            if str(prev.get("section_path") or "") != str(curr.get("section_path") or ""):
+            if str(prev.get("section_path") or "") != str(
+                curr.get("section_path") or ""
+            ):
                 return False
         prev_page = int(prev.get("page_number") or 0)
         curr_page = int(curr.get("page_number") or 0)
@@ -687,17 +963,38 @@ class RealDiffEngine:
             curr_meta = curr.get("metadata") or {}
             if prev_meta.get("is_list") or curr_meta.get("is_list"):
                 return True
-            return (
-                not ends_with_terminal_punctuation(prev_text)
-                and starts_with_lowercase(curr_text)
-            )
+            return not ends_with_terminal_punctuation(
+                prev_text
+            ) and starts_with_lowercase(curr_text)
         return False
+
+    def _filter_non_compliance_nodes(self, nodes: list[dict]) -> list[dict]:
+        """Remove nodes whose top-level heading is a non-compliance section
+        (preface, ToC, revision history, copyright, etc.).
+        Filtering happens before matching to avoid noise diffs.
+        """
+        result = []
+        skip_prefix: str | None = None
+        for node in nodes:
+            path: list = node.get("section_titles") or node.get("heading_path") or []
+            top_heading = str(path[0]).strip() if path else ""
+            path_str = " / ".join(str(p) for p in path).lower()
+            if top_heading and _SKIP_HEADING_RE.match(top_heading):
+                skip_prefix = top_heading.lower()
+                continue
+            if skip_prefix and path_str.startswith(skip_prefix):
+                continue
+            else:
+                skip_prefix = None
+            result.append(node)
+        return result
 
     def _build_change_records(
         self,
         matching: ClauseMatchingResult,
         *,
         language: str,
+        testing_department: str = "",
     ) -> list[ChangeRecord]:
         records: list[ChangeRecord] = []
         for match in matching.matches:
@@ -730,12 +1027,16 @@ class RealDiffEngine:
                 left_hash = (
                     left_node.get("pure_text_hash")
                     or left_node.get("metadata", {}).get("pure_text_hash")
-                    or _pure_text_hash(left_node.get("text") or left_node.get("clean_text") or "")
+                    or _pure_text_hash(
+                        left_node.get("text") or left_node.get("clean_text") or ""
+                    )
                 )
                 right_hash = (
                     right_node.get("pure_text_hash")
                     or right_node.get("metadata", {}).get("pure_text_hash")
-                    or _pure_text_hash(right_node.get("text") or right_node.get("clean_text") or "")
+                    or _pure_text_hash(
+                        right_node.get("text") or right_node.get("clean_text") or ""
+                    )
                 )
                 if left_hash and right_hash and left_hash == right_hash:
                     continue
@@ -756,6 +1057,7 @@ class RealDiffEngine:
                     right_nodes=[match.right],
                     distance=match.distance,
                     meaning_change=meaning_change,
+                    testing_department=testing_department,
                 )
             )
 
@@ -770,6 +1072,7 @@ class RealDiffEngine:
                     right_nodes=[],
                     distance=None,
                     meaning_change="removed",
+                    testing_department=testing_department,
                 )
             )
 
@@ -784,6 +1087,7 @@ class RealDiffEngine:
                     right_nodes=[right_node],
                     distance=None,
                     meaning_change="added",
+                    testing_department=testing_department,
                 )
             )
         return records
@@ -797,12 +1101,17 @@ class RealDiffEngine:
         right_nodes: list[dict],
         distance: float | None,
         meaning_change: str,
+        testing_department: str = "",
     ) -> ChangeRecord:
-        left = self._combined_node(left_nodes) if len(left_nodes) > 1 else (
-            left_nodes[0] if left_nodes else None
+        left = (
+            self._combined_node(left_nodes)
+            if len(left_nodes) > 1
+            else (left_nodes[0] if left_nodes else None)
         )
-        right = self._combined_node(right_nodes) if len(right_nodes) > 1 else (
-            right_nodes[0] if right_nodes else None
+        right = (
+            self._combined_node(right_nodes)
+            if len(right_nodes) > 1
+            else (right_nodes[0] if right_nodes else None)
         )
         node_type = str((left or right or {}).get("node_type") or "paragraph")
         left_ref = self._citation_from_neo4j_or_fallback(left) if left else None
@@ -826,17 +1135,75 @@ class RealDiffEngine:
         if requirement_verb_change is None:
             requirement_verb_change = _normative_strength_change(left_src, right_src)
         cosmetic_change = is_cosmetic_text_change(left_src, right_src)
-        ref_num_only = (
-            bool(numeric_changes)
-            and is_reference_number_only_change(left_src, right_src)
+        ref_num_only = bool(numeric_changes) and is_reference_number_only_change(
+            left_src, right_src
         )
         formatting_only = is_formatting_only_change(left_src, right_src)
         structural_label = is_structural_label_change(left_src, right_src)
+        ontology_entity_type = detect_emc_entity_type(
+            left_text=left_src,
+            right_text=right_src,
+            left_node=left,
+            right_node=right,
+        )
+        test_procedure_change = detect_test_procedure_change(left_src, right_src)
+        test_setup_change = detect_test_setup_change(left_src, right_src)
         table_changes = [
-            change.model_dump(mode="json")
-            for change in changes
-            if node_type == "table"
+            change.model_dump(mode="json") for change in changes if node_type == "table"
         ]
+
+        # KG entity-graph diff — wires the semantic KG comparison into the main pipeline
+        if node_type == "table" and left is not None and right is not None:
+            try:
+                from grc_policy_server.services.comparison.table_diff_engine import (
+                    _diff_entity_graphs,
+                    _extract_table_entity_graph,
+                )
+
+                language = str(
+                    left.get("detected_language")
+                    or right.get("detected_language")
+                    or ""
+                )
+                old_table = _reconstruct_canonical_table(left)
+                new_table = _reconstruct_canonical_table(right)
+                if old_table and new_table:
+                    old_graph, tt_old = _extract_table_entity_graph(
+                        old_table,
+                        language=language,
+                        testing_department=testing_department,
+                    )
+                    new_graph, tt_new = _extract_table_entity_graph(
+                        new_table,
+                        language=language,
+                        testing_department=testing_department,
+                    )
+                    from grc_policy_server.services.ingestion.ontology.emc_ontology import (
+                        EMCTestType,
+                    )
+
+                    resolved_tt = tt_old if tt_old != EMCTestType.UNKNOWN else tt_new
+                    if any(old_graph) or any(new_graph):
+                        for egc in _diff_entity_graphs(
+                            old_graph, new_graph, resolved_tt
+                        ):
+                            table_changes.append(
+                                {
+                                    "type": "entity_graph_change",
+                                    "entity_type": egc.get("entity_type", ""),
+                                    "old_value": egc.get("old_value", ""),
+                                    "new_value": egc.get("new_value", ""),
+                                    "change_type": egc.get("change_type", ""),
+                                    "semantic_description": egc.get(
+                                        "semantic_description", ""
+                                    ),
+                                }
+                            )
+            except Exception:
+                logger.debug(
+                    "entity graph diff failed in change record pair", exc_info=True
+                )
+
         classification = self.severity_classifier.classify(
             ClassificationContext(
                 change_type=change_type,  # type: ignore[arg-type]
@@ -851,6 +1218,10 @@ class RealDiffEngine:
                 reference_number_only_change=ref_num_only,
                 formatting_only_change=formatting_only,
                 structural_label_change=structural_label,
+                ontology_entity_type=ontology_entity_type,
+                test_procedure_change=test_procedure_change,
+                test_setup_change=test_setup_change,
+                testing_department=testing_department,
             )
         )
         significance = classification.severity
@@ -871,8 +1242,12 @@ class RealDiffEngine:
         confidence = 0.0 if distance is None else max(0.0, min(1.0, 1.0 - distance))
         if change_type in {"ADDED", "REMOVED"}:
             confidence = 1.0
-        v1_evidence = [e for n in left_nodes if (e := _evidence_from_node(n)) is not None]
-        v2_evidence = [e for n in right_nodes if (e := _evidence_from_node(n)) is not None]
+        v1_evidence = [
+            e for n in left_nodes if (e := _evidence_from_node(n)) is not None
+        ]
+        v2_evidence = [
+            e for n in right_nodes if (e := _evidence_from_node(n)) is not None
+        ]
         return ChangeRecord(
             change_id=self._change_id(change_type, left_nodes, right_nodes),
             change_type=change_type,  # type: ignore[arg-type]
@@ -913,9 +1288,19 @@ class RealDiffEngine:
         doc2_content: str | None,
     ) -> list[ChangeDetail]:
         if change_type == "ADDED":
-            return [ChangeDetail(type="added", text=str(self._source_text(right) or doc2_content or ""))]
+            return [
+                ChangeDetail(
+                    type="added",
+                    text=str(self._source_text(right) or doc2_content or ""),
+                )
+            ]
         if change_type == "REMOVED":
-            return [ChangeDetail(type="removed", text=str(self._source_text(left) or doc1_content or ""))]
+            return [
+                ChangeDetail(
+                    type="removed",
+                    text=str(self._source_text(left) or doc1_content or ""),
+                )
+            ]
 
         if alignment_type in {"split", "merged"}:
             label = (
@@ -1005,7 +1390,9 @@ class RealDiffEngine:
             for node in ordered
             if self._comparison_text(node)
         ]
-        first["chunk_id"] = ",".join(str(node.get("chunk_id") or "") for node in ordered)
+        first["chunk_id"] = ",".join(
+            str(node.get("chunk_id") or "") for node in ordered
+        )
         first["node_id"] = first["chunk_id"]
         first["text"] = "\n\n".join(text for text in texts if text)
         first["clean_text"] = " ".join(clean_texts)
@@ -1036,7 +1423,10 @@ class RealDiffEngine:
         right_type = str(right.get("node_type") or "paragraph")
         if left_type == right_type:
             return True
-        return left_type in TEXT_COMPARISON_NODE_TYPES and right_type in TEXT_COMPARISON_NODE_TYPES
+        return (
+            left_type in TEXT_COMPARISON_NODE_TYPES
+            and right_type in TEXT_COMPARISON_NODE_TYPES
+        )
 
     @staticmethod
     def _change_id(
@@ -1062,6 +1452,7 @@ class RealDiffEngine:
             return
 
         from grc_policy_server.core.config import settings as _settings
+
         db_url = _settings.database_url
         if not db_url:
             return
@@ -1138,8 +1529,12 @@ class RealDiffEngine:
                     ),
                 },
                 "retrievalArtifacts": {
-                    "doc1": self._retrieval_artifact_summary(left_artifacts, left_nodes),
-                    "doc2": self._retrieval_artifact_summary(right_artifacts, right_nodes),
+                    "doc1": self._retrieval_artifact_summary(
+                        left_artifacts, left_nodes
+                    ),
+                    "doc2": self._retrieval_artifact_summary(
+                        right_artifacts, right_nodes
+                    ),
                 },
                 "alignmentResults": {
                     "matchedNodes": len(matching.matches),
@@ -1261,7 +1656,9 @@ class RealDiffEngine:
         try:
             loaded = loader(document_id)
         except Exception:
-            logger.exception("failed to load compare debug artifacts document_id=%s", document_id)
+            logger.exception(
+                "failed to load compare debug artifacts document_id=%s", document_id
+            )
             return {}
         return loaded if isinstance(loaded, dict) else {}
 
@@ -1292,7 +1689,9 @@ class RealDiffEngine:
             "tablesFound": sum(
                 1 for node in node_list if str(node.get("node_type") or "") == "table"
             ),
-            "listsFound": sum(1 for node in node_list if self._looks_like_list_node(node)),
+            "listsFound": sum(
+                1 for node in node_list if self._looks_like_list_node(node)
+            ),
             "pageAnchors": sorted(
                 {
                     int(page)
@@ -1315,13 +1714,23 @@ class RealDiffEngine:
     def _looks_like_list_node(node: dict) -> bool:
         if str(node.get("node_type") or "") == "list_item":
             return True
-        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
-        labels = " ".join(str(label).lower() for label in metadata.get("source_labels") or [])
+        metadata = (
+            node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        )
+        labels = " ".join(
+            str(label).lower() for label in metadata.get("source_labels") or []
+        )
         return "list" in labels or "bullet" in labels
 
     @staticmethod
     def _hierarchy_depth(nodes: list[dict]) -> int:
-        return max((len(node.get("heading_path") or node.get("lineage") or []) for node in nodes), default=0)
+        return max(
+            (
+                len(node.get("heading_path") or node.get("lineage") or [])
+                for node in nodes
+            ),
+            default=0,
+        )
 
     @staticmethod
     def _section_labels(nodes: list[dict]) -> list[str]:
@@ -1358,7 +1767,11 @@ class RealDiffEngine:
 
     def _retrieval_artifact_summary(self, artifacts: dict, nodes: list[dict]) -> dict:
         normalized = artifacts.get("normalizedTreeJson")
-        retrieval = normalized.get("retrievalArtifacts") if isinstance(normalized, dict) else None
+        retrieval = (
+            normalized.get("retrievalArtifacts")
+            if isinstance(normalized, dict)
+            else None
+        )
         if isinstance(retrieval, dict):
             return retrieval
 
@@ -1383,7 +1796,9 @@ class RealDiffEngine:
             mapping = [
                 {
                     "chunkId": str(node.get("chunk_id") or node.get("node_id") or ""),
-                    "canonicalNodeId": str(node.get("canonical_node_id") or node.get("node_id") or ""),
+                    "canonicalNodeId": str(
+                        node.get("canonical_node_id") or node.get("node_id") or ""
+                    ),
                     "parentId": node.get("parent_id"),
                     "nodeType": node.get("node_type"),
                     "sectionPath": node.get("section_path"),
@@ -1407,7 +1822,9 @@ class RealDiffEngine:
                 "coverageRatio": 1.0,
             }
         with_any = sum(1 for diff in diffs if diff.doc1Reference or diff.doc2Reference)
-        with_both = sum(1 for diff in diffs if diff.doc1Reference and diff.doc2Reference)
+        with_both = sum(
+            1 for diff in diffs if diff.doc1Reference and diff.doc2Reference
+        )
         return {
             "totalChanges": total,
             "changesWithAnyCitation": with_any,
@@ -1522,11 +1939,7 @@ class RealDiffEngine:
         """Return the set of normalised non-empty cell texts (position-independent)."""
         cells = self._normalize_cells_for_comparison(node)
         _norm = self._normalize_cell_for_severity
-        return frozenset(
-            v
-            for c in cells
-            if (v := _norm(str(c.get("text", "")))) != ""
-        )
+        return frozenset(v for c in cells if (v := _norm(str(c.get("text", "")))) != "")
 
     @staticmethod
     def _table_jaccard(left_bag: frozenset[str], right_bag: frozenset[str]) -> float:
@@ -1641,6 +2054,7 @@ class RealDiffEngine:
     def _render_cells_preview(self, cells: list[dict], max_rows: int = 5) -> str:
         """Render first `max_rows` rows of table cells as pipe-delimited text."""
         from collections import defaultdict
+
         rows: dict[int, list[tuple[int, str]]] = defaultdict(list)
         for c in cells:
             row = int(c.get("row", c.get("row_index", 0)))
@@ -1682,7 +2096,11 @@ class RealDiffEngine:
             preview = self._render_cells_preview(cells, max_rows=5)
             if preview:
                 header = f"{title}\n" if title else ""
-                dim = f"({num_rows} rows × {num_cols} cols)\n" if num_rows and num_cols else ""
+                dim = (
+                    f"({num_rows} rows × {num_cols} cols)\n"
+                    if num_rows and num_cols
+                    else ""
+                )
                 return f"{header}{dim}{preview}"
 
         # 3. Dimensions-only fallback
@@ -1698,17 +2116,13 @@ class RealDiffEngine:
         force_re_extract: bool = False,
         language: str = "",
     ) -> list[dict]:
+        """Apply rule-based semantic enrichment — no LLM calls."""
         enriched = [dict(node) for node in nodes]
-        indexes: list[int] = []
-        texts: list[str] = []
-        markdown_texts: list[str] = []
-
-        for index, node in enumerate(enriched):
+        for node in enriched:
             if not node.get("clean_text"):
                 node["clean_text"] = clean_policy_text(str(node.get("text") or ""))
             if node.get("node_type") not in TEXT_COMPARISON_NODE_TYPES:
                 continue
-            # Skip if already has semantics, unless force_re_extract is True
             if not force_re_extract and any(
                 node.get(field)
                 for field in ("obligation", "subject", "action", "object", "condition")
@@ -1717,32 +2131,18 @@ class RealDiffEngine:
             text = str(node.get("text") or "").strip()
             if not text:
                 continue
-            indexes.append(index)
-            texts.append(text)
-            # Use markdown if available, otherwise fall back to plain text
-            markdown_texts.append(str(node.get("markdown_text") or text))
-
-        if not texts:
-            return enriched
-
-        extracted = await self.llm.extract_policy_meanings(
-            texts=texts,
-            markdown_texts=markdown_texts,
-            language=language,
-        )
-
-        for index, meaning in zip(
-            indexes,
-            extracted,
-            strict=False,
-        ):
-            for field_name, value in meaning.items():
-                enriched[index][field_name] = str(value or "")
-
+            meaning = extract_clause_meaning(text)
+            node["obligation"] = meaning.obligation
+            node["subject"] = meaning.subject
+            node["action"] = meaning.action
+            node["object"] = meaning.object
+            node["condition"] = meaning.condition
         return enriched
 
     async def _detect_document_language(self, nodes: list[dict]) -> str:
-        """Detect language from first few chunks of text."""
+        """Rule-based language detection from node text."""
+        import re
+
         sample_texts = []
         for node in nodes[:5]:
             text = str(node.get("text") or "").strip()
@@ -1752,8 +2152,29 @@ class RealDiffEngine:
                 break
         if not sample_texts:
             return ""
-        sample = " ".join(sample_texts)[:500]
-        return await self.llm.detect_language(sample)
+        sample = " ".join(sample_texts)[:500].lower()
+        tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", sample)
+        if not tokens:
+            return ""
+        lexicons = {
+            "en": {"the", "and", "shall", "must", "should", "policy", "is", "are"},
+            "de": {"der", "die", "das", "und", "muss", "müssen", "soll", "sollen"},
+            "fr": {"le", "la", "les", "et", "doit", "doivent", "sont"},
+        }
+        scores: dict[str, int] = {code: 0 for code in lexicons}
+        for token in tokens:
+            for code, lexicon in lexicons.items():
+                if token in lexicon:
+                    scores[code] += 1
+        if any(ch in sample for ch in "äöüß"):
+            scores["de"] += 2
+        if any(ch in sample for ch in "àâçéèêëîïôûùüÿœæ"):
+            scores["fr"] += 2
+        best = max(scores, key=scores.get)
+        if scores[best] == 0:
+            return ""
+        winners = [code for code, sc in scores.items() if sc == scores[best]]
+        return best if len(winners) == 1 else ""
 
     def _node_meaning(self, node: dict) -> ClauseMeaning:
         obligation = str(node.get("obligation") or "")
@@ -1782,16 +2203,31 @@ class RealDiffEngine:
         section = str(chunk.get("section_path") or "")
         # Replace dimension-only fallback labels like "3 rows × 4 columns" with
         # a meaningful ancestor heading so references are readable in the report.
-        if not section or re.fullmatch(r"\d+\s*(?:rows?\s*[×x]\s*\d+\s*col|col[^\s]*)", section, re.IGNORECASE):
+        if not section or re.fullmatch(
+            r"\d+\s*(?:rows?\s*[×x]\s*\d+\s*col|col[^\s]*)", section, re.IGNORECASE
+        ):
             heading_path = chunk.get("heading_path") or []
-            ancestor = next((str(h) for h in reversed(heading_path) if str(h).strip()), "")
+            ancestor = next(
+                (str(h) for h in reversed(heading_path) if str(h).strip()), ""
+            )
             section = ancestor or "[Untitled Table]"
+        node_id = str(chunk.get("node_id") or "") or None
+        text_hash = (
+            chunk.get("pure_text_hash")
+            or (chunk.get("metadata") or {}).get("pure_text_hash")
+            or None
+        )
+        bbox_refs = chunk.get("bbox_refs") or []
+        bbox = bbox_refs[0] if bbox_refs else None
         return DocumentReference(
             section=section,
             page=int(page or 0),
             lineStart=chunk.get("line_start"),
             lineEnd=chunk.get("line_end"),
             sourceText=source_text,
+            nodeId=node_id,
+            textHash=text_hash,
+            bbox=bbox,
         )
 
     def _reference_source_text(self, chunk: dict) -> str:
@@ -1806,7 +2242,10 @@ class RealDiffEngine:
         text = str(
             node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))
         ).strip()
-        return is_non_semantic_content(text)
+        node_type = str(node.get("node_type") or "clause")
+        return is_non_semantic_content(text) or is_docling_orphan_fragment(
+            text, node_type
+        )
 
     def _short(self, text: str, n: int = 90) -> str:
         t = " ".join((text or "").split())
@@ -2029,6 +2468,72 @@ class RealDiffEngine:
 
         return sorted(metrics, key=lambda m: m.section)
 
+    # ------------------------------------------------------------------ #
+    #  Phase 16 — No-Change Coverage                                      #
+    # ------------------------------------------------------------------ #
+
+    def _readable_section_label(self, node: dict) -> str:
+        """Return a short human-readable section label for a comparison node."""
+        section_path = node.get("section_path") or node.get("heading_path")
+        if isinstance(section_path, list):
+            parts = [str(s).strip() for s in section_path if str(s).strip()]
+            if len(parts) >= 2:
+                return " > ".join(parts[-2:])
+            if parts:
+                return parts[-1]
+        if isinstance(section_path, str) and section_path.strip():
+            return section_path.strip()
+        title = str(node.get("title") or "").strip()
+        if title:
+            return title
+        return str(node.get("text") or "").strip()[:60] or "Unknown Section"
+
+    def _compute_no_change_coverage(
+        self,
+        matching: ClauseMatchingResult,
+        change_records: list[ChangeRecord],
+    ) -> list[dict]:
+        """Phase 16: sections checked and found unchanged.
+
+        Groups high-confidence unchanged matches by readable section label and
+        computes a confidence level based on the match distance distribution.
+        Only sections with no change records are included.
+        """
+        changed_sections: set[str] = {r.section for r in change_records}
+
+        section_data: dict[str, dict[str, int]] = {}
+        for match in matching.matches:
+            if match.distance >= self.thresholds.unchanged_distance:
+                continue
+            section = self._readable_section_label(match.left)
+            if any(section in cs or cs in section for cs in changed_sections):
+                continue
+            if section not in section_data:
+                section_data[section] = {"very_high": 0, "high": 0, "total": 0}
+            section_data[section]["total"] += 1
+            if match.distance < 0.08:
+                section_data[section]["very_high"] += 1
+            else:
+                section_data[section]["high"] += 1
+
+        coverage: list[dict] = []
+        for section, data in sorted(section_data.items()):
+            total = data["total"]
+            if total == 0:
+                continue
+            h_ratio = (data["very_high"] + data["high"]) / total
+            if h_ratio >= 0.80:
+                confidence = "High"
+            elif h_ratio >= 0.50:
+                confidence = "Medium"
+            else:
+                confidence = "Low"
+            coverage.append(
+                {"section": section, "confidence": confidence, "nodeCount": total}
+            )
+
+        return coverage
+
     def _compute_accuracy_metrics(
         self, matches: list[ClauseMatch]
     ) -> ComparisonAccuracyMetrics:
@@ -2110,6 +2615,7 @@ class RealDiffEngine:
         """
         location = str(table_change.get("location") or "")
         import re as _re
+
         m = _re.search(r"Col\s+(\d+)", location, _re.IGNORECASE)
         if m:
             col_1idx = int(m.group(1))
@@ -2131,7 +2637,9 @@ class RealDiffEngine:
         async def _generate_one(diff: KeyDifference, i: int):
             record: ChangeRecord | None = _records[i] if i < len(_records) else None
             left_node = record.left_nodes[0] if (record and record.left_nodes) else None
-            right_node = record.right_nodes[0] if (record and record.right_nodes) else None
+            right_node = (
+                record.right_nodes[0] if (record and record.right_nodes) else None
+            )
             is_table = diff.nodeType == "table"
             async with sem:
                 if is_table and record and record.table_changes:
@@ -2160,8 +2668,12 @@ class RealDiffEngine:
                     doc2_source_text=(
                         diff.doc2Reference.sourceText if diff.doc2Reference else None
                     ),
-                    doc1_table_content=self._table_content_for_llm(left_node) if is_table else None,
-                    doc2_table_content=self._table_content_for_llm(right_node) if is_table else None,
+                    doc1_table_content=self._table_content_for_llm(left_node)
+                    if is_table
+                    else None,
+                    doc2_table_content=self._table_content_for_llm(right_node)
+                    if is_table
+                    else None,
                     language=language,
                 )
 

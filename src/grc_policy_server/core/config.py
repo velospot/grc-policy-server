@@ -157,18 +157,44 @@ class Settings(BaseSettings):
         default="qwen3-embedding:0.6b",
         validation_alias=AliasChoices("OLLAMA_EMBED_MODEL", "OLLAMA_EMBEDDING_MODEL"),
     )
-    ollama_timeout_sec: float = 180.0
+    ollama_timeout_sec: float = 600.0
+    ollama_connect_timeout_sec: float = 10.0
+    ollama_write_timeout_sec: float = 60.0
 
     llm_primary_provider: str = "vllm"  # "vllm" | "ollama"
     vllm_enabled: bool = True
-    vllm_chat_url: str = "http://localhost:8001"
-    vllm_embed_url: str = "http://localhost:8001"
-    vllm_api_key: str | None = None
-    vllm_chat_model: str = "ibm-granite/granite-3.3-8b-instruct"
-    vllm_embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
-    vllm_connect_timeout_sec: float = 2.0
-    vllm_timeout_sec: float = 180.0
-    vllm_max_retries: int = 1
+    vllm_chat_url: str = Field(
+        default="http://localhost:8001",
+        validation_alias=AliasChoices("VLLM_CHAT_URL", "LLAMACPP_CHAT_URL", "OPENAI_CHAT_URL"),
+    )
+    vllm_embed_url: str = Field(
+        default="http://localhost:8001",
+        validation_alias=AliasChoices("VLLM_EMBED_URL", "LLAMACPP_EMBED_URL", "OPENAI_EMBED_URL"),
+    )
+    vllm_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("VLLM_API_KEY", "LLAMACPP_API_KEY", "OPENAI_API_KEY"),
+    )
+    vllm_chat_model: str = Field(
+        default="ibm-granite/granite-3.3-8b-instruct",
+        validation_alias=AliasChoices("VLLM_CHAT_MODEL", "LLAMACPP_CHAT_MODEL", "OPENAI_CHAT_MODEL"),
+    )
+    vllm_embed_model: str = Field(
+        default="Qwen/Qwen3-Embedding-0.6B",
+        validation_alias=AliasChoices("VLLM_EMBED_MODEL", "LLAMACPP_EMBED_MODEL", "OPENAI_EMBED_MODEL"),
+    )
+    vllm_connect_timeout_sec: float = 5.0
+    vllm_timeout_sec: float = 600.0
+    vllm_write_timeout_sec: float = 60.0
+    vllm_max_retries: int = 2
+
+    llm_enrichment_enabled: bool = False  # LLM semantic extraction disabled — rule-based only
+
+    # VLM-based table extraction via granite-docling (Ollama API)
+    docling_vlm_enabled: bool = False
+    docling_vlm_model: str = "ibm/granite-docling:258m"
+    docling_vlm_ollama_url: str = "http://localhost:11434"
+    docling_vlm_timeout_sec: float = 300.0
 
     opendataloader_enabled: bool = True
     opendataloader_hybrid_url: str | None = None
@@ -201,8 +227,8 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/1"
     celery_default_queue: str = "grc_policy_server.upload"
     celery_task_timeout_sec: float = 900.0
-    celery_task_soft_time_limit_sec: float = 1200.0
-    celery_task_hard_time_limit_sec: float = 1500.0
+    celery_task_soft_time_limit_sec: float = 2700.0
+    celery_task_hard_time_limit_sec: float = 3600.0
     celery_worker_ping_timeout_sec: float = 1.0
     celery_enforce_worker_ping: bool = False
     celery_worker_concurrency: int = _default_celery_worker_concurrency()
@@ -225,6 +251,15 @@ class Settings(BaseSettings):
     ocr_fallback_render_dpi: int = 180
     ocr_fallback_languages: str = "eng+deu+fra+spa"
     ocr_fallback_page_segmentation_mode: int = 6
+
+    # Docling two-pass table OCR (opt-in, default OFF)
+    docling_table_ocr_enabled: bool = False
+    docling_table_ocr_min_density: float = 0.3
+    docling_table_ocr_page_margin: int = 1
+
+    # Streaming diff settings
+    llm_stream_inter_diff_delay_ms: int = 0
+    llm_stream_sequential: bool = False
 
     @model_validator(mode="after")
     def populate_database_url(self) -> "Settings":

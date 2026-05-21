@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Optional
 
@@ -25,6 +26,7 @@ from grc_policy_server.services.comparison.policy_semantics import (
     clean_policy_text,
     compare_clause_meaning,
     extract_clause_meaning,
+    is_docling_orphan_fragment,
     is_non_semantic_content,
 )
 from grc_policy_server.services.comparison.real_diff_engine import (
@@ -62,22 +64,60 @@ def impact_from(
     return "Low"
 
 
+def _bbox_for_pdfjs(bbox_refs: list[dict], page: int) -> dict | None:
+    """Convert Docling bbox_refs to PDF.js format: {left, top, right, bottom, page}.
+
+    Docling stores coords with BOTTOMLEFT origin; flip Y using page height (842pt for A4).
+    """
+    for ref in bbox_refs:
+        l, t, r, b = ref.get("l"), ref.get("t"), ref.get("r"), ref.get("b")
+        if all(v is not None for v in (l, t, r, b)):
+            if ref.get("coord_origin", "BOTTOMLEFT") == "BOTTOMLEFT":
+                ph = ref.get("page_height", 842)
+                return {"left": l, "top": ph - t, "right": r, "bottom": ph - b, "page": page}
+            return {"left": l, "top": t, "right": r, "bottom": b, "page": page}
+    return None
+
+
+_SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def _sort_by_severity(diffs: list) -> list:
+    return sorted(diffs, key=lambda d: _SEVERITY_ORDER.get(str(d.changeSeverity or "").lower(), 1))
+
+
+def _format_hint(node_type: str) -> str:
+    if node_type == "table":
+        return "table"
+    if node_type == "list_item":
+        return "bullets"
+    return "paragraph"
+
+
 @dataclass
 class RealDiffEngineStream:
-    weaviate: WeaviateClient
+    weaviate: WeaviateClient | None
     neo4j: Neo4jClient | None
     llm: BaseLLM
     canonical_store: CanonicalDocumentStore | None = None
     trace_store: ComparisonTraceStore | None = None
     thresholds: MatchThresholds = MatchThresholds()
     topk: int = 5
+    inter_diff_delay_ms: int = 0
 
     async def compare_stream(
         self,
         doc1: Document,
         doc2: Document,
         force_re_extract: bool = False,
+        testing_department: str | None = None,
     ) -> AsyncIterator[Dict]:
+        yield {
+            "type": "payload",
+            "doc1_id": doc1.id,
+            "doc2_id": doc2.id,
+            "testingDepartment": testing_department or "EMC",
+        }
         yield {"type": "progress", "stage": "load_canonical_nodes"}
         engine = RealDiffEngine(
             weaviate=self.weaviate,
@@ -88,32 +128,223 @@ class RealDiffEngineStream:
             thresholds=self.thresholds,
             topk=self.topk,
         )
-        result = await engine.compare(
-            doc1,
-            doc2,
+
+        (
+            key_diffs,
+            doc1_name,
+            doc2_name,
+            language,
+            no_change_coverage,
+            accuracy_metrics,
+        ) = await engine.compare_records_only(
+            doc1, doc2,
             force_re_extract=force_re_extract,
+            testing_department=testing_department or "",
         )
+        key_diffs = _sort_by_severity(key_diffs)
 
         yield {
             "type": "progress",
             "stage": "structured_change_records_ready",
-            "diffs": len(result.keyDifferences),
+            "diffs": len(key_diffs),
         }
 
-        for diff in result.keyDifferences:
-            yield {"type": "diff", "item": diff.model_dump()}
+        # Collect parsed change records for the review gate summary
+        collected_records: dict[str, dict | None] = {}
+
+        for diff in key_diffs:
+            change_id = str(
+                (diff.doc1Reference.nodeId if diff.doc1Reference else None)
+                or (diff.doc2Reference.nodeId if diff.doc2Reference else None)
+                or id(diff)
+            )
+
+            yield {
+                "type": "diff_format",
+                "change_id": change_id,
+                "format": _format_hint(str(diff.nodeType or "clause")),
+            }
+
+            # Emit diff metadata without markdownDiffSummary so client renders immediately
+            diff_data = diff.model_dump()
+            diff_data.pop("markdownDiffSummary", None)
+            yield {"type": "diff", "item": diff_data}
+
+            # Stream LLM tokens for this diff's markdown
+            tokens: list[str] = []
+            try:
+                async for token in self.llm.generate_markdown_diff_summary_stream(
+                    node_type=str(diff.nodeType or "clause"),
+                    change_type=str(diff.changeType or "MODIFIED"),
+                    doc1_source_text=(
+                        diff.doc1Reference.sourceText if diff.doc1Reference else None
+                    ),
+                    doc2_source_text=(
+                        diff.doc2Reference.sourceText if diff.doc2Reference else None
+                    ),
+                    language=language,
+                    testing_department=testing_department,
+                ):
+                    if token:
+                        tokens.append(token)
+                        yield {"type": "diff_token", "change_id": change_id, "token": token}
+            except Exception as exc:
+                logger.warning(
+                    "markdownDiffSummary stream failed for change_id=%s: %s", change_id, exc
+                )
+
+            if tokens:
+                yield {
+                    "type": "diff_markdown",
+                    "change_id": change_id,
+                    "markdown": "".join(tokens).strip(),
+                }
+
+            # Stream a structured change record JSON for tester-facing workflows
+            change_record_tokens: list[str] = []
+
+            def _parse_json_lenient(text: str) -> dict | None:
+                stripped = text.strip()
+                if not stripped:
+                    return None
+                # Common model artifacts: fenced blocks.
+                if stripped.startswith("```"):
+                    stripped = stripped.strip("`")
+                    stripped = stripped.replace("json", "", 1).strip()
+                try:
+                    parsed = json.loads(stripped)
+                    return parsed if isinstance(parsed, dict) else None
+                except Exception:
+                    return None
+
+            try:
+                async for token in self.llm.generate_change_record_json_stream(
+                    change_id=change_id,
+                    node_type=str(diff.nodeType or "clause"),
+                    change_type=str(diff.changeType or "MODIFIED"),
+                    doc1_source_text=(
+                        diff.doc1Reference.sourceText if diff.doc1Reference else None
+                    ),
+                    doc2_source_text=(
+                        diff.doc2Reference.sourceText if diff.doc2Reference else None
+                    ),
+                    language=language,
+                    testing_department=testing_department,
+                ):
+                    if token:
+                        change_record_tokens.append(token)
+                        yield {
+                            "type": "change_record_token",
+                            "change_id": change_id,
+                            "token": token,
+                        }
+            except Exception as exc:
+                logger.warning("change record stream failed for change_id=%s: %s", change_id, exc)
+
+            if change_record_tokens:
+                raw = "".join(change_record_tokens).strip()
+                parsed = _parse_json_lenient(raw)
+                collected_records[change_id] = parsed
+                yield {
+                    "type": "change_record",
+                    "change_id": change_id,
+                    "item": parsed,
+                    "raw": None if parsed else raw,
+                }
+
+            if self.inter_diff_delay_ms > 0:
+                await asyncio.sleep(self.inter_diff_delay_ms / 1000.0)
+
+        # Phase 16 — No-Change Coverage Report
+        if no_change_coverage:
+            yield {
+                "type": "no_change_coverage",
+                "items": no_change_coverage,
+                "checkedCount": len(no_change_coverage),
+            }
+
+        # Phase 14 — Human Review Gate
+        _review_statuses = frozenset(
+            ("Needs human review", "Potentially safety-critical", "Low-confidence extraction")
+        )
+        review_ids = [
+            cid
+            for cid, cr in collected_records.items()
+            if cr and cr.get("status") in _review_statuses
+        ]
+        # Also include diffs flagged by the deterministic engine
+        for diff in key_diffs:
+            cid = str(
+                (diff.doc1Reference.nodeId if diff.doc1Reference else None)
+                or (diff.doc2Reference.nodeId if diff.doc2Reference else None)
+                or id(diff)
+            )
+            if diff.requiresHumanReview and cid not in review_ids:
+                review_ids.append(cid)
+
+        if review_ids:
+            yield {
+                "type": "human_review_gate",
+                "reviewCount": len(review_ids),
+                "reviewItems": review_ids,
+                "message": (
+                    f"{len(review_ids)} change(s) require human review "
+                    "before accepting conclusions."
+                ),
+            }
 
         yield {"type": "progress", "stage": "finalizing"}
+
+        try:
+            summary = await self.llm.summarize_changes(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                key_differences=key_diffs,
+                language=language,
+                testing_department=testing_department,
+            )
+        except Exception:
+            logger.exception("summary generation failed")
+            summary = "No summary available."
+
+        try:
+            followups = await self.llm.generate_followups(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                key_differences=key_diffs,
+                max_questions=4,
+                language=language,
+                testing_department=testing_department,
+            )
+        except Exception:
+            logger.exception("follow-up generation failed")
+            followups = []
+
+        retest_likely_count = sum(
+            1 for cr in collected_records.values()
+            if cr and cr.get("retest_likely") is True
+        )
+        uncertain_count = sum(
+            1 for cr in collected_records.values()
+            if cr and cr.get("change_type") == "uncertain"
+        )
+        high_risk_count = sum(1 for d in key_diffs if d.changeSeverity == "high")
+        requires_human_review = bool(review_ids) or any(
+            d.requiresHumanReview for d in key_diffs
+        )
+
         yield {
             "type": "done",
-            "summary": result.summary,
-            "actionPlan": [action.model_dump() for action in result.actionPlan],
-            "followUpQuestions": result.followUpQuestions,
-            "accuracyMetrics": (
-                result.accuracyMetrics.model_dump()
-                if result.accuracyMetrics is not None
-                else None
-            ),
+            "summary": summary,
+            "actionPlan": [a.model_dump() for a in self._action_plan(key_diffs)],
+            "followUpQuestions": followups,
+            "accuracyMetrics": accuracy_metrics.model_dump() if accuracy_metrics else None,
+            "noChangeCoverage": no_change_coverage,
+            "requiresHumanReview": requires_human_review,
+            "reviewItems": review_ids,
+            "retestLikelyCount": retest_likely_count,
+            "highRiskCount": high_risk_count,
+            "uncertainCount": uncertain_count,
         }
 
     async def _make_modified(
@@ -219,7 +450,8 @@ class RealDiffEngineStream:
         text = str(
             node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))
         ).strip()
-        return is_non_semantic_content(text)
+        node_type = str(node.get("node_type") or "clause")
+        return is_non_semantic_content(text) or is_docling_orphan_fragment(text, node_type)
 
     def _format_table_content(self, node: dict) -> str:
         """Format table content for display in diffs."""
@@ -245,6 +477,7 @@ class RealDiffEngineStream:
     def _citation_from_neo4j_or_fallback(
         self, chunk_id: Optional[str], fallback: dict
     ) -> Optional[DocumentReference]:
+        page = int(fallback.get("page_number") or fallback.get("page") or 0)
         if chunk_id and self.neo4j is not None:
             citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
             if citation:
@@ -252,14 +485,28 @@ class RealDiffEngineStream:
                     citation.get("sourceText") or ""
                 )
                 citation["sourceText"] = source_text
+                citation.setdefault("nodeId", str(chunk_id))
+                if not citation.get("bbox"):
+                    bbox_refs = list(fallback.get("bbox_refs") or [])
+                    citation["bbox"] = _bbox_for_pdfjs(bbox_refs, page)
                 return DocumentReference(**citation)
 
+        bbox_refs = list(fallback.get("bbox_refs") or [])
+        node_id = str(fallback.get("node_id") or chunk_id or "") or None
+        text_hash = (
+            fallback.get("pure_text_hash")
+            or (fallback.get("metadata") or {}).get("pure_text_hash")
+            or None
+        )
         return DocumentReference(
             section=fallback.get("section_path", "Unknown Section"),
-            page=int(fallback.get("page_number") or fallback.get("page") or 0),
+            page=page,
             lineStart=fallback.get("line_start"),
             lineEnd=fallback.get("line_end"),
             sourceText=self._reference_source_text(fallback),
+            nodeId=node_id,
+            textHash=text_hash,
+            bbox=_bbox_for_pdfjs(bbox_refs, page),
         )
 
     def _reference_source_text(self, node: dict) -> str:
@@ -318,17 +565,13 @@ class RealDiffEngineStream:
         force_re_extract: bool = False,
         language: str = "",
     ) -> list[dict]:
+        """Apply rule-based semantic enrichment — no LLM calls."""
         enriched = [dict(node) for node in nodes]
-        indexes: list[int] = []
-        texts: list[str] = []
-        markdown_texts: list[str] = []
-
-        for index, node in enumerate(enriched):
+        for node in enriched:
             if not node.get("clean_text"):
                 node["clean_text"] = clean_policy_text(str(node.get("text") or ""))
             if node.get("node_type") != "clause":
                 continue
-            # Skip if already has semantics, unless force_re_extract is True
             if not force_re_extract and any(
                 node.get(field)
                 for field in ("obligation", "subject", "action", "object", "condition")
@@ -337,30 +580,17 @@ class RealDiffEngineStream:
             text = str(node.get("text") or "").strip()
             if not text:
                 continue
-            indexes.append(index)
-            texts.append(text)
-            # Use markdown if available, otherwise fall back to plain text
-            markdown_texts.append(str(node.get("markdown_text") or text))
-
-        if not texts:
-            return enriched
-
-        for index, meaning in zip(
-            indexes,
-            await self.llm.extract_policy_meanings(
-                texts=texts,
-                markdown_texts=markdown_texts,
-                language=language,
-            ),
-            strict=False,
-        ):
-            for field, value in meaning.items():
-                enriched[index][field] = str(value or "")
-
+            meaning = extract_clause_meaning(text)
+            node["obligation"] = meaning.obligation
+            node["subject"] = meaning.subject
+            node["action"] = meaning.action
+            node["object"] = meaning.object
+            node["condition"] = meaning.condition
         return enriched
 
     async def _detect_document_language(self, nodes: list[dict]) -> str:
-        """Detect language from first few chunks of text."""
+        """Rule-based language detection from node text."""
+        import re
         sample_texts = []
         for node in nodes[:5]:
             text = str(node.get("text") or "").strip()
@@ -370,8 +600,29 @@ class RealDiffEngineStream:
                 break
         if not sample_texts:
             return ""
-        sample = " ".join(sample_texts)[:500]
-        return await self.llm.detect_language(sample)
+        sample = " ".join(sample_texts)[:500].lower()
+        tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", sample)
+        if not tokens:
+            return ""
+        lexicons = {
+            "en": {"the", "and", "shall", "must", "should", "policy", "is", "are"},
+            "de": {"der", "die", "das", "und", "muss", "müssen", "soll", "sollen"},
+            "fr": {"le", "la", "les", "et", "doit", "doivent", "sont"},
+        }
+        scores: dict[str, int] = {code: 0 for code in lexicons}
+        for token in tokens:
+            for code, lexicon in lexicons.items():
+                if token in lexicon:
+                    scores[code] += 1
+        if any(ch in sample for ch in "äöüß"):
+            scores["de"] += 2
+        if any(ch in sample for ch in "àâçéèêëîïôûùüÿœæ"):
+            scores["fr"] += 2
+        best = max(scores, key=scores.get)
+        if scores[best] == 0:
+            return ""
+        winners = [code for code, sc in scores.items() if sc == scores[best]]
+        return best if len(winners) == 1 else ""
 
     def _node_meaning(self, node: dict) -> ClauseMeaning:
         obligation = str(node.get("obligation") or "")

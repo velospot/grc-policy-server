@@ -76,7 +76,7 @@ def test_prompt_summarize_changes_uses_detected_language():
         language="de",
     )
 
-    assert "Sie sind Compliance-Analyst." in prompt
+    assert "Sie sind ein erfahrener EMV-Compliance-Auditor" in prompt
     assert "Dokument A: Dokument A" in prompt
     assert "Dokument B: Dokument B" in prompt
     assert "Zusammenfassung:" in prompt
@@ -92,7 +92,7 @@ def test_prompt_summarize_changes_falls_back_to_english_for_unknown_language():
         language="unknown",
     )
 
-    assert "You are a compliance analyst." in prompt
+    assert "You are an expert EMC compliance auditor" in prompt
     assert "Document A: Policy V1" in prompt
     assert "Document B: Policy V2" in prompt
     assert "Summary:" in prompt
@@ -211,6 +211,37 @@ def test_prompt_markdown_diff_summary_added_uses_doc2_text():
     assert "Added content:" in prompt
     assert "Before:" not in prompt
     assert "Removed content:" not in prompt
+
+
+def test_prompt_markdown_diff_summary_respects_testing_department_role():
+    client = OllamaClient()
+    prompt = client._prompt_markdown_diff_summary(
+        node_type="clause",
+        change_type="MODIFIED",
+        doc1_source_text="The product shall include protective earth.",
+        doc2_source_text="The product shall include protective earth and an interlock.",
+        testing_department="Safety",
+    )
+
+    assert "product safety compliance tester" in prompt
+    assert "EMC compliance auditor" not in prompt
+
+
+def test_prompt_change_record_json_includes_department_and_required_keys():
+    client = OllamaClient()
+    prompt = client._prompt_change_record_json(
+        change_id="CHG-001",
+        node_type="clause",
+        change_type="MODIFIED",
+        doc1_source_text="Acceptance criterion: Class B.",
+        doc2_source_text="Acceptance criterion: Class A.",
+        testing_department="EMC",
+    )
+
+    assert "Department=EMC" in prompt
+    assert "Allowed `change_type` values" in prompt
+    assert "Allowed `status` values" in prompt
+    assert "change_id, change_type, old_value, new_value" in prompt
 
 
 def test_prompt_markdown_diff_summary_removed_uses_doc1_text():

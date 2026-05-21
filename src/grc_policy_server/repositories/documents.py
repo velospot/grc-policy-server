@@ -80,6 +80,32 @@ class DocumentRepository:
 
         return documents
 
+    def get_document(self, document_id: str) -> DocumentDomain | None:
+        """Return document metadata for a given id, or None if not found."""
+        doc_dir = self._resolve_document_dir(document_id)
+        meta_file = doc_dir / "metadata.json"
+        if not meta_file.exists():
+            return None
+        meta = self._load_metadata(meta_file)
+        if not meta:
+            return None
+
+        upload_date = meta.get("upload_date")
+        doc_id = meta.get("id")
+        doc_name = meta.get("name")
+        if not upload_date or not doc_id or not doc_name:
+            return None
+
+        return DocumentDomain(
+            id=doc_id,
+            name=doc_name,
+            version=meta.get("version", "unknown"),
+            upload_date=datetime.fromisoformat(str(upload_date).replace("Z", "")),
+            size_bytes=int(meta.get("size_bytes", 0) or 0),
+            category=meta.get("category", "unknown"),
+            file_path=str(doc_dir / meta.get("stored_filename", "original.pdf")),
+        )
+
     def delete_document(self, document_id: str) -> bool:
         document_dir = self._resolve_document_dir(document_id)
         if not document_dir.exists():

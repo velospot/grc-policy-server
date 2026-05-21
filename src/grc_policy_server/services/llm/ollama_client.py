@@ -17,13 +17,17 @@ from grc_policy_server.services.comparison.policy_semantics import (
     extract_clause_meaning,
 )
 from grc_policy_server.services.llm.base import BaseLLM
+from grc_policy_server.services.llm.testing_department import (
+    get_testing_department_profile,
+    normalize_testing_department,
+)
 from grc_policy_server.services.observability import tracing
 from grc_policy_server.utils.hashing import normalize_whitespace
 
 logger = logging.getLogger(__name__)
 
 PROMPT_EN = """
-You are a compliance analyst. Summarize changes between two document versions.
+You are an expert EMC compliance auditor specializing in IEC/CISPR standards, automotive EMC (CISPR 25, ISO 11452, TL 81000), and marine EMC (DNV CG-0339). Summarize changes between two document versions.
 
 Document A: {doc1_name}
 Document B: {doc2_name}
@@ -40,6 +44,11 @@ Be SPECIFIC about what changed:
 - Quote exact values when possible (old value → new value)
 - Name specific rows, columns, or cells that changed
 - Describe additions/removals precisely
+- Flag changes to test levels (V/m, dBµV, dBµA, dBµV/m) with numeric old → new values
+- Flag changes to frequency ranges (kHz–GHz) with exact range boundaries
+- Flag IEC/CISPR/ISO standard reference changes, including edition/year updates
+- Flag changes to acceptance criteria (Class A/B/C/D/E, Performance Criterion A/B/C)
+- Flag changes to test procedures, dwell times, or test setup parameters
 
 For each item, use this EXACT Markdown format:
 
@@ -61,7 +70,7 @@ Summary:
 """.strip()
 
 PROMPT_DE = """
-Sie sind Compliance-Analyst. Fassen Sie die Änderungen zwischen zwei Dokumentversionen zusammen.
+Sie sind ein erfahrener EMV-Compliance-Auditor, spezialisiert auf IEC/CISPR-Normen, automotive EMV (CISPR 25, ISO 11452, TL 81000) und marine EMV (DNV CG-0339). Fassen Sie die Änderungen zwischen zwei Dokumentversionen zusammen.
 
 Dokument A: {doc1_name}
 Dokument B: {doc2_name}
@@ -100,7 +109,7 @@ Zusammenfassung:
 """.strip()
 
 PROMPT_FR = """
-Vous êtes analyste conformité. Résumez les modifications entre deux versions d’un document.
+Vous êtes un expert auditeur de conformité CEM spécialisé dans les normes IEC/CISPR, la CEM automobile (CISPR 25, ISO 11452, TL 81000) et la CEM marine (DNV CG-0339). Résumez les modifications entre deux versions d’un document.
 
 Document A : {doc1_name}
 Document B : {doc2_name}
@@ -325,6 +334,9 @@ Diffs JSON:
 {diffs}
 
 Return as a numbered list (1., 2., 3., ...). Keep questions specific and actionable.
+For EMC test-level changes: ask whether existing type approvals or test reports are still valid.
+For test method changes: ask whether the test laboratory is accredited under the new method.
+For acceptance criterion changes: ask which product variants or ports are affected.
 """.strip()
 
 PROMPT_FOLLOWUPS_DE = """
@@ -364,12 +376,12 @@ FOLLOWUP_PROMPTS = {
 }
 
 PROMPT_MARKDOWN_DIFF_CLAUSE = """
-Produce a brief semantic diff in markdown. Change type: {change_type}.
+You are an EMC compliance auditor. Produce a brief semantic diff in markdown. Change type: {change_type}.
 
 {source_block}
 
 Rules — follow strictly:
-- Semantic changes ONLY: obligations, conditions, scope, numeric values, named entities, actions.
+- Semantic changes ONLY: obligations, conditions, scope, numeric values (test levels in V/m or dBµV, frequency ranges in MHz/GHz, acceptance classes A–E), IEC/CISPR/ISO standard references, test procedure steps, dwell times, named entities, actions.
 - IGNORE cosmetic differences: whitespace, punctuation, capitalisation, rephrasing with identical meaning.
 - If no semantic change is detectable, output nothing at all.
 - Do NOT mention tables, cells, rows, columns, or node types under any circumstance.
@@ -422,7 +434,7 @@ End with one sentence on compliance significance, e.g.:
 PROMPT_MARKDOWN_DIFF_SUMMARY = PROMPT_MARKDOWN_DIFF_CLAUSE
 
 PROMPT_TABLE_STRUCTURED_DIFF = """
-You are a compliance analyst reviewing a table change. Change type: {change_type}.
+You are an expert EMC compliance auditor reviewing a table change. Change type: {change_type}.
 
 Structured cell changes (JSON):
 {changed_cells_json}
@@ -439,8 +451,77 @@ Rules — follow strictly:
 - For added/removed rows: describe what the row represents in context.
 - IGNORE cosmetic differences: whitespace, punctuation, capitalisation with identical meaning.
 - If no semantic change is detectable, output nothing at all.
-- End with one sentence on compliance significance (e.g. "This tightens the threshold for …").
+- End with one sentence on compliance significance, e.g.:
+  > This tightens the minimum password length requirement from 8 to 12 characters.
+  > This increases the radiated immunity test level from 10 V/m to 30 V/m at 80–1000 MHz, requiring re-qualification.
+  > This changes the acceptance criterion from Class B to Class A, imposing stricter limits.
 - Write in {language}.
+""".strip()
+
+PROMPT_CHANGE_RECORD_JSON = """
+{role}
+
+You are comparing two versions of a compliance standard/policy. For the SINGLE change below,
+produce a structured change record that a tester can act on.
+
+Change metadata:
+- change_id: {change_id}
+- node_type: {node_type}
+- change_type: {change_type}
+
+Before (doc1):
+{doc1_text}
+
+After (doc2):
+{doc2_text}
+
+Allowed `change_type` values (choose ONE):
+- limit_changed
+- test_added
+- test_removed
+- acceptance_changed
+- sample_requirement_changed
+- referenced_standard_changed
+- scope_changed
+- applicability_changed
+- exemption_changed
+- product_class_changed
+- definition_changed
+- editorial_only
+- uncertain
+
+Allowed `status` values (choose ONE):
+- Accepted
+- Needs human review
+- Low-confidence extraction
+- Potentially editorial
+- Potentially safety-critical
+
+Allowed `normativity` values (choose ONE):
+- normative
+- informative
+- note
+- example
+- unknown
+
+Rules — follow strictly:
+- Use ONLY the Before/After text above.
+- If you cannot confidently classify, use change_type="uncertain" and status="Needs human review".
+- If the change is purely editorial (formatting/wording with identical meaning), use change_type="editorial_only"
+  and status="Potentially editorial".
+- Prefer quoting exact old/new values (including units) when present.
+- `old_value` / `new_value` may be empty strings when not applicable or not explicit.
+- `tester_action` must be an imperative sentence (e.g. "Update EMC test level to ...", "Re-run ingress test at ...").
+- `retest_likely` must be true if retesting is plausibly required based on the text change.
+- `normativity`: set to "normative" if text contains shall/must/is required/muss/ist zu, else "informative" or "note"/"example" as appropriate.
+- `extraction_confidence`: [0,1] — how cleanly the old/new values could be extracted (lower if text is ambiguous, truncated, or table-based with uncertain structure).
+- `alignment_confidence`: [0,1] — how confident you are that Before and After are actually comparing the same requirement (lower if subjects differ or context is unclear).
+- `change_confidence`: [0,1] — how confident you are in the change classification.
+- `impact_confidence`: [0,1] — how confident you are that the stated tester_action is the correct response.
+
+Output MUST be a single valid JSON object ONLY (no markdown, no code fences, no extra text) with EXACT keys:
+change_id, change_type, old_value, new_value, tester_action, retest_likely, status,
+normativity, extraction_confidence, alignment_confidence, change_confidence, impact_confidence
 """.strip()
 
 
@@ -450,8 +531,8 @@ class OllamaSettings:
     chat_model: str = "granite3.3:8b"
     embed_model: str = "qwen3-embedding"
     connect_timeout_sec: float = 10.0
-    read_timeout_sec: float = 300.0
-    write_timeout_sec: float = 30.0
+    read_timeout_sec: float = 600.0
+    write_timeout_sec: float = 60.0
     max_retries: int = 2
     opik_enabled: bool = False
     opik_url: str = "http://localhost:5173/api"
@@ -677,11 +758,19 @@ class OllamaClient(BaseLLM):
         doc2_name: str,
         key_differences: List[KeyDifference],
         language: str = "",
+        testing_department: str | None = None,
     ) -> str:
         compact = self._compact_diffs_for_summary(key_differences)
         prompt = self._prompt_summarize_changes(
             doc1_name=doc1_name, doc2_name=doc2_name, diffs=compact, language=language
         )
+        dept = normalize_testing_department(testing_department)
+        if dept != "EMC":
+            profile = get_testing_department_profile(dept)
+            prompt = (
+                f"IMPORTANT CONTEXT (Department={profile.department}): {profile.role}\n\n"
+                + prompt
+            )
         return await self._generate_text(prompt, temperature=0.5)
 
     async def summarize_explanations(
@@ -708,6 +797,7 @@ class OllamaClient(BaseLLM):
         key_differences: List[KeyDifference],
         max_questions: int = 4,
         language: str = "",
+        testing_department: str | None = None,
     ) -> List[str]:
         compact = self._compact_diffs_for_followups(key_differences)
         prompt = self._prompt_followups(
@@ -717,6 +807,13 @@ class OllamaClient(BaseLLM):
             max_questions=max_questions,
             language=language,
         )
+        dept = normalize_testing_department(testing_department)
+        if dept != "EMC":
+            profile = get_testing_department_profile(dept)
+            prompt = (
+                f"IMPORTANT CONTEXT (Department={profile.department}): {profile.role}\n\n"
+                + prompt
+            )
         text = await self._generate_text(prompt, temperature=0.6)
         return self._parse_numbered_questions(text, max_questions=max_questions)
 
@@ -734,6 +831,7 @@ class OllamaClient(BaseLLM):
         doc1_table_content: str | None = None,
         doc2_table_content: str | None = None,
         language: str = "",
+        testing_department: str | None = None,
     ) -> str:
         prompt = self._prompt_markdown_diff_summary(
             node_type=node_type,
@@ -743,6 +841,7 @@ class OllamaClient(BaseLLM):
             doc1_table_content=doc1_table_content,
             doc2_table_content=doc2_table_content,
             language=language,
+            testing_department=testing_department,
         )
         result = await self._generate_text(prompt, temperature=0)
         # Return empty string when the LLM signals no semantic change, so
@@ -750,6 +849,28 @@ class OllamaClient(BaseLLM):
         if result.strip().lower().strip("().") in self._NO_CHANGE_MARKERS:
             return ""
         return result
+
+    async def generate_change_record_json(
+        self,
+        *,
+        change_id: str,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> str:
+        prompt = self._prompt_change_record_json(
+            change_id=change_id,
+            node_type=node_type,
+            change_type=change_type,
+            doc1_source_text=doc1_source_text,
+            doc2_source_text=doc2_source_text,
+            language=language,
+            testing_department=testing_department,
+        )
+        return await self._generate_text(prompt, temperature=0.0)
 
     async def explain_table_diff(
         self,
@@ -923,6 +1044,7 @@ class OllamaClient(BaseLLM):
         doc1_table_content: str | None = None,
         doc2_table_content: str | None = None,
         language: str = "",
+        testing_department: str | None = None,
     ) -> str:
         if node_type == "table":
             left = doc1_table_content or doc1_source_text or ""
@@ -948,6 +1070,19 @@ class OllamaClient(BaseLLM):
             if node_type == "table"
             else PROMPT_MARKDOWN_DIFF_CLAUSE
         )
+        dept = normalize_testing_department(testing_department)
+        if dept != "EMC":
+            profile = get_testing_department_profile(dept)
+            if node_type == "table":
+                template = template.replace(
+                    "Produce a concise semantic diff for a TABLE change.",
+                    f"{profile.role}\n\nProduce a concise semantic diff for a TABLE change.",
+                )
+            else:
+                template = template.replace(
+                    "You are an EMC compliance auditor.",
+                    profile.role,
+                )
         prompt = template.format(
             change_type=change_type,
             source_block=source_block,
@@ -959,6 +1094,31 @@ class OllamaClient(BaseLLM):
                 + prompt
             )
         return prompt
+
+    def _prompt_change_record_json(
+        self,
+        *,
+        change_id: str,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> str:
+        _ = language  # reserved for future localized status/action text
+        profile = get_testing_department_profile(testing_department)
+        doc1_text = (doc1_source_text or "").strip() or "(not present)"
+        doc2_text = (doc2_source_text or "").strip() or "(not present)"
+        return PROMPT_CHANGE_RECORD_JSON.format(
+            role=f"Department={profile.department}. {profile.role}\nFocus: "
+            + "; ".join(profile.focus),
+            change_id=change_id,
+            node_type=node_type,
+            change_type=change_type,
+            doc1_text=doc1_text,
+            doc2_text=doc2_text,
+        )
 
     # -------------------------
     # Diff compaction (token safety)
@@ -1106,8 +1266,8 @@ Field definitions:
 - obligation: The modality or strength of the statement (see values below)
 - subject: The actor, entity, or topic of the statement (who/what is responsible, discussed, or referenced)
 - action: The verb, operation, or relationship described (what is done, stated, defined, or asserted)
-- object: The target, value, or content the action applies to (include specific numbers, dates, names, quantities, or key terms)
-- condition: Any qualifiers, constraints, scope, context, exceptions, timeframes, or prerequisites
+- object: The target, value, or content the action applies to (include specific numbers, dates, names, quantities, or key terms; for EMC requirements capture test levels e.g. "10 V/m 80–1000 MHz", standard references with edition e.g. "IEC 61000-4-3 Ed.3.2", and acceptance classes e.g. "Class A")
+- condition: Any qualifiers, constraints, scope, context, exceptions, timeframes, or prerequisites; for EMC include dwell time, measurement cycles, step size, test sequence prerequisites, and equipment specifications
 
 Obligation/modality values (weakest to strongest):
 - "": Factual, descriptive, or definitional statement

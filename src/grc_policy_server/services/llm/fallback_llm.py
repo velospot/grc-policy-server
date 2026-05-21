@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Coroutine, TypeVar
+from typing import Any, AsyncIterator, Callable, Coroutine, TypeVar
 
 import httpx
 
@@ -90,7 +90,13 @@ class FallbackLLM(BaseLLM):
         )
 
     async def summarize_changes(
-        self, *, doc1_name: str, doc2_name: str, key_differences, language: str = ""
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        key_differences,
+        language: str = "",
+        testing_department: str | None = None,
     ) -> str:
         return await self._call_async(
             lambda llm: llm.summarize_changes(
@@ -98,6 +104,7 @@ class FallbackLLM(BaseLLM):
                 doc2_name=doc2_name,
                 key_differences=key_differences,
                 language=language,
+                testing_department=testing_department,
             ),
             name="summarize_changes",
         )
@@ -123,6 +130,7 @@ class FallbackLLM(BaseLLM):
         key_differences,
         max_questions: int = 6,
         language: str = "",
+        testing_department: str | None = None,
     ) -> list[str]:
         return await self._call_async(
             lambda llm: llm.generate_followups(
@@ -131,6 +139,7 @@ class FallbackLLM(BaseLLM):
                 key_differences=key_differences,
                 max_questions=max_questions,
                 language=language,
+                testing_department=testing_department,
             ),
             name="generate_followups",
         )
@@ -151,6 +160,7 @@ class FallbackLLM(BaseLLM):
         doc1_table_content: str | None = None,
         doc2_table_content: str | None = None,
         language: str = "",
+        testing_department: str | None = None,
     ) -> str:
         return await self._call_async(
             lambda llm: llm.generate_markdown_diff_summary(
@@ -161,9 +171,96 @@ class FallbackLLM(BaseLLM):
                 doc1_table_content=doc1_table_content,
                 doc2_table_content=doc2_table_content,
                 language=language,
+                testing_department=testing_department,
             ),
             name="generate_markdown_diff_summary",
         )
+
+    async def generate_markdown_diff_summary_stream(
+        self,
+        *,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        doc1_table_content: str | None = None,
+        doc2_table_content: str | None = None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> AsyncIterator[str]:
+        kwargs = dict(
+            node_type=node_type,
+            change_type=change_type,
+            doc1_source_text=doc1_source_text,
+            doc2_source_text=doc2_source_text,
+            doc1_table_content=doc1_table_content,
+            doc2_table_content=doc2_table_content,
+            language=language,
+            testing_department=testing_department,
+        )
+        try:
+            async for token in self.primary.generate_markdown_diff_summary_stream(**kwargs):
+                yield token
+        except Exception as exc:
+            if not _should_fallback(exc):
+                raise
+            logger.warning("primary stream failed; falling back: %s", exc)
+            async for token in self.fallback.generate_markdown_diff_summary_stream(**kwargs):
+                yield token
+
+    async def generate_change_record_json(
+        self,
+        *,
+        change_id: str,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> str:
+        return await self._call_async(
+            lambda llm: llm.generate_change_record_json(
+                change_id=change_id,
+                node_type=node_type,
+                change_type=change_type,
+                doc1_source_text=doc1_source_text,
+                doc2_source_text=doc2_source_text,
+                language=language,
+                testing_department=testing_department,
+            ),
+            name="generate_change_record_json",
+        )
+
+    async def generate_change_record_json_stream(
+        self,
+        *,
+        change_id: str,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> AsyncIterator[str]:
+        kwargs = dict(
+            change_id=change_id,
+            node_type=node_type,
+            change_type=change_type,
+            doc1_source_text=doc1_source_text,
+            doc2_source_text=doc2_source_text,
+            language=language,
+            testing_department=testing_department,
+        )
+        try:
+            async for token in self.primary.generate_change_record_json_stream(**kwargs):
+                yield token
+        except Exception as exc:
+            if not _should_fallback(exc):
+                raise
+            logger.warning("primary change-record stream failed; falling back: %s", exc)
+            async for token in self.fallback.generate_change_record_json_stream(**kwargs):
+                yield token
 
     async def aclose(self) -> None:
         await _maybe_await(self.primary.aclose())
@@ -188,4 +285,3 @@ class FallbackLLM(BaseLLM):
                 raise
             logger.warning("primary llm %s failed; falling back: %s", name, exc)
             return await fn(self.fallback)
-

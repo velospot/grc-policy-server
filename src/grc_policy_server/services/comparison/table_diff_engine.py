@@ -2,17 +2,109 @@
 
 Integrates multi-backend extraction, identity resolution, canonical tables,
 and row keys to provide granular table-level change detection.
+Includes EMC-domain knowledge-graph comparison: table rows are modelled as
+entity profiles (FrequencyRange, FieldStrength, EmissionLimit, AcceptanceCriterion,
+TestMethod) so that semantic entity changes are surfaced alongside raw cell diffs.
 """
 
 from __future__ import annotations
 
 import logging
+import re as _re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from grc_policy_server.services.documents.canonical_table_model import CanonicalTable
+from grc_policy_server.services.ingestion.ontology.column_mapper import (
+    ENTITY_TYPE_DEFAULT_UNIT,
+    map_header,
+)
+from grc_policy_server.services.ingestion.ontology.emc_ontology import (
+    EMCTestClassifier,
+    EMCTestType,
+    NormalizedFactExtractor,
+)
 from grc_policy_server.services.ingestion.row_key_extractor import RowChangeDetector, RowKeyExtractor
+
+# ---------------------------------------------------------------------------
+# EMC knowledge-graph infrastructure — routes through production ontology
+# ---------------------------------------------------------------------------
+
+_FACT_EXTRACTOR = NormalizedFactExtractor()
+_TEST_CLASSIFIER = EMCTestClassifier()
+
+_COL_UNIT_PATTERNS: list[tuple[str, str, str]] = [
+    (r"in\s*ghz|\(ghz\)",       "GHz",    "frequency_range"),
+    (r"in\s*mhz|\(mhz\)",       "MHz",    "frequency_range"),
+    (r"in\s*khz|\(khz\)",       "kHz",    "frequency_range"),
+    (r"in\s*hz|\(hz\)",         "Hz",     "frequency_range"),
+    (r"db\s*[\(]?\s*[μu]a",     "dBuA",   "emission_limit"),
+    (r"db\s*[\(]?\s*[μu]v/m",   "dBuV/m", "field_strength"),
+    (r"db\s*[\(]?\s*[μu]v",     "dBuV",   "emission_limit"),
+    (r"dbv/m",                   "dBV/m",  "field_strength"),
+    (r"\bv/m\b",                "V/m",    "field_strength"),
+    (r"\bkv\b(?!/m)",           "kV",     "voltage_level"),
+]
+
+
+def _parse_column_unit(header: str) -> tuple[str, str] | None:
+    """Return (canonical_unit, fact_type_name) inferred from column header, or None."""
+    h = (header or "").lower()
+    for pat, unit, ftype in _COL_UNIT_PATTERNS:
+        if _re.search(pat, h, _re.IGNORECASE):
+            return unit, ftype
+    entity_type = map_header(header)
+    if entity_type and entity_type in ENTITY_TYPE_DEFAULT_UNIT:
+        return ENTITY_TYPE_DEFAULT_UNIT[entity_type], entity_type.value.lower()
+    return None
+
+
+_BARE_RANGE_RE = _re.compile(
+    r"^([\d][\d\s,\.]*)\s*(?:bis|to|[-–—])\s*([\d][\d\s,\.]*)\s*$",
+    _re.IGNORECASE,
+)
+_FREQ_MULT: dict[str, float] = {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}
+
+
+def _parse_german_number(s: str) -> float | None:
+    s = _re.sub(r"(\d)\s*,\s*(\d)", r"\1.\2", s.strip())
+    s = s.replace(",", ".").strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _extract_bare_range_hz(cell_text: str, unit: str) -> str | None:
+    """Return 'lo-hiHz' string for a bare 'X bis Y' cell, or None if not a range."""
+    m = _BARE_RANGE_RE.match(cell_text.strip())
+    if not m:
+        return None
+    lo = _parse_german_number(m.group(1))
+    hi = _parse_german_number(m.group(2))
+    if lo is None or hi is None or lo >= hi:
+        return None
+    mult = _FREQ_MULT.get(unit.lower(), 1.0)
+    return f"{lo * mult:.0f}-{hi * mult:.0f}Hz"
+
+
+# German thousands-separator: "1.000 MHz" → "1000 MHz" (period before exactly 3 digits)
+_DE_THOUSANDS_RE = _re.compile(r"(\d)\.(\d{3})(?=[^\d]|$)")
+
+
+def _preprocess_for_language(text: str, language: str) -> str:
+    """Strip German thousands-separator periods for de/de-* documents."""
+    if not language.startswith("de"):
+        return text
+    result = text
+    while True:
+        new = _DE_THOUSANDS_RE.sub(r"\1\2", result)
+        if new == result:
+            break
+        result = new
+    return result
+
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +160,219 @@ def _get_frequency_range_hz(cell: Any) -> tuple[float, float] | None:
             if parsed is not None:
                 return parsed
     return None
+
+
+_CONFIDENCE_THRESHOLD = 0.80
+
+
+def _extract_table_entity_graph(
+    table: CanonicalTable,
+    *,
+    language: str = "",
+    testing_department: str = "",
+) -> tuple[list[dict[str, str]], EMCTestType]:
+    """Build an EMC entity profile for every row in *table*.
+
+    Returns (row_profiles, test_type). Each profile uses fact.name as key so
+    voltage_level (kV) and field_strength (V/m) stay distinct despite sharing
+    the same fact_type in the ontology.
+
+    language: BCP-47 code (e.g. "de") — strips German thousands-separator
+    periods before extraction so "1.000 MHz" is correctly read as 1000 MHz.
+    testing_department: hint to resolve UNKNOWN test type (e.g. "EMC" → CONDUCTED_EMISSIONS).
+    """
+    caption = table.caption_original or ""
+    col_names = [c.name or "" for c in (table.columns or [])]
+    test_type = _TEST_CLASSIFIER.classify_table(caption, col_names)
+
+    # Use testing_department hint to resolve UNKNOWN when auto-detect fails
+    if test_type == EMCTestType.UNKNOWN and testing_department:
+        if testing_department.upper() in {"EMC", "EMV"}:
+            test_type = EMCTestType.CONDUCTED_EMISSIONS
+        # Safety/Environment keep UNKNOWN → position-based matching
+
+    # Inherit language from table metadata when not provided at call site
+    if not language:
+        language = str((table.metadata or {}).get("language") or "")
+
+    col_ctx: dict[int, tuple[str, str, str]] = {}
+    for i, name in enumerate(col_names):
+        info = _parse_column_unit(name)
+        if info:
+            col_ctx[i] = (name, info[0], info[1])
+
+    profiles: list[dict[str, str]] = []
+    for row in (table.rows or []):
+        merged: dict[str, str] = {}
+        for cell in row.cells:
+            if getattr(cell, "is_header", False):
+                continue
+            ctx = col_ctx.get(cell.col)
+            col_name = ctx[0] if ctx else ""
+            col_unit = ctx[1] if ctx else None
+            col_ftype = ctx[2] if ctx else None
+            raw_text = (cell.text or "").strip()
+            if not raw_text:
+                continue
+            text = _preprocess_for_language(raw_text, language)
+
+            # Tier 1: production extractor (handles in-cell units, kV, Class A/Klasse A)
+            facts = _FACT_EXTRACTOR.extract_from_cell(text, column_name=col_name)
+
+            # Tier 2: bare frequency range "X bis Y" with unit from column header
+            if not facts and col_unit and col_ftype == "frequency_range":
+                hz_range = _extract_bare_range_hz(text, col_unit)
+                if hz_range:
+                    merged["frequency_range"] = hz_range
+                    continue
+
+            # Tier 3: bare numeric with column unit inheritance — skip confidence filter
+            # since we already verified the column type; returned confidence is 0.75
+            if not facts and col_unit and col_ftype:
+                for fact in _FACT_EXTRACTOR.extract_bare_numeric_with_unit(
+                    text, col_unit, col_ftype
+                ):
+                    key = getattr(fact, "name", "") or getattr(fact, "fact_type", "")
+                    value = getattr(fact, "value", "")
+                    unit = getattr(fact, "unit", "")
+                    val_str = f"{value} {unit}".strip() if unit else value
+                    if key and val_str and key not in merged:
+                        merged[key] = val_str
+                continue
+
+            for fact in facts:
+                if getattr(fact, "confidence", 1.0) < _CONFIDENCE_THRESHOLD:
+                    continue
+                key = getattr(fact, "name", "") or getattr(fact, "fact_type", "")
+                value = getattr(fact, "value", "")
+                unit = getattr(fact, "unit", "")
+                val_str = f"{value} {unit}".strip() if unit else value
+                if key and val_str and key not in merged:
+                    merged[key] = val_str
+
+        profiles.append(merged)
+    return profiles, test_type
+
+
+_PRIMARY_ROW_KEY: dict[EMCTestType, str | None] = {
+    EMCTestType.RADIATED_IMMUNITY:       "frequency_range",
+    EMCTestType.CONDUCTED_EMISSIONS:     "frequency_range",
+    EMCTestType.ESD:                     "voltage_level",
+    EMCTestType.TRANSIENT_IMMUNITY:      "voltage_level",
+    EMCTestType.ENVIRONMENTAL_VIBRATION: None,
+    EMCTestType.MARITIME_INSTALLATION:   None,
+    EMCTestType.UNKNOWN:                 "frequency_range",
+}
+
+
+def _diff_entity_graphs(
+    old_profiles: list[dict[str, str]],
+    new_profiles: list[dict[str, str]],
+    test_type: EMCTestType = EMCTestType.UNKNOWN,
+) -> list[dict[str, Any]]:
+    """Compare two row-entity profile lists and return semantic entity changes.
+
+    Rows are matched by the domain-specific primary key for *test_type* when
+    present; unkeyed rows fall back to position-based matching.
+
+    Each returned change dict has keys:
+      entity_type, old_value, new_value, change_type (modified/added/removed),
+      row_old, row_new, semantic_description
+    """
+    changes: list[dict[str, Any]] = []
+    primary_key = _PRIMARY_ROW_KEY.get(test_type, "frequency_range")
+
+    # Build index of old rows by primary key
+    old_by_primary: dict[str, tuple[int, dict[str, str]]] = {}
+    if primary_key:
+        for i, p in enumerate(old_profiles):
+            if primary_key in p:
+                old_by_primary[p[primary_key]] = (i, p)
+
+    matched_old: set[int] = set()
+
+    for new_idx, new_p in enumerate(new_profiles):
+        pk_val = new_p.get(primary_key) if primary_key else None
+        if pk_val and pk_val in old_by_primary:
+            old_idx, old_p = old_by_primary[pk_val]
+            matched_old.add(old_idx)
+            all_keys = set(old_p) | set(new_p)
+            for key in all_keys:
+                ov, nv = old_p.get(key, ""), new_p.get(key, "")
+                if ov != nv:
+                    changes.append({
+                        "entity_type": key,
+                        "old_value": ov,
+                        "new_value": nv,
+                        "change_type": "modified" if ov and nv else ("added" if nv else "removed"),
+                        "row_old": old_idx,
+                        "row_new": new_idx,
+                        "semantic_description": (
+                            f"{key.replace('_', ' ').title()} at {pk_val}: "
+                            f"{ov or '—'} → {nv or '—'}"
+                        ),
+                    })
+        elif new_idx < len(old_profiles):
+            # Position-based fallback for rows without a keyed match
+            old_p = old_profiles[new_idx]
+            matched_old.add(new_idx)
+            all_keys = set(old_p) | set(new_p)
+            for key in all_keys:
+                ov, nv = old_p.get(key, ""), new_p.get(key, "")
+                if ov != nv:
+                    changes.append({
+                        "entity_type": key,
+                        "old_value": ov,
+                        "new_value": nv,
+                        "change_type": "modified" if ov and nv else ("added" if nv else "removed"),
+                        "row_old": new_idx,
+                        "row_new": new_idx,
+                        "semantic_description": (
+                            f"{key.replace('_', ' ').title()} (row {new_idx}): "
+                            f"{ov or '—'} → {nv or '—'}"
+                        ),
+                    })
+        else:
+            # New row with no old counterpart — report added entities
+            for key, nv in new_p.items():
+                changes.append({
+                    "entity_type": key,
+                    "old_value": "",
+                    "new_value": nv,
+                    "change_type": "added",
+                    "row_old": None,
+                    "row_new": new_idx,
+                    "semantic_description": f"{key.replace('_', ' ').title()} added: {nv}",
+                })
+
+    # Removed rows (old rows not matched to any new row)
+    for old_idx, old_p in enumerate(old_profiles):
+        if old_idx in matched_old or not old_p:
+            continue
+        for key, ov in old_p.items():
+            changes.append({
+                "entity_type": key,
+                "old_value": ov,
+                "new_value": "",
+                "change_type": "removed",
+                "row_old": old_idx,
+                "row_new": None,
+                "semantic_description": f"{key.replace('_', ' ').title()} removed: {ov}",
+            })
+
+    return changes
+
+
+# High-severity entity types — changes to these always warrant HIGH impact
+_HIGH_SEVERITY_ENTITIES = frozenset({
+    "field_strength",
+    "emission_limit",
+    "acceptance_class",
+    "acceptance_criterion",
+    "frequency_range",
+    "test_method",
+    "voltage_level",
+})
 
 
 class TableDiffType(str, Enum):
@@ -155,9 +460,11 @@ class TableDiff:
     structural_changes: list[str] = field(default_factory=list)
     diff_impact: TableDiffImpact = TableDiffImpact.IDENTICAL
     metadata: dict[str, Any] = field(default_factory=dict)
+    # EMC knowledge-graph entity changes (populated when entities are found)
+    entity_graph_changes: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "table_uid": self.table_uid,
             "diff_type": self.diff_type.value,
             "impact": self.diff_impact.value,
@@ -177,6 +484,9 @@ class TableDiff:
             "structural_changes": self.structural_changes,
             "metadata": self.metadata,
         }
+        if self.entity_graph_changes:
+            d["entity_graph_changes"] = self.entity_graph_changes
+        return d
 
 
 class TableDiffEngine:
@@ -201,6 +511,9 @@ class TableDiffEngine:
         self,
         old_table: CanonicalTable,
         new_table: CanonicalTable,
+        *,
+        language: str = "",
+        testing_department: str = "",
     ) -> TableDiff:
         """Compute detailed diff between two table versions.
 
@@ -246,6 +559,26 @@ class TableDiffEngine:
             rows_modified,
         )
 
+        # Build EMC knowledge-graph entity diff
+        entity_graph_changes: list[dict[str, Any]] = []
+        detected_test_type = EMCTestType.UNKNOWN
+        try:
+            old_entity_graph, test_type_old = _extract_table_entity_graph(
+                old_table, language=language, testing_department=testing_department
+            )
+            new_entity_graph, test_type_new = _extract_table_entity_graph(
+                new_table, language=language, testing_department=testing_department
+            )
+            detected_test_type = test_type_old if test_type_old != EMCTestType.UNKNOWN else test_type_new
+            # Only run graph diff if at least one table has entities
+            has_entities = any(old_entity_graph) or any(new_entity_graph)
+            if has_entities:
+                entity_graph_changes = _diff_entity_graphs(
+                    old_entity_graph, new_entity_graph, detected_test_type
+                )
+        except Exception:
+            logger.debug("entity graph extraction failed — skipping", exc_info=True)
+
         # Build final diff
         diff = TableDiff(
             table_uid=new_table.table_uid,
@@ -262,11 +595,13 @@ class TableDiffEngine:
             rows_modified=rows_modified,
             cells_modified=sum(len(rd.cell_diffs) for rd in row_diffs),
             structural_changes=structural_changes,
+            entity_graph_changes=entity_graph_changes,
             metadata={
                 "old_caption": old_table.caption_original,
                 "new_caption": new_table.caption_original,
                 "old_pages": old_table.pages,
                 "new_pages": new_table.pages,
+                "detected_test_type": detected_test_type.value,
             },
         )
 
@@ -635,11 +970,21 @@ class TableDiffEngine:
     def _classify_diff_impact(self, diff: TableDiff) -> TableDiffImpact:
         """Classify impact severity of table diff.
 
+        When EMC entity graph changes are present, any change to a high-severity
+        entity (FieldStrength, EmissionLimit, AcceptanceCriterion, FrequencyRange,
+        TestMethod) is automatically HIGH regardless of cell count.
+
         Returns:
             TableDiffImpact: IDENTICAL, LOW, MEDIUM, or HIGH
         """
         if diff.diff_type == TableDiffType.IDENTICAL:
             return TableDiffImpact.IDENTICAL
+
+        # Entity graph: any critical EMC entity changed → HIGH
+        if diff.entity_graph_changes:
+            for ec in diff.entity_graph_changes:
+                if ec.get("entity_type") in _HIGH_SEVERITY_ENTITIES:
+                    return TableDiffImpact.HIGH
 
         # Check if content is identical (no cell modifications)
         content_identical = diff.cells_modified == 0 and diff.rows_modified == 0

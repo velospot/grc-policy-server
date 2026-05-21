@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import re
+
 from grc_policy_server.core.config import settings
 from grc_policy_server.services.comparison.policy_semantics import meaning_to_metadata
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
@@ -41,6 +43,46 @@ from grc_policy_server.utils.hashing import sha256_hex
 
 logger = logging.getLogger(__name__)
 
+_LANG_LEXICONS: dict[str, set[str]] = {
+    "en": {"the", "and", "shall", "must", "should", "policy", "document", "requirements",
+           "control", "controls", "access", "security", "is", "are"},
+    "de": {"der", "die", "das", "und", "nicht", "mit", "sind", "muss", "müssen",
+           "soll", "sollen", "richtlinie", "dokument", "anforderungen", "zugriff", "sicherheit"},
+    "fr": {"le", "la", "les", "et", "pas", "avec", "sont", "doit", "doivent",
+           "politique", "document", "exigences", "accès", "securite", "sécurité", "conformité"},
+}
+
+
+def _detect_language_rule_based(chunks: list[ParsedChunk]) -> str:
+    """Rule-based language detection from chunk text — no LLM required."""
+    sample_texts = []
+    for chunk in chunks[:5]:
+        text = (chunk.text or "").strip()
+        if text:
+            sample_texts.append(text)
+        if len(" ".join(sample_texts)) > 500:
+            break
+    if not sample_texts:
+        return ""
+    sample = " ".join(sample_texts)[:500].lower()
+    tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", sample)
+    if not tokens:
+        return ""
+    scores: dict[str, int] = {code: 0 for code in _LANG_LEXICONS}
+    for token in tokens:
+        for code, lexicon in _LANG_LEXICONS.items():
+            if token in lexicon:
+                scores[code] += 1
+    if any(ch in sample for ch in "äöüß"):
+        scores["de"] += 2
+    if any(ch in sample for ch in "àâçéèêëîïôûùüÿœæ"):
+        scores["fr"] += 2
+    best = max(scores, key=scores.get)
+    if scores[best] == 0:
+        return ""
+    winners = [code for code, score in scores.items() if score == scores[best]]
+    return best if len(winners) == 1 else ""
+
 
 @dataclass(frozen=True)
 class UploadIngestionResult:
@@ -57,7 +99,7 @@ class DocumentIngestionService:
         self,
         *,
         docling_adapter: DoclingAdapter,
-        weaviate: WeaviateClient,
+        weaviate: WeaviateClient | None,
         neo4j: Neo4jClient | None,
         llm: BaseLLM,
         upload_root: Path,
@@ -87,9 +129,10 @@ class DocumentIngestionService:
             filename=filename,
             content=content,
         )
+        docling_language = str(ocr_metadata.pop("_docling_language", "") or "")
         self._log_extraction_score(filename, parsed_chunks)
         parsed_chunks = preprocess_parsed_chunks(parsed_chunks)
-        parsed_chunks = await self._enrich_clause_semantics(parsed_chunks)
+        parsed_chunks = await self._enrich_clause_semantics(parsed_chunks, docling_language=docling_language)
 
         hierarchy = build_document_hierarchy(
             document_id=document_id,
@@ -123,21 +166,40 @@ class DocumentIngestionService:
                 opd_elements=opd_elements,
             )
 
-        self.weaviate.upsert_chunks(vector_records)
+        if self.weaviate is not None:
+            try:
+                self.weaviate.upsert_chunks(vector_records)
+            except Exception:
+                logger.warning(
+                    "weaviate upsert failed for document_id=%s filename=%s — "
+                    "canonical nodes already saved, upload will succeed",
+                    document_id,
+                    filename,
+                    exc_info=True,
+                )
         if self.neo4j is not None:
-            self.neo4j.upsert_document_hierarchy(
-                document_id=document_id,
-                filename=filename,
-                document_stable_id=hierarchy.document_stable_id,
-                document_family=hierarchy.document_family,
-                content_hash=content_hash,
-                nodes=[node.to_graph_record() for node in hierarchy.nodes],
-                metadata={
-                    **hierarchy.metadata,
-                    "ocr": ocr_metadata,
-                    "content_type": content_type,
-                },
-            )
+            try:
+                self.neo4j.upsert_document_hierarchy(
+                    document_id=document_id,
+                    filename=filename,
+                    document_stable_id=hierarchy.document_stable_id,
+                    document_family=hierarchy.document_family,
+                    content_hash=content_hash,
+                    nodes=[node.to_graph_record() for node in hierarchy.nodes],
+                    metadata={
+                        **hierarchy.metadata,
+                        "ocr": ocr_metadata,
+                        "content_type": content_type,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "neo4j upsert failed for document_id=%s filename=%s — "
+                    "canonical nodes already saved, upload will succeed",
+                    document_id,
+                    filename,
+                    exc_info=True,
+                )
         self._persist_upload_metadata(
             document_id=document_id,
             filename=filename,
@@ -327,13 +389,23 @@ class DocumentIngestionService:
         filename: str,
         content: bytes,
     ) -> tuple[list[ParsedChunk], dict[str, Any], dict[str, Any]]:
-        dl_doc = await asyncio.to_thread(
-            self.docling_adapter.convert_bytes,
-            filename=filename,
-            content=content,
-            auto_ocr=True,
-            force_full_page_ocr=False,
-            do_table_structure=True,
+        if settings.docling_vlm_enabled and filename.lower().endswith(".pdf"):
+            dl_doc = await asyncio.to_thread(
+                self.docling_adapter.convert_bytes_vlm,
+                filename=filename,
+                content=content,
+            )
+        else:
+            dl_doc = await asyncio.to_thread(
+                self.docling_adapter.convert_bytes,
+                filename=filename,
+                content=content,
+                auto_ocr=True,
+                force_full_page_ocr=False,
+                do_table_structure=True,
+            )
+        dl_doc = await self._apply_targeted_table_ocr(
+            filename=filename, content=content, dl_doc=dl_doc
         )
         doc_json = await asyncio.to_thread(dl_doc.export_to_dict)
         raw_chunks = await asyncio.to_thread(
@@ -347,63 +419,129 @@ class DocumentIngestionService:
             page_count=page_count,
             parsed_chunks=chunks,
         )
+        # Use Docling's own language detection when available (docling >= 1.8)
+        docling_langs = getattr(getattr(dl_doc, "meta", None), "languages", None) or []
+        if docling_langs:
+            ocr_metadata["_docling_language"] = str(docling_langs[0]).lower()[:2]
         return chunks, ocr_metadata, doc_json
+
+    async def _apply_targeted_table_ocr(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        dl_doc: Any,
+    ) -> Any:
+        """Re-run Docling with full-page OCR on pages containing low-density tables.
+
+        Disabled by default (DOCLING_TABLE_OCR_ENABLED=false). When enabled,
+        tables with fewer than docling_table_ocr_min_density fraction of non-empty
+        cells trigger a second pass with force_full_page_ocr=True on the surrounding
+        page range. Improved cells are merged back into the original document.
+        """
+        if not settings.docling_table_ocr_enabled:
+            return dl_doc
+
+        try:
+            tables = list(getattr(dl_doc, "tables", None) or [])
+            if not tables:
+                return dl_doc
+
+            margin = settings.docling_table_ocr_page_margin
+            min_density = settings.docling_table_ocr_min_density
+
+            # Collect page numbers of low-density tables
+            page_numbers: list[int] = []
+            for table in tables:
+                if self.docling_adapter._table_cell_density(table) < min_density:
+                    try:
+                        page_no = int(table.prov[0].page_no)
+                        page_numbers.append(page_no)
+                    except Exception:
+                        pass
+
+            if not page_numbers:
+                return dl_doc
+
+            # Union page ranges with margin
+            total_pages = len(getattr(dl_doc, "pages", {}) or {}) or 9999
+            ranges: list[tuple[int, int]] = []
+            for page_no in sorted(set(page_numbers)):
+                lo = max(1, page_no - margin)
+                hi = min(total_pages, page_no + margin)
+                if ranges and lo <= ranges[-1][1] + 1:
+                    ranges[-1] = (ranges[-1][0], max(ranges[-1][1], hi))
+                else:
+                    ranges.append((lo, hi))
+
+            # Re-run OCR for each page range and merge improved tables
+            for rng in ranges:
+                re_doc = await asyncio.to_thread(
+                    self.docling_adapter.convert_bytes_page_range,
+                    filename=filename,
+                    content=content,
+                    page_range=rng,
+                )
+                if re_doc is None:
+                    continue
+                re_tables = list(getattr(re_doc, "tables", None) or [])
+                for orig_table in tables:
+                    try:
+                        orig_page = int(orig_table.prov[0].page_no)
+                        orig_cols = len(orig_table.data.grid[0]) if orig_table.data.grid else 0
+                    except Exception:
+                        continue
+                    if not (rng[0] <= orig_page <= rng[1]):
+                        continue
+                    for re_table in re_tables:
+                        try:
+                            re_page = int(re_table.prov[0].page_no)
+                            re_cols = len(re_table.data.grid[0]) if re_table.data.grid else 0
+                        except Exception:
+                            continue
+                        if re_page == orig_page and re_cols == orig_cols:
+                            orig_table.data.grid = re_table.data.grid
+                            break
+
+            logger.info(
+                "targeted table OCR applied filename=%s low_density_pages=%s ranges=%s",
+                filename,
+                page_numbers,
+                ranges,
+            )
+        except Exception:
+            logger.exception("targeted table OCR failed filename=%s; using original", filename)
+
+        return dl_doc
 
     async def _enrich_clause_semantics(
         self,
         parsed_chunks: list[ParsedChunk],
+        docling_language: str = "",
     ) -> list[ParsedChunk]:
-        clause_indexes: list[int] = []
-        clause_texts: list[str] = []
+        language = docling_language or _detect_language_rule_based(parsed_chunks)
 
-        for index, chunk in enumerate(parsed_chunks):
+        enriched = list(parsed_chunks)
+        for index, chunk in enumerate(enriched):
+            if language:
+                metadata = dict(chunk.metadata)
+                metadata.setdefault("detected_language", language)
+                enriched[index] = replace(chunk, metadata=metadata)
+
             if chunk.chunk_type != "clause":
                 continue
             text = (chunk.text or "").strip()
             if not text:
                 continue
-            clause_indexes.append(index)
-            clause_texts.append(text)
 
-        # Detect language from first chunks for better LLM accuracy
-        language = await self._detect_language_from_chunks(parsed_chunks)
-
-        enriched = list(parsed_chunks)
-        if language:
-            for idx, chunk in enumerate(enriched):
-                metadata = dict(chunk.metadata)
-                metadata.setdefault("detected_language", language)
-                enriched[idx] = replace(chunk, metadata=metadata)
-
-        if not clause_texts:
-            return enriched
-
-        extracted = await self.llm.extract_policy_meanings(
-            texts=clause_texts, language=language
-        )
-        for chunk_index, meaning in zip(clause_indexes, extracted, strict=False):
-            chunk = enriched[chunk_index]
             metadata = dict(chunk.metadata)
-            metadata.update(meaning_to_metadata(chunk.text))
-            metadata.update({key: str(value or "") for key, value in meaning.items()})
-            metadata["semantic_source"] = "llm"
-            metadata["detected_language"] = language
-            enriched[chunk_index] = replace(chunk, metadata=metadata)
-        return enriched
+            metadata.update(meaning_to_metadata(text))
+            metadata["semantic_source"] = "rule_based"
+            if language:
+                metadata["detected_language"] = language
+            enriched[index] = replace(chunk, metadata=metadata)
 
-    async def _detect_language_from_chunks(self, chunks: list[ParsedChunk]) -> str:
-        """Detect language from first few chunks of text."""
-        sample_texts = []
-        for chunk in chunks[:5]:
-            text = (chunk.text or "").strip()
-            if text:
-                sample_texts.append(text)
-            if len(" ".join(sample_texts)) > 500:
-                break
-        if not sample_texts:
-            return ""
-        sample = " ".join(sample_texts)[:500]
-        return await self.llm.detect_language(sample)
+        return enriched
 
     def _apply_ocr_fallback(
         self,

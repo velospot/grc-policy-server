@@ -14,6 +14,8 @@ from grc_policy_server.services.comparison.policy_semantics import (
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 from grc_policy_server.utils.hashing import normalize_for_comparison
 
+_DOUBLE_DASH_BULLET_RE = re.compile(r"(?:(?<=\s)|^)- -\s*")
+
 _AUXILIARY_TITLE_RE = re.compile(
     r"^\s*(table of contents|contents|index|glossary|list of figures|list of tables)\s*$",
     re.IGNORECASE,
@@ -42,6 +44,18 @@ _DURATION_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMBER_HINT_RE = re.compile(r"\b\d{1,4}\b")
+
+
+def _normalize_list_text(text: str, labels: tuple[str, ...]) -> str:
+    """Strip VW-style '- -' double-dash bullet markers from list item text.
+
+    Docling preserves the literal '- -' prefix used in VW PDFs. For comparison
+    and embedding purposes these markers are noise; single-dash markdown bullets
+    in markdown_text are handled separately.
+    """
+    if "list_item" not in labels:
+        return text
+    return _DOUBLE_DASH_BULLET_RE.sub("", text).strip()
 
 
 def looks_like_auxiliary(text: str, section_title: str) -> bool:
@@ -78,7 +92,7 @@ def preprocess_parsed_chunks(parsed_chunks: list[ParsedChunk]) -> list[ParsedChu
         if chunk.chunk_type == "table":
             clean_source = str(chunk.metadata.get("table_clean_text") or chunk.text)
         else:
-            clean_source = chunk.text
+            clean_source = _normalize_list_text(chunk.text, chunk.labels)
         clean_text = clean_policy_text(clean_source)
         if chunk.chunk_type in {"clause", "table"} and (
             not clean_text
@@ -90,7 +104,6 @@ def preprocess_parsed_chunks(parsed_chunks: list[ParsedChunk]) -> list[ParsedChu
         metadata = dict(chunk.metadata)
         metadata["clean_text"] = clean_text
         comparison_text = normalize_for_comparison(clean_text)
-        metadata["canonical_text"] = comparison_text
         metadata["comparison_text"] = comparison_text
         metadata["comparison_profile"] = (
             "table_semantic" if chunk.chunk_type == "table" else "paragraph_semantic"
@@ -103,6 +116,14 @@ def preprocess_parsed_chunks(parsed_chunks: list[ParsedChunk]) -> list[ParsedChu
         metadata["importance_label"] = importance_label
         if chunk.chunk_type == "table" and chunk.markdown_text:
             metadata["table_markdown"] = chunk.markdown_text
+        if "list_item" in chunk.labels:
+            metadata["list_item_count"] = sum(
+                1 for lbl in chunk.labels if lbl == "list_item"
+            )
+            if chunk.markdown_text:
+                metadata["markdown_text"] = re.sub(
+                    r"(?m)^- -\s*", "- ", chunk.markdown_text
+                )
         current = replace(chunk, metadata=metadata)
 
         if _should_merge(processed[-1], current) if processed else False:

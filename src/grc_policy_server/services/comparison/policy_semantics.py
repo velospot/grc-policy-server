@@ -495,6 +495,44 @@ def is_non_semantic_content(text: str) -> bool:
     return False
 
 
+_FIGURE_CAPTION_RE = re.compile(
+    r"^(?:figure|fig\.?|abbildung|abb\.?|bild)\s*[A-Za-z]?[\d.]+[A-Za-z]?\s*[:\-–]",
+    re.IGNORECASE,
+)
+_HAS_OBLIGATION_RE = re.compile(
+    r"\b(?:shall|must|required|should|may|muss|müssen|soll|doit|doivent)\b",
+    re.IGNORECASE,
+)
+
+
+def is_docling_orphan_fragment(text: str, node_type: str = "clause") -> bool:
+    """Return True for Docling extraction artifacts with no diff signal.
+
+    Never filters headings, tables, or text containing obligation verbs.
+    Called after is_non_semantic_content() as an additional guard.
+    """
+    cleaned = normalize_whitespace(text or "").strip()
+    if not cleaned or node_type in ("heading", "table"):
+        return False
+    has_obligation = _HAS_OBLIGATION_RE.search(cleaned) is not None
+    if has_obligation:
+        return False
+    if len(cleaned) < 25:
+        return True
+    if _FIGURE_CAPTION_RE.match(cleaned):
+        return True
+    # Running headers: short, title-case or ALL-CAPS
+    if (
+        len(cleaned) <= 45
+        and (cleaned == cleaned.upper() or cleaned.istitle())
+    ):
+        return True
+    # Continuation artifact: starts lowercase, < 30 chars (mid-word page split)
+    if len(cleaned) < 30 and cleaned[0].islower():
+        return True
+    return False
+
+
 def ends_with_terminal_punctuation(value: str) -> bool:
     return bool((value or "").rstrip().endswith((".", "!", "?", ":", ";")))
 

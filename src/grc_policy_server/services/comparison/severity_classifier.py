@@ -169,6 +169,10 @@ class ClassificationContext:
     ontology_entity_type: str = (
         ""  # e.g. "FieldStrength", "FrequencyRange", "EmissionLimit"
     )
+    test_procedure_change: bool = False
+    test_setup_change: bool = False
+    # Domain expert routing: "EMC" | "Safety" | "Environment" | ""
+    testing_department: str = ""
 
 
 @dataclass(frozen=True)
@@ -580,6 +584,255 @@ class PresentationOnlyRule:
         return None
 
 
+class TestProcedureChangeRule:
+    """Rule 9.5 — Test procedure changes → HIGH.
+
+    A change to which standard revision applies, or by how long a device must be
+    stressed, directly affects whether an existing type-approval certificate is valid.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if (
+            ctx.change_type == "MODIFIED"
+            and ctx.test_procedure_change
+            and ctx.meaning_change not in ("unchanged", "")
+        ):
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["TEST_PROCEDURE_CHANGED"],
+                semantic_impact=SemanticImpact.TECHNICAL,
+                severity_reason_codes=[SeverityReasonCode.TEST_METHOD_CHANGED],
+                severity_confidence=0.90,
+                audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+            )
+        return None
+
+
+class TestSetupChangeRule:
+    """Rule 9.6 — Test setup parameter changes → MEDIUM."""
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if (
+            ctx.change_type == "MODIFIED"
+            and ctx.test_setup_change
+            and ctx.meaning_change not in ("unchanged", "")
+        ):
+            return ClassificationResult(
+                severity="medium",
+                reasons=_collect_reasons(ctx) + ["TEST_SETUP_CHANGED"],
+                semantic_impact=SemanticImpact.TECHNICAL,
+                severity_confidence=0.85,
+                audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+            )
+        return None
+
+
+class EMCExpertRule:
+    """Rule 9.7 — EMC domain expert escalations.
+
+    Fires when ``testing_department == "EMC"`` (or "EMV") on a MODIFIED node.
+    Escalates to HIGH cases that the generic rules would classify as MEDIUM:
+
+    - Any numeric value changed (limits, levels — always HIGH for EMC).
+    - Any table cell content changed (EMC tables encode test conditions and
+      acceptance criteria as a knowledge graph — cell ≠ row position).
+    - Any normative-verb weakening (shall→should → compliance risk → HIGH).
+
+    Formatting-only and cosmetic-only changes are deferred to the earlier rules
+    (they correctly produce LOW regardless of domain).
+    """
+
+    _DEPT = frozenset({"EMC", "EMV"})
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if ctx.testing_department.upper() not in self._DEPT:
+            return None
+        if ctx.change_type != "MODIFIED":
+            return None
+        # Defer formatting/cosmetic-only to earlier rules (they produce LOW correctly)
+        if ctx.formatting_only_change and not ctx.numeric_changes:
+            return None
+        if ctx.cosmetic_change and not _has_content_signal(ctx):
+            return None
+
+        # Weakened obligation → HIGH (EMC cannot relax test requirements)
+        if (
+            ctx.requirement_verb_change
+            and ctx.requirement_verb_change.get("direction") == "weakened"
+        ):
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["emc_obligation_weakened"],
+                semantic_impact=SemanticImpact.NORMATIVE,
+                severity_reason_codes=[
+                    SeverityReasonCode.OBLIGATION_WEAKENED,
+                    SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED,
+                ],
+                severity_confidence=0.95,
+                audit_disposition=AuditDisposition.ESCALATED,
+            )
+
+        # Any numeric change in EMC context → HIGH (limits and levels changed)
+        if ctx.numeric_changes:
+            reason_codes: list[SeverityReasonCode] = [SeverityReasonCode.NUMERIC_LIMIT_CHANGED]
+            if ctx.ontology_entity_type in _DOMAIN_ENTITY_MAP:
+                reason_codes.append(_DOMAIN_ENTITY_MAP[ctx.ontology_entity_type][0])
+            reason_codes.append(SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED)
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["emc_numeric_change"],
+                semantic_impact=SemanticImpact.TECHNICAL,
+                severity_reason_codes=reason_codes,
+                severity_confidence=0.92,
+                audit_disposition=AuditDisposition.ESCALATED,
+            )
+
+        # Table content change: EMC tables encode test conditions as a knowledge graph
+        if ctx.node_type == "table" and ctx.table_changes:
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["emc_table_content_changed"],
+                semantic_impact=SemanticImpact.TECHNICAL,
+                severity_reason_codes=[
+                    SeverityReasonCode.TEST_LEVEL_CHANGED,
+                    SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED,
+                ],
+                severity_confidence=0.90,
+                audit_disposition=AuditDisposition.ESCALATED,
+            )
+
+        return None
+
+
+class SafetyExpertRule:
+    """Rule 9.8 — Product safety domain expert escalations.
+
+    Fires when ``testing_department == "Safety"`` on a MODIFIED node.
+    Escalates to HIGH:
+    - Weakened obligation (safety requirements can never be weakened).
+    - Numeric changes (safety thresholds, leakage currents, voltage limits).
+    - Test procedure changes.
+    """
+
+    _DEPT = frozenset({"SAFETY"})
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if ctx.testing_department.upper() not in self._DEPT:
+            return None
+        if ctx.change_type != "MODIFIED":
+            return None
+        if ctx.formatting_only_change and not ctx.numeric_changes:
+            return None
+        if ctx.cosmetic_change and not _has_content_signal(ctx):
+            return None
+
+        if (
+            ctx.requirement_verb_change
+            and ctx.requirement_verb_change.get("direction") == "weakened"
+        ):
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["safety_obligation_weakened"],
+                semantic_impact=SemanticImpact.NORMATIVE,
+                severity_reason_codes=[
+                    SeverityReasonCode.OBLIGATION_WEAKENED,
+                    SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED,
+                ],
+                severity_confidence=0.95,
+                audit_disposition=AuditDisposition.ESCALATED,
+            )
+
+        if ctx.numeric_changes:
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["safety_numeric_limit_changed"],
+                semantic_impact=SemanticImpact.TECHNICAL,
+                severity_reason_codes=[
+                    SeverityReasonCode.NUMERIC_LIMIT_CHANGED,
+                    SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED,
+                ],
+                severity_confidence=0.92,
+                audit_disposition=AuditDisposition.ESCALATED,
+            )
+
+        if ctx.test_procedure_change:
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["safety_test_procedure_changed"],
+                semantic_impact=SemanticImpact.TECHNICAL,
+                severity_reason_codes=[SeverityReasonCode.TEST_METHOD_CHANGED],
+                severity_confidence=0.90,
+                audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+            )
+
+        return None
+
+
+class EnvironmentalExpertRule:
+    """Rule 9.9 — Environmental testing domain expert escalations.
+
+    Fires when ``testing_department == "Environment"`` on a MODIFIED node.
+    Escalates to HIGH:
+    - Weakened obligation (durability/conditioning requirements cannot be reduced).
+    - Numeric changes (temperature, humidity, cycles, dwell times).
+    - Test setup changes (conditioning, soak, environment parameters).
+    - Test procedure changes (standard edition or method changes).
+    """
+
+    _DEPT = frozenset({"ENVIRONMENT", "ENVIRONMENTAL"})
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if ctx.testing_department.upper() not in self._DEPT:
+            return None
+        if ctx.change_type != "MODIFIED":
+            return None
+        if ctx.formatting_only_change and not ctx.numeric_changes:
+            return None
+        if ctx.cosmetic_change and not _has_content_signal(ctx):
+            return None
+
+        if (
+            ctx.requirement_verb_change
+            and ctx.requirement_verb_change.get("direction") == "weakened"
+        ):
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["env_obligation_weakened"],
+                semantic_impact=SemanticImpact.NORMATIVE,
+                severity_reason_codes=[
+                    SeverityReasonCode.OBLIGATION_WEAKENED,
+                    SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED,
+                ],
+                severity_confidence=0.95,
+                audit_disposition=AuditDisposition.ESCALATED,
+            )
+
+        if ctx.numeric_changes:
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["env_numeric_condition_changed"],
+                semantic_impact=SemanticImpact.TECHNICAL,
+                severity_reason_codes=[
+                    SeverityReasonCode.NUMERIC_LIMIT_CHANGED,
+                    SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED,
+                ],
+                severity_confidence=0.92,
+                audit_disposition=AuditDisposition.ESCALATED,
+            )
+
+        if ctx.test_setup_change or ctx.test_procedure_change:
+            return ClassificationResult(
+                severity="high",
+                reasons=_collect_reasons(ctx) + ["env_test_condition_changed"],
+                semantic_impact=SemanticImpact.TECHNICAL,
+                severity_reason_codes=[SeverityReasonCode.TEST_METHOD_CHANGED],
+                severity_confidence=0.88,
+                audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+            )
+
+        return None
+
+
 class DefaultRule:
     """Rule 10 — Catch-all → LOW.
 
@@ -628,6 +881,11 @@ _DEFAULT_ENGINE = RuleEngine(
         FormattingOnlyRule(),  # Rule 2   — formatting-only              → low
         CosmeticOnlyRule(),  # Rule 3   — cosmetic MODIFIED            → low
         AddedRemovedRule(),  # Rule 4   — ADDED / REMOVED              → high
+        # Domain expert rules fire BEFORE generic MEDIUM rules so they can
+        # escalate obligation/numeric/table changes from MEDIUM → HIGH.
+        EMCExpertRule(),            # Rule 4.5 — EMC domain expert             → high (numeric/table/weakened)
+        SafetyExpertRule(),         # Rule 4.6 — Safety domain expert          → high (numeric/weakened/procedure)
+        EnvironmentalExpertRule(),  # Rule 4.7 — Environmental domain expert   → high (numeric/setup/procedure)
         ObligationChangeRule(),  # Rule 5   — obligation verb change       → medium
         HighDistanceRule(),  # Rule 6   — distance > 0.75              → high
         MovedRule(),  # Rule 7   — moved node/section           → medium (always)
@@ -636,7 +894,9 @@ _DEFAULT_ENGINE = RuleEngine(
         DomainEntityRule(),  # Rule 9.1 — ontology entity changed      → high + reason codes
         NormativeObligationEscalationRule(),  # Rule 9.2 — obligation weakened          → medium + review
         ObligationStrengthCodeRule(),  # Rule 9.3 — obligation strengthened      → medium + code
-        PresentationOnlyRule(),  # Rule 9.4 — cosmetic + formatting only   → low + PRESENTATION_ONLY
+        PresentationOnlyRule(),      # Rule 9.4 — cosmetic + formatting only   → low + PRESENTATION_ONLY
+        TestProcedureChangeRule(),  # Rule 9.5 — test procedure changed        → high
+        TestSetupChangeRule(),      # Rule 9.6 — test setup parameter changed  → medium
         DefaultRule(),  # Rule 10  — catch-all                    → low
     ]
 )

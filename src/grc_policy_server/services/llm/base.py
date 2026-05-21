@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import AsyncIterator, Dict, List
 
 from grc_policy_server.models.schemas import KeyDifference
 
@@ -47,6 +47,7 @@ class BaseLLM(ABC):
         doc2_name: str,
         key_differences: List[KeyDifference],
         language: str = "",
+        testing_department: str | None = None,
     ) -> str:
         """
         Generate an executive summary of changes based strictly on provided diffs.
@@ -97,6 +98,7 @@ class BaseLLM(ABC):
         key_differences: List[KeyDifference],
         max_questions: int = 6,
         language: str = "",
+        testing_department: str | None = None,
     ) -> List[str]:
         """
         Generate follow-up questions an auditor should ask, based only on diffs.
@@ -123,6 +125,7 @@ class BaseLLM(ABC):
         doc1_table_content: str | None = None,
         doc2_table_content: str | None = None,
         language: str = "",
+        testing_department: str | None = None,
     ) -> str:
         """
         Generate a markdown-formatted diff summary for a single change.
@@ -136,6 +139,78 @@ class BaseLLM(ABC):
         Returns an empty string when no semantic change is detected.
         """
         raise NotImplementedError
+
+    async def generate_markdown_diff_summary_stream(
+        self,
+        *,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        doc1_table_content: str | None = None,
+        doc2_table_content: str | None = None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield tokens for a markdown diff summary.
+
+        Default: awaits the full response and yields it as a single token.
+        VllmClient overrides with true SSE token streaming.
+        """
+        result = await self.generate_markdown_diff_summary(
+            node_type=node_type,
+            change_type=change_type,
+            doc1_source_text=doc1_source_text,
+            doc2_source_text=doc2_source_text,
+            doc1_table_content=doc1_table_content,
+            doc2_table_content=doc2_table_content,
+            language=language,
+            testing_department=testing_department,
+        )
+        if result:
+            yield result
+
+    @abstractmethod
+    async def generate_change_record_json(
+        self,
+        *,
+        change_id: str,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> str:
+        """Generate a structured change record as a JSON object string."""
+        raise NotImplementedError
+
+    async def generate_change_record_json_stream(
+        self,
+        *,
+        change_id: str,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield tokens for a change-record JSON string.
+
+        Default: awaits the full response and yields it as a single token.
+        """
+        result = await self.generate_change_record_json(
+            change_id=change_id,
+            node_type=node_type,
+            change_type=change_type,
+            doc1_source_text=doc1_source_text,
+            doc2_source_text=doc2_source_text,
+            language=language,
+            testing_department=testing_department,
+        )
+        if result:
+            yield result
 
     async def explain_table_diff(
         self,

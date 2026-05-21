@@ -21,6 +21,17 @@ from grc_policy_server.services.documents.canonical_models import (
 )
 from grc_policy_server.utils.hashing import normalize_whitespace
 
+_NUMBER_EXTRACT_RE = re.compile(
+    r'\b\d+(?:[.,]\d+)?\s*(?:v/m|mv/m|khz|mhz|ghz|hz|dbuv|dbua|v|a|%|ms|s|m|cm|mm)?\b',
+    re.IGNORECASE,
+)
+_EMC_ENTITY_RE = re.compile(
+    r'\b(?:class\s*[a-e]|performance\s*criterion\s*[a-e]'
+    r'|iec\s*\d+[-\s.]\d+|cispr\s*\d+|iso\s*\d+[-\s.]\d+'
+    r'|radiated|conducted|esd|immunity|emission)\b',
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class MatchThresholds:
@@ -64,7 +75,7 @@ class ClauseMatcher:
     def __init__(
         self,
         *,
-        search_fn: SearchFn,
+        search_fn: SearchFn | None = None,
         thresholds: MatchThresholds,
         topk: int = 5,
         language: str = "",
@@ -502,27 +513,36 @@ class ClauseMatcher:
                 continue
             left_node_type = str(left_node.get("node_type") or "clause")
             if left_node_type == "table":
-                query_node_types = ["table"]
+                query_node_types = {"table"}
             else:
-                # text nodes must not pull in table results
-                non_table_types = sorted(search_node_types - {"table"})
-                query_node_types = non_table_types or sorted(search_node_types)
-            matches = self.search_fn(
-                query_string=str(left_node.get("section_path") or ""),
-                query_text=query_text,
-                target_document_id=target_document_id,
-                limit=self.topk,
-                node_types=query_node_types,
-            )
-            for candidate in matches:
+                query_node_types = search_node_types - {"table"} or search_node_types
+
+            if self.search_fn is not None:
+                candidates = self.search_fn(
+                    query_string=str(left_node.get("section_path") or ""),
+                    query_text=query_text,
+                    target_document_id=target_document_id,
+                    limit=self.topk,
+                    node_types=sorted(query_node_types),
+                )
+                candidates = [
+                    c for c in candidates
+                    if str(c.get("section_path") or "") == right_section
+                    and str(c.get("chunk_id") or "") not in matched_right_ids
+                    and str(c.get("chunk_id") or "") in right_by_id
+                ]
+            else:
+                # Local fallback: score all unmatched right nodes in the mapped section.
+                candidates = [
+                    node for node in right_by_id.values()
+                    if str(node.get("section_path") or "") == right_section
+                    and node.get("node_type") in query_node_types
+                    and str(node.get("chunk_id") or "") not in matched_right_ids
+                ]
+
+            for candidate in candidates:
                 right_id = str(candidate.get("chunk_id") or "")
-                if str(candidate.get("section_path") or "") != right_section:
-                    continue
-                if (
-                    not right_id
-                    or right_id in matched_right_ids
-                    or right_id not in right_by_id
-                ):
+                if not right_id or right_id in matched_right_ids or right_id not in right_by_id:
                     continue
                 right_node = right_by_id[right_id]
                 score = self._clause_score(left_node, right_node)
@@ -541,7 +561,7 @@ class ClauseMatcher:
                 continue
             matched_left[left_id] = ClauseMatch(
                 distance=distance,
-                matched_by="vector_search",
+                matched_by="local_fallback" if self.search_fn is None else "vector_search",
                 left=left_node,
                 right=right_node,
             )
@@ -625,6 +645,32 @@ class ClauseMatcher:
             result.append({**c, "row": row - 1})
         return result
 
+    def _numeric_overlap(self, left_text: str, right_text: str) -> float:
+        """Jaccard overlap of numeric tokens between two texts."""
+        left_nums = set(
+            m.group(0).lower().replace(" ", "")
+            for m in _NUMBER_EXTRACT_RE.finditer(left_text)
+        )
+        right_nums = set(
+            m.group(0).lower().replace(" ", "")
+            for m in _NUMBER_EXTRACT_RE.finditer(right_text)
+        )
+        if not left_nums and not right_nums:
+            return 1.0
+        if not left_nums or not right_nums:
+            return 0.0
+        return len(left_nums & right_nums) / len(left_nums | right_nums)
+
+    def _entity_overlap(self, left_text: str, right_text: str) -> float:
+        """Jaccard overlap of EMC domain entity tokens."""
+        left_ents = set(m.group(0).lower() for m in _EMC_ENTITY_RE.finditer(left_text))
+        right_ents = set(m.group(0).lower() for m in _EMC_ENTITY_RE.finditer(right_text))
+        if not left_ents and not right_ents:
+            return 1.0
+        if not left_ents or not right_ents:
+            return 0.0
+        return len(left_ents & right_ents) / len(left_ents | right_ents)
+
     def _section_score(self, left: _SectionBucket, right: _SectionBucket) -> float:
         """Hybrid section similarity using four weighted components.
 
@@ -646,11 +692,13 @@ class ClauseMatcher:
         numbering_score = self._numbering_depth_score(left.title, right.title)
         order_penalty = abs(left.order - right.order)
         path_score = 1.0 / (1 + order_penalty * 0.3)
+        numeric_ov = self._numeric_overlap(left.clean_text, right.clean_text)
         return (
             0.20 * title_score
             + 0.15 * numbering_score
-            + 0.15 * path_score
-            + 0.50 * content_score
+            + 0.10 * path_score
+            + 0.45 * content_score
+            + 0.10 * numeric_ov
         )
 
     def _clause_score(self, left: dict, right: dict) -> float:
@@ -678,14 +726,16 @@ class ClauseMatcher:
             self.language,
         )
 
-        # Weight text-based scores higher for robustness with numerical changes
-        # Text similarity is deterministic; semantic extraction can vary
+        numeric_ov = self._numeric_overlap(left_text, right_text)
+        entity_ov = self._entity_overlap(left_text, right_text)
         score = (
-            0.35 * text_score
-            + 0.20 * lexical_score
+            0.30 * text_score
+            + 0.15 * lexical_score
             + 0.05 * length_score
             + 0.25 * meaning_score
-            + 0.15 * signature_score
+            + 0.10 * signature_score
+            + 0.10 * numeric_ov
+            + 0.05 * entity_ov
         )
         if left.get("node_type") != right.get("node_type"):
             score *= 0.8

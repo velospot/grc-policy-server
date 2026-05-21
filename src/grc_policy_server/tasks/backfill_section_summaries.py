@@ -16,7 +16,11 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(name="grc_policy_server.tasks.backfill_section_summaries")
 def backfill_section_summaries() -> dict[str, int]:
-    weaviate = WeaviateClient()
+    weaviate: WeaviateClient | None = None
+    try:
+        weaviate = WeaviateClient()
+    except Exception:
+        logger.warning("Weaviate unavailable — backfill will skip vector upsert")
     neo4j: Neo4jClient | None = None
     if settings.neo4j_enabled:
         neo4j = Neo4jClient(
@@ -44,7 +48,8 @@ def backfill_section_summaries() -> dict[str, int]:
         }
     finally:
         try:
-            weaviate.close()
+            if weaviate is not None:
+                weaviate.close()
         except Exception:
             logger.exception("failed to close Weaviate client in backfill task")
         try:

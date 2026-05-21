@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 
@@ -13,6 +14,34 @@ from grc_policy_server.services.llm.ollama_client import OllamaClient
 from grc_policy_server.services.observability import tracing
 
 logger = logging.getLogger(__name__)
+
+
+def _drain_think_buffer(buf: str, in_think: bool) -> tuple[str, bool, str]:
+    """Parse `<think>...</think>` tags out of a streaming token buffer.
+
+    Returns (remaining_buf, in_think, text_to_emit).
+    Text inside <think> tags is discarded; everything outside is emitted.
+    """
+    emit = []
+    while buf:
+        if in_think:
+            end = buf.find("</think>")
+            if end == -1:
+                # Still inside <think>, hold the whole buffer
+                return buf, True, "".join(emit)
+            # Found closing tag — skip everything up to and including it
+            buf = buf[end + len("</think>"):]
+            in_think = False
+        else:
+            start = buf.find("<think>")
+            if start == -1:
+                emit.append(buf)
+                buf = ""
+            else:
+                emit.append(buf[:start])
+                buf = buf[start + len("<think>"):]
+                in_think = True
+    return "", in_think, "".join(emit)
 
 
 @dataclass(frozen=True)
@@ -29,10 +58,10 @@ class VllmSettings:
     api_key: str | None = None
     chat_model: str = "ibm-granite/granite-3.3-8b-instruct"
     embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
-    connect_timeout_sec: float = 2.0
-    read_timeout_sec: float = 180.0
-    write_timeout_sec: float = 30.0
-    max_retries: int = 1
+    connect_timeout_sec: float = 5.0
+    read_timeout_sec: float = 600.0
+    write_timeout_sec: float = 60.0
+    max_retries: int = 2
     opik_enabled: bool = False
     opik_url: str = "http://localhost:5173/api"
     opik_project_name: str = "grc-policy-server"
@@ -120,7 +149,8 @@ class VllmClient(OllamaClient):
         last_exc: Exception | None = None
         for attempt in range(self.settings.max_retries + 1):
             if attempt > 0:
-                await asyncio.sleep(random.uniform(0.1, 0.5))
+                backoff = min(2.0 ** attempt, 30.0)
+                await asyncio.sleep(random.uniform(backoff * 0.75, backoff * 1.25))
             try:
                 r = await self._async_client.post(path, json=payload)
                 r.raise_for_status()
@@ -217,3 +247,87 @@ class VllmClient(OllamaClient):
                     ).strip()
                     return content
         raise RuntimeError(f"Unexpected vLLM chat response: {response}")
+
+    async def _post_json_stream(self, path: str, payload: dict) -> AsyncIterator[str]:
+        """POST with SSE streaming; yield raw content delta tokens."""
+        async with self._async_client.stream("POST", path, json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line or line == "data: [DONE]":
+                    continue
+                if line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])
+                        token = data["choices"][0]["delta"].get("content", "")
+                        if token:
+                            yield token
+                    except Exception:
+                        continue
+
+    async def _generate_text_stream(self, prompt: str, temperature: float) -> AsyncIterator[str]:
+        """Stream tokens from /v1/chat/completions, stripping <think> tags."""
+        payload = {
+            "model": self.settings.chat_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": float(temperature),
+            "stream": True,
+        }
+        in_think = False
+        buf = ""
+        async for token in self._post_json_stream("/v1/chat/completions", payload):
+            buf += token
+            buf, in_think, emit = _drain_think_buffer(buf, in_think)
+            if emit:
+                yield emit
+        # Flush any remaining buffer after stream ends
+        if buf and not in_think:
+            yield buf
+
+    async def generate_markdown_diff_summary_stream(
+        self,
+        *,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        doc1_table_content: str | None = None,
+        doc2_table_content: str | None = None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield LLM tokens for a markdown diff summary using SSE streaming."""
+        prompt = self._prompt_markdown_diff_summary(
+            node_type=node_type,
+            change_type=change_type,
+            doc1_source_text=doc1_source_text,
+            doc2_source_text=doc2_source_text,
+            doc1_table_content=doc1_table_content,
+            doc2_table_content=doc2_table_content,
+            language=language,
+            testing_department=testing_department,
+        )
+        async for token in self._generate_text_stream(prompt, 0.0):
+            yield token
+
+    async def generate_change_record_json_stream(
+        self,
+        *,
+        change_id: str,
+        node_type: str,
+        change_type: str,
+        doc1_source_text: str | None,
+        doc2_source_text: str | None,
+        language: str = "",
+        testing_department: str | None = None,
+    ) -> AsyncIterator[str]:
+        prompt = self._prompt_change_record_json(
+            change_id=change_id,
+            node_type=node_type,
+            change_type=change_type,
+            doc1_source_text=doc1_source_text,
+            doc2_source_text=doc2_source_text,
+            language=language,
+            testing_department=testing_department,
+        )
+        async for token in self._generate_text_stream(prompt, 0.0):
+            yield token

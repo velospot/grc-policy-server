@@ -107,7 +107,7 @@ class HierarchyNode:
             "object": str(self.metadata.get("object") or ""),
             "condition": str(self.metadata.get("condition") or ""),
             "markdown_text": str(self.metadata.get("markdown_text") or ""),
-            "canonical_text": str(self.metadata.get("canonical_text") or ""),
+            "canonical_text": str(self.metadata.get("comparison_text") or ""),
             "comparison_profile": str(
                 self.metadata.get("comparison_profile") or ""
             ),

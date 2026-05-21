@@ -18,6 +18,9 @@ class DocumentReference(BaseModel):
     lineStart: Optional[int] = None
     lineEnd: Optional[int] = None
     sourceText: str
+    nodeId: Optional[str] = None
+    textHash: Optional[str] = None
+    bbox: Optional[dict] = None
 
 
 class ChangeDetail(BaseModel):
@@ -97,6 +100,18 @@ class CompareRequest(BaseModel):
     forceReExtract: bool = False
     auditMode: bool = True
     saveToDb: bool = False
+
+
+TestingDepartment = Literal["EMC", "Safety", "Environment"]
+
+
+class CompareStreamV4Request(BaseModel):
+    """Stream-oriented compare request with minimal payload."""
+
+    doc1Id: str
+    doc2Id: str
+    testingDepartment: TestingDepartment
+    forceReExtract: bool = False
 
 
 class DiffChunk(BaseModel):

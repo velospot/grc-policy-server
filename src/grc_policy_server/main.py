@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from grc_policy_server.api.routes import (
     compare,
     compare_v2,
+    compare_v3_stream,
+    compare_v4_stream,
     documents,
     health,
     storage_providers,
@@ -71,6 +73,8 @@ app.include_router(documents.router)
 app.include_router(compare.router)
 app.include_router(with_summary.router)
 app.include_router(compare_v2.router)
+app.include_router(compare_v3_stream.router)
+app.include_router(compare_v4_stream.router)
 app.include_router(storage_providers.router)
 
 

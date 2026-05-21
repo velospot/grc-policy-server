@@ -22,11 +22,15 @@ logger = logging.getLogger(__name__)
 
 def _build_diff_engine() -> tuple[
     RealDiffEngine,
-    WeaviateClient,
+    WeaviateClient | None,
     Neo4jClient | None,
     BaseLLM,
 ]:
-    weaviate = WeaviateClient()
+    weaviate: WeaviateClient | None = None
+    try:
+        weaviate = WeaviateClient()
+    except Exception:
+        logger.warning("Weaviate unavailable in compare task — local fallback will be used")
     neo4j: Neo4jClient | None = None
     if settings.neo4j_enabled:
         neo4j = Neo4jClient(
@@ -78,7 +82,8 @@ async def _compare_payload(payload: CompareTaskPayload) -> dict[str, Any]:
         }
     finally:
         try:
-            weaviate.close()
+            if weaviate is not None:
+                weaviate.close()
         except Exception:
             logger.exception("failed to close Weaviate client in compare_v2 task")
         try:

@@ -49,6 +49,34 @@ _REQ_STRENGTH = {
     "shall_not": 8,
 }
 
+_FIELD_STRENGTH_RE = re.compile(
+    r'\b\d+(?:[.,]\d+)?\s*(?:v/m|mv/m|kv/m|db[µu]v/m)\b', re.IGNORECASE
+)
+_FREQ_RANGE_RE = re.compile(
+    r'\b\d+(?:[.,]\d+)?\s*(?:hz|khz|mhz|ghz)\b.*?\b\d+(?:[.,]\d+)?\s*(?:hz|khz|mhz|ghz)\b',
+    re.IGNORECASE | re.DOTALL,
+)
+_EMISSION_LIMIT_RE = re.compile(
+    r'\b\d+(?:[.,]\d+)?\s*(?:db[µμu]v(?:/m)?|db[µμu]a)\b', re.IGNORECASE
+)
+_ACCEPTANCE_CLASS_RE = re.compile(
+    r'\b(?:class|performance\s+criterion|performance\s+level)\s*[a-e]\b',
+    re.IGNORECASE,
+)
+_TEST_METHOD_RE = re.compile(
+    r'\b(?:iec|cispr|iso|din\s+en|vde|sae)\s*\d+[-\s.]\d+(?:[-\s.]\d+)?(?:\s+ed\.?\s*\d+)?',
+    re.IGNORECASE,
+)
+_DWELL_TIME_RE = re.compile(
+    r'\b(?:dwell|exposure|soak|dwell\s+time|exposure\s+time)\b.*?\b\d+\s*(?:s|ms|min|h|second|minute|hour)',
+    re.IGNORECASE,
+)
+_TEST_SETUP_RE = re.compile(
+    r'\b(?:temperature|humidity|eut\s+orientation|antenna\s+distance|ground\s+plane|test\s+distance'
+    r'|pre-conditioning|precondition|polarisation|polarization)\b',
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class ChangeRecord:
@@ -232,6 +260,10 @@ def classify_significance(
     cosmetic_change: bool = False,
     reference_number_only_change: bool = False,
     formatting_only_change: bool = False,
+    ontology_entity_type: str = "",
+    test_procedure_change: bool = False,
+    test_setup_change: bool = False,
+    testing_department: str = "",
 ) -> tuple[str, str, Literal["low", "medium", "high"], list[str]]:
     """Delegate to SeverityClassifier and return the legacy (significance, impact, severity, reasons) tuple."""
     ctx = ClassificationContext(
@@ -246,6 +278,10 @@ def classify_significance(
         cosmetic_change=cosmetic_change,
         reference_number_only_change=reference_number_only_change,
         formatting_only_change=formatting_only_change,
+        ontology_entity_type=ontology_entity_type,
+        test_procedure_change=test_procedure_change,
+        test_setup_change=test_setup_change,
+        testing_department=testing_department,
     )
     result = _CLASSIFIER.classify(ctx)
     return result.severity, result.impact, result.severity, result.reasons
@@ -361,3 +397,66 @@ def _heading_context(
         "before": _heading_path(left_nodes),
         "after": _heading_path(right_nodes),
     }
+
+
+def detect_emc_entity_type(
+    left_text: str | None,
+    right_text: str | None,
+    left_node: dict | None = None,
+    right_node: dict | None = None,
+) -> str:
+    """Return an ontology entity type string if the change involves an EMC domain entity."""
+    combined = f"{left_text or ''} {right_text or ''}".strip()
+    if not combined:
+        return ""
+    l_node = left_node or {}
+    r_node = right_node or {}
+    heading = " ".join(
+        (l_node.get("heading_path") or []) + (r_node.get("heading_path") or [])
+    ).lower()
+    table_headers = " ".join(
+        (l_node.get("table_headers") or []) + (r_node.get("table_headers") or [])
+    ).lower()
+    context = f"{combined} {heading} {table_headers}"
+    if _FIELD_STRENGTH_RE.search(context):
+        return "FieldStrength"
+    if _EMISSION_LIMIT_RE.search(context):
+        return "EmissionLimit"
+    if _ACCEPTANCE_CLASS_RE.search(context):
+        return "AcceptanceCriterion"
+    if _TEST_METHOD_RE.search(context):
+        return "TestMethod"
+    if _FREQ_RANGE_RE.search(context):
+        return "FrequencyRange"
+    return ""
+
+
+def detect_test_procedure_change(
+    left_text: str | None,
+    right_text: str | None,
+) -> bool:
+    """Return True when a test procedure element changed: IEC standard ref or dwell time."""
+    left = left_text or ""
+    right = right_text or ""
+    left_methods = set(_TEST_METHOD_RE.findall(left))
+    right_methods = set(_TEST_METHOD_RE.findall(right))
+    if left_methods != right_methods:
+        return True
+    if _DWELL_TIME_RE.search(left) or _DWELL_TIME_RE.search(right):
+        left_nums = set(_extract_numbers(left))
+        right_nums = set(_extract_numbers(right))
+        if left_nums != right_nums:
+            return True
+    return False
+
+
+def detect_test_setup_change(
+    left_text: str | None,
+    right_text: str | None,
+) -> bool:
+    """Return True when a test setup parameter changed."""
+    left = left_text or ""
+    right = right_text or ""
+    if not (_TEST_SETUP_RE.search(left) or _TEST_SETUP_RE.search(right)):
+        return False
+    return set(_extract_numbers(left)) != set(_extract_numbers(right))

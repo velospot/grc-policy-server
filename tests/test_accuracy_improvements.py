@@ -495,3 +495,81 @@ class TestCacheVersion:
         store = ComparisonCacheStore(upload_root=Path("/tmp"))
         expected = sha256(f"{store.CACHE_VERSION}::docA::docB".encode()).hexdigest()
         assert store.cache_key_for_pair(doc1_id="docA", doc2_id="docB") == expected
+
+
+class TestEmcEntityDetection:
+    def test_field_strength_detected(self):
+        from grc_policy_server.services.comparison.change_records import detect_emc_entity_type
+        assert detect_emc_entity_type("10 V/m", "30 V/m") == "FieldStrength"
+
+    def test_emission_limit_detected(self):
+        from grc_policy_server.services.comparison.change_records import detect_emc_entity_type
+        assert detect_emc_entity_type("60 dBµV", "56 dBµV") == "EmissionLimit"
+
+    def test_acceptance_class_detected(self):
+        from grc_policy_server.services.comparison.change_records import detect_emc_entity_type
+        assert detect_emc_entity_type("Class A limits apply", "Class B limits apply") == "AcceptanceCriterion"
+
+    def test_test_method_detected(self):
+        from grc_policy_server.services.comparison.change_records import detect_emc_entity_type
+        assert detect_emc_entity_type("IEC 61000-4-3 Ed.3", "IEC 61000-4-3 Ed.4") == "TestMethod"
+
+    def test_frequency_range_detected(self):
+        from grc_policy_server.services.comparison.change_records import detect_emc_entity_type
+        assert detect_emc_entity_type("80 MHz to 1000 MHz", "80 MHz to 3000 MHz") == "FrequencyRange"
+
+    def test_no_match_returns_empty(self):
+        from grc_policy_server.services.comparison.change_records import detect_emc_entity_type
+        assert detect_emc_entity_type("general policy clause text", "general policy revised text") == ""
+
+    def test_procedure_change_standard_ref(self):
+        from grc_policy_server.services.comparison.change_records import detect_test_procedure_change
+        assert detect_test_procedure_change("IEC 61000-4-3 Ed.3", "IEC 61000-4-3 Ed.4") is True
+
+    def test_procedure_change_no_diff(self):
+        from grc_policy_server.services.comparison.change_records import detect_test_procedure_change
+        assert detect_test_procedure_change("IEC 61000-4-3 Ed.3", "IEC 61000-4-3 Ed.3") is False
+
+    def test_setup_change_with_numeric_diff(self):
+        from grc_policy_server.services.comparison.change_records import detect_test_setup_change
+        assert detect_test_setup_change("Temperature: 23°C", "Temperature: 25°C") is True
+
+    def test_setup_change_no_numeric_diff(self):
+        from grc_policy_server.services.comparison.change_records import detect_test_setup_change
+        assert detect_test_setup_change("EUT on ground plane", "EUT on ground plane") is False
+
+
+class TestNumericEntityOverlap:
+    def test_identical_numbers_full_overlap(self):
+        from grc_policy_server.services.comparison.clause_matcher import ClauseMatcher
+        matcher = ClauseMatcher.__new__(ClauseMatcher)
+        assert matcher._numeric_overlap("10 V/m at 80 MHz", "10 V/m at 80 MHz") == 1.0
+
+    def test_no_numbers_returns_one(self):
+        from grc_policy_server.services.comparison.clause_matcher import ClauseMatcher
+        matcher = ClauseMatcher.__new__(ClauseMatcher)
+        assert matcher._numeric_overlap("general text", "other text") == 1.0
+
+    def test_partial_overlap(self):
+        from grc_policy_server.services.comparison.clause_matcher import ClauseMatcher
+        matcher = ClauseMatcher.__new__(ClauseMatcher)
+        result = matcher._numeric_overlap("10 V/m 80 MHz", "10 V/m 3000 MHz")
+        assert 0.0 < result < 1.0
+
+    def test_no_overlap_returns_zero(self):
+        from grc_policy_server.services.comparison.clause_matcher import ClauseMatcher
+        matcher = ClauseMatcher.__new__(ClauseMatcher)
+        result = matcher._numeric_overlap("10 V/m", "30 V/m")
+        assert result == 0.0
+
+    def test_entity_overlap_same_class(self):
+        from grc_policy_server.services.comparison.clause_matcher import ClauseMatcher
+        matcher = ClauseMatcher.__new__(ClauseMatcher)
+        result = matcher._entity_overlap("Class A limits", "Class A requirements")
+        assert result == 1.0
+
+    def test_entity_overlap_different_class(self):
+        from grc_policy_server.services.comparison.clause_matcher import ClauseMatcher
+        matcher = ClauseMatcher.__new__(ClauseMatcher)
+        result = matcher._entity_overlap("Class A limits", "Class B limits")
+        assert result == 0.0

@@ -312,7 +312,7 @@ def build_document_hierarchy(
                 **chunk.metadata,
                 "clean_text": clean_text,
                 "markdown_text": chunk.markdown_text,
-                "canonical_text": str(chunk.metadata.get("canonical_text") or normalized_text),
+                "canonical_text": str(chunk.metadata.get("comparison_text") or chunk.metadata.get("canonical_text") or normalized_text),
                 "anchor_text": anchor_text,
                 "docling_path": chunk.docling_path,
                 "source_labels": list(chunk.labels),

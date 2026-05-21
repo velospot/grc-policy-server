@@ -26,12 +26,16 @@ logger = logging.getLogger(__name__)
 
 def _build_ingestion_service() -> tuple[
     DocumentIngestionService,
-    WeaviateClient,
+    WeaviateClient | None,
     Neo4jClient | None,
     BaseLLM,
 ]:
     docling_adapter = DoclingAdapter()
-    weaviate = WeaviateClient()
+    weaviate: WeaviateClient | None = None
+    try:
+        weaviate = WeaviateClient()
+    except Exception:
+        logger.warning("Weaviate unavailable in upload task — vector index skipped")
     neo4j: Neo4jClient | None = None
     if settings.neo4j_enabled:
         neo4j = Neo4jClient(
@@ -72,7 +76,8 @@ async def _run_ingest(payload_files: list[UploadTaskFilePayload]) -> UploadDocum
         return await _ingest_payloads(service=service, payload_files=payload_files)
     finally:
         try:
-            weaviate.close()
+            if weaviate is not None:
+                weaviate.close()
         except Exception:
             logger.exception("failed to close Weaviate client in upload_v2 task")
         try:

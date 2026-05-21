@@ -32,7 +32,7 @@ class SectionSummaryBackfillService:
         self,
         *,
         upload_root: Path,
-        weaviate: WeaviateClient,
+        weaviate: WeaviateClient | None = None,
         neo4j: Neo4jClient | None = None,
     ) -> None:
         self.upload_root = upload_root
@@ -96,7 +96,7 @@ class SectionSummaryBackfillService:
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
         vector_records = self._section_vector_records(refreshed_nodes)
-        if vector_records:
+        if vector_records and self.weaviate is not None:
             self.weaviate.upsert_chunks(vector_records)
 
         if self.neo4j is not None:
