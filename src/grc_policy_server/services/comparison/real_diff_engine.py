@@ -281,6 +281,24 @@ class RealDiffEngine:
     max_diffs: int = 40
     severity_classifier: SeverityClassifier = field(default_factory=SeverityClassifier)
 
+    def _weaviate_search_fn(self):
+        """Return a search callable that silently falls back on any Weaviate error."""
+        if self.weaviate is None:
+            return None
+        _weaviate = self.weaviate
+
+        def _search(*args, **kwargs):
+            try:
+                return _weaviate.search_section_in_document(*args, **kwargs)
+            except Exception:
+                logger.warning(
+                    "Weaviate search failed during compare — continuing without vector search",
+                    exc_info=True,
+                )
+                return []
+
+        return _search
+
     async def compare(
         self,
         doc1: Document,
@@ -312,9 +330,7 @@ class RealDiffEngine:
         )
 
         matcher = ClauseMatcher(
-            search_fn=self.weaviate.search_section_in_document
-            if self.weaviate
-            else None,
+            search_fn=self._weaviate_search_fn(),
             thresholds=self.thresholds,
             topk=self.topk,
             language=language,
@@ -531,9 +547,7 @@ class RealDiffEngine:
         right_nodes = self._filter_non_compliance_nodes(right_nodes)
 
         matcher = ClauseMatcher(
-            search_fn=self.weaviate.search_section_in_document
-            if self.weaviate
-            else None,
+            search_fn=self._weaviate_search_fn(),
             thresholds=self.thresholds,
             topk=self.topk,
             language=language,
@@ -667,7 +681,13 @@ class RealDiffEngine:
             "document_id=%s",
             document_id,
         )
-        return self.weaviate.fetch_chunks_by_document(document_id)
+        try:
+            return self.weaviate.fetch_chunks_by_document(document_id)
+        except Exception as exc:
+            raise ValueError(
+                f"No data source available for document {document_id}. "
+                "Canonical store returned no nodes and Weaviate is unreachable."
+            ) from exc
 
     def _detect_moves(
         self,

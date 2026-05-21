@@ -27,10 +27,22 @@ def _build_diff_engine() -> tuple[
     BaseLLM,
 ]:
     weaviate: WeaviateClient | None = None
+    _candidate: WeaviateClient | None = None
     try:
-        weaviate = WeaviateClient()
+        _candidate = WeaviateClient()
+        # skip_init_checks=True defers the HTTP meta-endpoint check until the first
+        # real operation. Force it now so we know before handing the client to the engine.
+        _candidate.client.connect()
+        if not _candidate.client.is_ready():
+            raise RuntimeError("Weaviate is not ready")
+        weaviate = _candidate
     except Exception:
         logger.warning("Weaviate unavailable in compare task — local fallback will be used")
+        if _candidate is not None:
+            try:
+                _candidate.close()
+            except Exception:
+                pass
     neo4j: Neo4jClient | None = None
     if settings.neo4j_enabled:
         neo4j = Neo4jClient(

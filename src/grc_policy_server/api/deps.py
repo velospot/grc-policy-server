@@ -68,17 +68,28 @@ def require_api_bearer_token(
 
 
 def get_weaviate_client() -> Generator[WeaviateClient | None, None, None]:
+    _candidate: WeaviateClient | None = None
     try:
-        client = WeaviateClient()
+        _candidate = WeaviateClient()
+        # skip_init_checks=True defers the HTTP meta-endpoint check until the first
+        # real operation. Force it now so routes receive None when server is unreachable.
+        _candidate.client.connect()
+        if not _candidate.client.is_ready():
+            raise RuntimeError("Weaviate is not ready")
         try:
-            yield client
+            yield _candidate
         finally:
             try:
-                client.close()
+                _candidate.close()
             except Exception:
                 pass
     except Exception:
         logger.warning("Weaviate unavailable — comparison will use local fallback")
+        if _candidate is not None:
+            try:
+                _candidate.close()
+            except Exception:
+                pass
         yield None
 
 
