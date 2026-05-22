@@ -42,6 +42,7 @@ Dockerfile*
 # Documentation
 *.md
 docs/
+!README.md
 
 # Tests
 tests/
