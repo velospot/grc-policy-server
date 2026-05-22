@@ -86,6 +86,11 @@ In Swagger (`/docs`), use the `Authorize` button and paste the token value (with
 - `POST /compare/with-summary`
   - Runs streamed comparison and returns summarized result payload.
 
+- `POST /v4/compare/stream`
+  - Department-specific streaming comparison (SSE). Preferred endpoint for interactive frontends.
+  - Two-stage stream: per-diff table rows (Stage 1) then an aggregated narrative summary (Stage 2).
+  - See [Compare V4 streaming API](#compare-v4-streaming-api) below for the full contract.
+
 - `GET /storage/providers`, `POST /storage/providers`, `PUT /storage/providers/{provider_id}`, `DELETE /storage/providers/{provider_id}`
   - Create/list/update/delete storage provider configurations (used by `/documents/ingest/sources`).
 
@@ -179,6 +184,75 @@ Response shape:
   ]
 }
 ```
+
+## Compare V4 streaming API
+
+`POST /v4/compare/stream` streams a two-stage department-aware comparison as SSE.
+
+### Request
+
+```json
+{
+  "doc1Id": "<uuid>",
+  "doc2Id": "<uuid>",
+  "testingDepartment": "EMC",
+  "forceReExtract": false
+}
+```
+
+`testingDepartment` must be one of `"EMC"`, `"Safety"`, or `"Environment"`.
+
+### curl example
+
+```bash
+curl -N -X POST http://localhost:8000/v4/compare/stream \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"doc1Id":"<id1>","doc2Id":"<id2>","testingDepartment":"EMC"}'
+```
+
+### Event reference
+
+All events are `data: {json}\n\n` SSE lines.
+
+| Event type | Key fields | Description |
+|---|---|---|
+| `payload` | `doc1_id`, `doc2_id`, `testing_department` | First event; echoes request context |
+| `progress` | `stage`, `message`, `total?` | Stage transitions: `loading` → `streaming_diffs` → `summarizing` |
+| `diff_start` | `change_id`, `section`, `page`, `change_type`, `node_type`, `doc1_preview`, `doc2_preview` | Emitted before LLM call for each diff |
+| `diff_token` | `change_id`, `token` | One event per LLM output token for this diff row |
+| `diff_complete` | `change_id`, `row_markdown`, `requires_review: bool`, `skipped: bool` | Final row result; `skipped=true` means no semantic change found |
+| `table_complete` | `markdown`, `rows_analyzed`, `rows_skipped`, `review_count` | Full assembled markdown diff table |
+| `summary_token` | `token` | One event per LLM output token for the aggregated summary |
+| `summary_complete` | `text` | Complete aggregated summary text |
+| `done` | `total_diffs`, `analyzed`, `skipped`, `review_count`, `requires_human_review`, `accuracy_metrics` | Final event |
+| `error` | `error` | Emitted if the comparison fails |
+
+### Table format
+
+`table_complete.markdown` and individual `diff_complete.row_markdown` values use this format:
+
+```markdown
+| Section | Page | Change | Semantic Difference |
+|---------|------|--------|---------------------|
+| 4.2.1 Emissionsgrenzwerte | p.23 | Modified | Conducted emissions limit tightened from 79 dBµA to 73 dBµA across 0.1–2 MHz. Retest required. |
+| 5.1 Test Setup            | p.31 | Added    | Pre-conditioning at 40 °C for 2 h before testing is now mandatory. |
+| —                         | —    | Modified | ⚠ HUMAN_REVIEW: Overlapping requirement between sections 3.4 and 3.8 — cannot determine precedence. |
+```
+
+Rows prefixed with `⚠` require human review. Cosmetic/whitespace-only diffs are silently omitted from the table.
+
+### Compared to V3
+
+| Feature | `/v3/compare/stream` | `/v4/compare/stream` |
+|---|---|---|
+| Department-aware prompting | No | Yes (`testingDepartment`) |
+| LLM output per diff | Markdown summary + JSON change record | Single semantic sentence (table row) |
+| Skip cosmetic diffs | No | Yes |
+| Human-review flagging | Via change record `status` field | Inline `⚠` + `requires_review: true` |
+| Aggregated summary | At `done` event | Streamed via `summary_token` events |
+| Client table assembly | Not required | Rows streamed individually; full table at `table_complete` |
 
 ## Environment Variables
 

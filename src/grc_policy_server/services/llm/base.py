@@ -212,6 +212,45 @@ class BaseLLM(ABC):
         if result:
             yield result
 
+    async def generate_diff_table_row_stream(
+        self,
+        *,
+        section: str,
+        page: int | None,
+        change_type: str,
+        node_type: str,
+        doc1_text: str | None,
+        doc2_text: str | None,
+        doc1_table_md: str | None = None,
+        doc2_table_md: str | None = None,
+        testing_department: str | None = None,
+        language: str = "",
+    ) -> AsyncIterator[str]:
+        """Stream a single-sentence semantic explanation for one diff table row.
+
+        Implementations should yield tokens of a plain-text sentence (no markdown).
+        The sentinel values ``SKIP`` and ``HUMAN_REVIEW: <reason>`` are valid
+        complete responses — callers must check for them before rendering.
+
+        Default: delegates to generate_markdown_diff_summary_stream and maps an
+        empty response to ``SKIP``.
+        """
+        tokens: list[str] = []
+        async for token in self.generate_markdown_diff_summary_stream(
+            node_type=node_type,
+            change_type=change_type,
+            doc1_source_text=doc1_text,
+            doc2_source_text=doc2_text,
+            doc1_table_content=doc1_table_md,
+            doc2_table_content=doc2_table_md,
+            language=language,
+            testing_department=testing_department,
+        ):
+            tokens.append(token)
+            yield token
+        if not "".join(tokens).strip():
+            yield "SKIP"
+
     async def explain_table_diff(
         self,
         *,

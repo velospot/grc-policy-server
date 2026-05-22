@@ -32,6 +32,8 @@ Key endpoints:
 - `POST /documents/delete`
 - `POST /v2/compare`
 - `GET /v2/compare/response/{job_id}`
+- `POST /v3/compare/stream`
+- `POST /v4/compare/stream` — two-stage department-aware SSE (preferred for interactive frontends)
 - `POST /compare/with-summary`
 
 ### 2.2 Processing Layer (Celery Workers)

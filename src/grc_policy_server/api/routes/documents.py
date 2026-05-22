@@ -673,3 +673,32 @@ def hybrid_search_documents(
             ),
         ],
     )
+
+
+@router.post(
+    "/accuracy-report/refresh",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Re-evaluate ingestion accuracy metrics for all documents",
+    description="""
+Enqueues a background Celery task that runs the ontology enrichment pipeline
+against every document's canonical_nodes.json and writes an updated
+_accuracy_report.json to the upload root.
+""",
+)
+async def refresh_accuracy_report() -> dict[str, str]:
+    try:
+        from grc_policy_server.tasks.refresh_accuracy_report import (
+            refresh_accuracy_report as _task,
+        )
+
+        result = _task.delay()
+        return {
+            "task_id": str(result.id),
+            "message": "Accuracy report refresh queued",
+        }
+    except Exception as exc:
+        logger.exception("failed to enqueue refresh_accuracy_report task")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Could not enqueue task: {exc}",
+        ) from exc

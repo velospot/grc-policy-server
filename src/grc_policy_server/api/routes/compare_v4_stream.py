@@ -30,12 +30,50 @@ _SSE_HEADERS = {
 
 @router.post(
     "/compare/stream",
-    summary="Stream department-specific comparison results as Server-Sent Events",
+    summary="Stream department-specific comparison results as Server-Sent Events (two-stage)",
     description="""
-Streams comparison progress and results as SSE (text/event-stream).
+Streams a two-stage department-aware comparison as SSE (`text/event-stream`).
 
-This endpoint accepts a minimal payload (`doc1Id`, `doc2Id`, `testingDepartment`)
-and uses department-specific prompts to classify changes into structured change records.
+**Request body**
+```json
+{ "doc1Id": "...", "doc2Id": "...", "testingDepartment": "EMC" | "Safety" | "Environment", "forceReExtract": false }
+```
+
+**Stage 1 — Per-diff table rows**
+
+For each classified difference the LLM streams one concise semantic explanation
+(department-aware, 1–3 sentences). Cosmetic-only diffs are silently skipped; ambiguous
+diffs are flagged for human review.
+
+**Stage 2 — Aggregated summary**
+
+After all diffs are processed, a single narrative summary is streamed.
+
+**Event sequence**
+
+| Event type | Key fields | Notes |
+|---|---|---|
+| `payload` | `doc1_id`, `doc2_id`, `testing_department` | First event |
+| `progress` | `stage`, `message`, `total?` | Stage transitions: `loading` → `streaming_diffs` → `summarizing` |
+| `diff_start` | `change_id`, `section`, `page`, `change_type`, `node_type`, `doc1_preview`, `doc2_preview` | Before LLM call for this diff |
+| `diff_token` | `change_id`, `token` | LLM token stream (one event per token) |
+| `diff_complete` | `change_id`, `row_markdown`, `requires_review`, `skipped` | Row result; `skipped=true` means no semantic change found |
+| `table_complete` | `markdown`, `rows_analyzed`, `rows_skipped`, `review_count` | Full assembled markdown diff table |
+| `summary_token` | `token` | LLM summary token |
+| `summary_complete` | `text` | Full aggregated summary text |
+| `done` | `total_diffs`, `analyzed`, `skipped`, `review_count`, `requires_human_review`, `accuracy_metrics` | Final event |
+| `error` | `error` | On exception |
+
+**Table markdown format** (assembled from `diff_complete.row_markdown` values)
+```
+| Section | Page | Change | Semantic Difference |
+|---------|------|--------|---------------------|
+| 4.2.1 Grenzwerte | p.23 | Modified | Limit tightened from 79 dBµA to 73 dBµA. Retest required. |
+| 5.1 Test Setup   | p.31 | Added    | Pre-conditioning at 40 °C/2 h now mandatory. |
+| —                | —    | Modified | ⚠ HUMAN_REVIEW: sections 3.4 and 3.8 overlap — cannot determine precedence. |
+```
+
+Rows prefixed with `⚠` require human review. Cosmetic-only diffs are omitted.
 """,
 )
 async def compare_v4_stream(
@@ -74,7 +112,7 @@ async def compare_v4_stream(
 
     async def event_generator():
         try:
-            async for event in service.compare_stream(
+            async for event in service.compare_stream_v4(
                 doc1,
                 doc2,
                 force_re_extract=payload.forceReExtract,

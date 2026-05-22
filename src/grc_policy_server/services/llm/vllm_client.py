@@ -331,3 +331,36 @@ class VllmClient(OllamaClient):
         )
         async for token in self._generate_text_stream(prompt, 0.0):
             yield token
+
+    async def generate_diff_table_row_stream(
+        self,
+        *,
+        section: str,
+        page: int | None,
+        change_type: str,
+        node_type: str,
+        doc1_text: str | None,
+        doc2_text: str | None,
+        doc1_table_md: str | None = None,
+        doc2_table_md: str | None = None,
+        testing_department: str | None = None,
+        language: str = "",
+    ):
+        prompt = self._prompt_diff_table_row(
+            section=section,
+            page=page,
+            change_type=change_type,
+            node_type=node_type,
+            doc1_text=doc1_text,
+            doc2_text=doc2_text,
+            doc1_table_md=doc1_table_md,
+            doc2_table_md=doc2_table_md,
+            testing_department=testing_department,
+            language=language,
+        )
+        tokens: list[str] = []
+        async for token in self._generate_text_stream(prompt, 0.0):
+            tokens.append(token)
+            yield token
+        if not "".join(tokens).strip():
+            yield "SKIP"

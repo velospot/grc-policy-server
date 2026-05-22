@@ -525,6 +525,30 @@ normativity, extraction_confidence, alignment_confidence, change_confidence, imp
 """.strip()
 
 
+PROMPT_DIFF_TABLE_ROW = """
+{role_line}
+
+You are reviewing a change in a compliance document.
+
+Section: {section}
+Page: {page}
+Change type: {change_type}
+
+{source_block}
+
+Your task: Write a single plain-text sentence (or two at most) explaining the SEMANTIC difference
+from the perspective of a {department} tester or auditor.
+Focus on what changed in terms of requirements, limits, procedures, or applicability.
+
+Rules — follow strictly:
+- Output ONLY the semantic explanation. No markdown, no bullets, no headers, no JSON.
+- If there is NO semantic difference (purely cosmetic/whitespace/formatting change), output exactly: SKIP
+- If you cannot confidently determine the semantic difference, output: HUMAN_REVIEW: <brief reason>
+- Do not invent changes not present in the source text.
+- Include specific values (frequencies, limits, units) when present.
+""".strip()
+
+
 @dataclass(frozen=True)
 class OllamaSettings:
     base_url: str = "http://localhost:11434"
@@ -872,6 +896,38 @@ class OllamaClient(BaseLLM):
         )
         return await self._generate_text(prompt, temperature=0.0)
 
+    async def generate_diff_table_row_stream(
+        self,
+        *,
+        section: str,
+        page: int | None,
+        change_type: str,
+        node_type: str,
+        doc1_text: str | None,
+        doc2_text: str | None,
+        doc1_table_md: str | None = None,
+        doc2_table_md: str | None = None,
+        testing_department: str | None = None,
+        language: str = "",
+    ):
+        prompt = self._prompt_diff_table_row(
+            section=section,
+            page=page,
+            change_type=change_type,
+            node_type=node_type,
+            doc1_text=doc1_text,
+            doc2_text=doc2_text,
+            doc1_table_md=doc1_table_md,
+            doc2_table_md=doc2_table_md,
+            testing_department=testing_department,
+            language=language,
+        )
+        result = await self._generate_text(prompt, temperature=0.0)
+        if result.strip():
+            yield result
+        else:
+            yield "SKIP"
+
     async def explain_table_diff(
         self,
         *,
@@ -1119,6 +1175,60 @@ class OllamaClient(BaseLLM):
             doc1_text=doc1_text,
             doc2_text=doc2_text,
         )
+
+    def _prompt_diff_table_row(
+        self,
+        *,
+        section: str,
+        page: int | None,
+        change_type: str,
+        node_type: str,
+        doc1_text: str | None,
+        doc2_text: str | None,
+        doc1_table_md: str | None = None,
+        doc2_table_md: str | None = None,
+        testing_department: str | None = None,
+        language: str = "",
+    ) -> str:
+        profile = get_testing_department_profile(testing_department)
+        dept = normalize_testing_department(testing_department)
+        role_line = profile.role
+
+        if node_type == "table":
+            left = doc1_table_md or doc1_text or ""
+            right = doc2_table_md or doc2_text or ""
+            if change_type == "ADDED":
+                source_block = f"New table content:\n{right}"
+            elif change_type == "REMOVED":
+                source_block = f"Removed table content:\n{left}"
+            else:
+                source_block = f"Table before:\n{left}\n\nTable after:\n{right}"
+        else:
+            if change_type == "ADDED":
+                source_block = f"New clause:\n{doc2_text or ''}"
+            elif change_type == "REMOVED":
+                source_block = f"Removed clause:\n{doc1_text or ''}"
+            else:
+                source_block = (
+                    f"Before:\n{doc1_text or ''}\n\nAfter:\n{doc2_text or ''}"
+                )
+
+        page_str = f"p.{page}" if page is not None else "—"
+        prompt = PROMPT_DIFF_TABLE_ROW.format(
+            role_line=role_line,
+            section=section or "—",
+            page=page_str,
+            change_type=change_type,
+            department=dept,
+            source_block=source_block,
+        )
+        lang_name = self._LANGUAGE_NAMES.get(language)
+        if lang_name:
+            return (
+                f"IMPORTANT: You MUST write your entire response in {lang_name} only.\n\n"
+                + prompt
+            )
+        return prompt
 
     # -------------------------
     # Diff compaction (token safety)

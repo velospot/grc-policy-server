@@ -81,6 +81,32 @@ def _bbox_for_pdfjs(bbox_refs: list[dict], page: int) -> dict | None:
 
 _SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
+_TABLE_HEADER = (
+    "| Section | Page | Change | Semantic Difference |\n"
+    "|---------|------|--------|---------------------|"
+)
+
+
+def _build_table_row(
+    section: str,
+    page: int | None,
+    change_type: str,
+    semantic_text: str,
+    requires_review: bool,
+) -> str:
+    page_cell = f"p.{page}" if page is not None else "—"
+    change_cell = change_type.capitalize()
+    text_cell = semantic_text.strip()
+    if requires_review and not text_cell.startswith("⚠"):
+        text_cell = f"⚠ {text_cell}"
+    return f"| {section} | {page_cell} | {change_cell} | {text_cell} |"
+
+
+def _assemble_table(rows: list[str]) -> str:
+    if not rows:
+        return ""
+    return _TABLE_HEADER + "\n" + "\n".join(rows)
+
 
 def _sort_by_severity(diffs: list) -> list:
     return sorted(diffs, key=lambda d: _SEVERITY_ORDER.get(str(d.changeSeverity or "").lower(), 1))
@@ -345,6 +371,193 @@ class RealDiffEngineStream:
             "retestLikelyCount": retest_likely_count,
             "highRiskCount": high_risk_count,
             "uncertainCount": uncertain_count,
+        }
+
+    async def compare_stream_v4(
+        self,
+        doc1: Document,
+        doc2: Document,
+        force_re_extract: bool = False,
+        testing_department: str | None = None,
+    ) -> AsyncIterator[Dict]:
+        """Two-stage streaming contract for V4.
+
+        Stage 1: Per-diff LLM table rows (tokens streamed, skip/human-review flagged).
+        Stage 2: Single aggregated summary.
+        """
+        yield {
+            "type": "payload",
+            "doc1_id": doc1.id,
+            "doc2_id": doc2.id,
+            "testing_department": testing_department or "EMC",
+        }
+        yield {"type": "progress", "stage": "loading", "message": "Loading canonical nodes"}
+
+        engine = RealDiffEngine(
+            weaviate=self.weaviate,
+            neo4j=self.neo4j,
+            llm=self.llm,
+            canonical_store=self.canonical_store,
+            trace_store=self.trace_store,
+            thresholds=self.thresholds,
+            topk=self.topk,
+        )
+
+        (
+            key_diffs,
+            doc1_name,
+            doc2_name,
+            language,
+            no_change_coverage,
+            accuracy_metrics,
+        ) = await engine.compare_records_only(
+            doc1,
+            doc2,
+            force_re_extract=force_re_extract,
+            testing_department=testing_department or "",
+        )
+        key_diffs = _sort_by_severity(key_diffs)
+
+        yield {
+            "type": "progress",
+            "stage": "streaming_diffs",
+            "message": f"Analysing {len(key_diffs)} differences",
+            "total": len(key_diffs),
+        }
+
+        collected_rows: list[str] = []
+        skipped_count = 0
+        review_count = 0
+
+        for diff in key_diffs:
+            change_id = str(
+                (diff.doc1Reference.nodeId if diff.doc1Reference else None)
+                or (diff.doc2Reference.nodeId if diff.doc2Reference else None)
+                or id(diff)
+            )
+            section = (
+                (diff.doc1Reference.section if diff.doc1Reference else None)
+                or (diff.doc2Reference.section if diff.doc2Reference else None)
+                or diff.section
+                or "—"
+            )
+            page = (
+                (diff.doc1Reference.page if diff.doc1Reference else None)
+                or (diff.doc2Reference.page if diff.doc2Reference else None)
+            )
+            node_type = str(diff.nodeType or "clause")
+            doc1_source = diff.doc1Reference.sourceText if diff.doc1Reference else None
+            doc2_source = diff.doc2Reference.sourceText if diff.doc2Reference else None
+            doc1_preview = (doc1_source or "")[:120] or None
+            doc2_preview = (doc2_source or "")[:120] or None
+
+            yield {
+                "type": "diff_start",
+                "change_id": change_id,
+                "section": section,
+                "page": page,
+                "change_type": str(diff.changeType or "MODIFIED"),
+                "node_type": node_type,
+                "doc1_preview": doc1_preview,
+                "doc2_preview": doc2_preview,
+            }
+
+            tokens: list[str] = []
+            try:
+                async for token in self.llm.generate_diff_table_row_stream(
+                    section=section,
+                    page=page,
+                    change_type=str(diff.changeType or "MODIFIED"),
+                    node_type=node_type,
+                    doc1_text=doc1_source,
+                    doc2_text=doc2_source,
+                    testing_department=testing_department,
+                    language=language,
+                ):
+                    if token:
+                        tokens.append(token)
+                        yield {"type": "diff_token", "change_id": change_id, "token": token}
+            except Exception as exc:
+                logger.warning(
+                    "diff table row stream failed change_id=%s: %s", change_id, exc
+                )
+
+            full_text = "".join(tokens).strip()
+            skipped = (not full_text) or full_text.upper() == "SKIP"
+            requires_review = (
+                full_text.upper().startswith("HUMAN_REVIEW:")
+                or diff.requiresHumanReview
+            )
+
+            row_markdown = ""
+            if not skipped:
+                row_markdown = _build_table_row(
+                    section, page, str(diff.changeType or "MODIFIED"), full_text, requires_review
+                )
+                collected_rows.append(row_markdown)
+                if requires_review:
+                    review_count += 1
+            else:
+                skipped_count += 1
+
+            yield {
+                "type": "diff_complete",
+                "change_id": change_id,
+                "row_markdown": row_markdown,
+                "requires_review": requires_review,
+                "skipped": skipped,
+            }
+
+            if self.inter_diff_delay_ms > 0:
+                await asyncio.sleep(self.inter_diff_delay_ms / 1000.0)
+
+        # Assembled table
+        table_md = _assemble_table(collected_rows)
+        yield {
+            "type": "table_complete",
+            "markdown": table_md,
+            "rows_analyzed": len(collected_rows),
+            "rows_skipped": skipped_count,
+            "review_count": review_count,
+        }
+
+        # Stage 2 — aggregated summary
+        yield {"type": "progress", "stage": "summarizing", "message": "Generating summary"}
+        non_skipped_diffs = [
+            d for d in key_diffs
+            if not (
+                not (
+                    (d.doc1Reference.sourceText if d.doc1Reference else None)
+                    or (d.doc2Reference.sourceText if d.doc2Reference else None)
+                )
+            )
+        ]
+        try:
+            summary = await self.llm.summarize_changes(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                key_differences=non_skipped_diffs or key_diffs,
+                language=language,
+                testing_department=testing_department,
+            )
+        except Exception:
+            logger.exception("summary generation failed in compare_stream_v4")
+            summary = "No summary available."
+
+        yield {"type": "summary_token", "token": summary}
+        yield {"type": "summary_complete", "text": summary}
+
+        requires_human_review = review_count > 0 or any(
+            d.requiresHumanReview for d in key_diffs
+        )
+        yield {
+            "type": "done",
+            "total_diffs": len(key_diffs),
+            "analyzed": len(collected_rows),
+            "skipped": skipped_count,
+            "review_count": review_count,
+            "requires_human_review": requires_human_review,
+            "accuracy_metrics": accuracy_metrics.model_dump() if accuracy_metrics else None,
         }
 
     async def _make_modified(
