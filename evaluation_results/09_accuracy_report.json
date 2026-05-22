@@ -1,0 +1,501 @@
+{
+  "document_id": "61cb4489-6029-4e9c-8004-e3bea1f5957a",
+  "filename": "DIN EN 60068-2-64_2020.pdf",
+  "document_family": "din_en_60068",
+  "total_tables": 14,
+  "tables_classified": 11,
+  "emc_type_distribution": {
+    "radiated_immunity": 11,
+    "unknown": 3
+  },
+  "overall_fact_coverage": 0.2146422628951747,
+  "overall_row_key_coverage": 0.5862068965517241,
+  "overall_column_mapped_pct": 0.7317073170731707,
+  "total_normalized_facts": 129,
+  "table_metrics": [
+    {
+      "table_index": 0,
+      "caption": "Zusammenhang mit europäischen und internationalen Dokumenten",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 18,
+      "num_cols": 4,
+      "headers": [
+        "europäisches dokument",
+        "internationales dokument",
+        "deutsches dokument",
+        "klassifikation im vde vorschriftenwerk"
+      ],
+      "header_entity_types": [
+        "",
+        "",
+        "",
+        ""
+      ],
+      "column_mapped_pct": 0.0,
+      "data_cells_total": 69,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 0,
+      "row_key_coverage_pct": 0.0,
+      "fact_type_counts": {},
+      "sample_row_keys": []
+    },
+    {
+      "table_index": 1,
+      "caption": "Europäisches Vorwort zur Änderung A1",
+      "emc_test_type": "unknown",
+      "num_rows": 1,
+      "num_cols": 3,
+      "headers": [
+        "spätestes datum, zu dem dieses dokument auf nationaler ebene durch veröffentlichung einer identischen nationalen norm oder durch anerkennung übernommen werden muss (dop):",
+        "",
+        "2020 08 13"
+      ],
+      "header_entity_types": [
+        "",
+        "",
+        ""
+      ],
+      "column_mapped_pct": 0.0,
+      "data_cells_total": 3,
+      "data_cells_with_facts": 1,
+      "fact_bearing_cells_pct": 0.3333333333333333,
+      "rows_with_key": 0,
+      "row_key_coverage_pct": 0.0,
+      "fact_type_counts": {
+        "normative_term": 1
+      },
+      "sample_row_keys": []
+    },
+    {
+      "table_index": 2,
+      "caption": "Normative Verweisungen auf internationale Publikationen mit ihren entsprechenden",
+      "emc_test_type": "unknown",
+      "num_rows": 9,
+      "num_cols": 5,
+      "headers": [
+        "publikation",
+        "jahr",
+        "titel",
+        "en/hd",
+        "jahr"
+      ],
+      "header_entity_types": [
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "column_mapped_pct": 0.0,
+      "data_cells_total": 45,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 7,
+      "row_key_coverage_pct": 0.7777777777777778,
+      "fact_type_counts": {},
+      "sample_row_keys": [
+        ":::step_311",
+        ":::step_1",
+        ":::step_2"
+      ]
+    },
+    {
+      "table_index": 3,
+      "caption": "8.3 Geringe Anregung für eine Angleichung vor der Prüfung",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 2,
+      "num_cols": 3,
+      "headers": [
+        "unter -12db des spezifizierten effektiven beschleunigungspegels:",
+        "",
+        "keine zeitbegrenzung;"
+      ],
+      "header_entity_types": [
+        "FieldStrength",
+        "",
+        ""
+      ],
+      "column_mapped_pct": 0.3333333333333333,
+      "data_cells_total": 6,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 2,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {},
+      "sample_row_keys": [
+        "von_-12db_bis_-6db_des_spezifizierten_ef:von_-12db_bis_-6db_des_spezifizierten_ef:von_-12db_bis_-6db_des_spezifizierten_ef:von_-12db_bis_-6db_des_spezifizierten_ef:von_-12db_bis_-6db_des_spezifizierten_ef",
+        "zwischen_-6db_und_0db_des_spezifizierten:zwischen_-6db_und_0db_des_spezifizierten:zwischen_-6db_und_0db_des_spezifizierten:zwischen_-6db_und_0db_des_spezifizierten:zwischen_-6db_und_0db_des_spezifizierten"
+      ]
+    },
+    {
+      "table_index": 4,
+      "caption": "12  Angaben im Prüfbericht",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 19,
+      "num_cols": 3,
+      "headers": [
+        "1)",
+        "kunde",
+        "(name und adresse)"
+      ],
+      "header_entity_types": [
+        "",
+        "",
+        ""
+      ],
+      "column_mapped_pct": 0.0,
+      "data_cells_total": 53,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 0,
+      "row_key_coverage_pct": 0.0,
+      "fact_type_counts": {},
+      "sample_row_keys": []
+    },
+    {
+      "table_index": 5,
+      "caption": "A.1 Spektrum Transport",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 6,
+      "num_cols": 5,
+      "headers": [
+        "kategorie",
+        "beschreibung",
+        "prüfdauer je achse (vorschlag)",
+        "achsen",
+        "spezifikation"
+      ],
+      "header_entity_types": [
+        "ImmunityLevel",
+        "Phenomenon",
+        "NumericLimit",
+        "NumericLimit",
+        "NormativeTerm"
+      ],
+      "column_mapped_pct": 1.0,
+      "data_cells_total": 25,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 6,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {},
+      "sample_row_keys": [
+        "lkw_transport_auf_us_highways,_verzurrte",
+        "vertikal",
+        "horizontal"
+      ]
+    },
+    {
+      "table_index": 6,
+      "caption": "A.1 Spektrum Transport",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 5,
+      "num_cols": 9,
+      "headers": [
+        "kategorie",
+        "f 1",
+        "asd f 1",
+        "f a",
+        "f b",
+        "asd f a, f b",
+        "f 2",
+        "asd f 2",
+        "a effektiv 2"
+      ],
+      "header_entity_types": [
+        "ImmunityLevel",
+        "FrequencyRange",
+        "NumericLimit",
+        "FrequencyRange",
+        "FrequencyRange",
+        "",
+        "FrequencyRange",
+        "NumericLimit",
+        "FieldStrength"
+      ],
+      "column_mapped_pct": 0.8888888888888888,
+      "data_cells_total": 45,
+      "data_cells_with_facts": 19,
+      "fact_bearing_cells_pct": 0.4222222222222222,
+      "rows_with_key": 5,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {
+        "frequency_range": 19
+      },
+      "sample_row_keys": [
+        "500",
+        "500",
+        "500"
+      ]
+    },
+    {
+      "table_index": 7,
+      "caption": "A.2 Spektrum Ortsfester Einsatz",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 5,
+      "num_cols": 5,
+      "headers": [
+        "kategorie",
+        "beschreibung",
+        "prüfdauer je achse (vorschlag)",
+        "achsen",
+        "spezifikation"
+      ],
+      "header_entity_types": [
+        "ImmunityLevel",
+        "Phenomenon",
+        "NumericLimit",
+        "NumericLimit",
+        "NormativeTerm"
+      ],
+      "column_mapped_pct": 1.0,
+      "data_cells_total": 16,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 5,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {},
+      "sample_row_keys": [
+        "telekommunikations_ausrüstung,_ortsfeste",
+        "anmerkung_ortsfest_genutzte_geräte_wie_z",
+        "telekommunikations_ausrüstung,_ortsfeste"
+      ]
+    },
+    {
+      "table_index": 8,
+      "caption": "A.2 Spektrum Ortsfester Einsatz",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 4,
+      "num_cols": 9,
+      "headers": [
+        "kategorie",
+        "f 1",
+        "asd f 1",
+        "f a",
+        "f b",
+        "asd f a, f b",
+        "f 2",
+        "asd f 2",
+        "a effektiv"
+      ],
+      "header_entity_types": [
+        "ImmunityLevel",
+        "FrequencyRange",
+        "NumericLimit",
+        "FrequencyRange",
+        "FrequencyRange",
+        "",
+        "FrequencyRange",
+        "NumericLimit",
+        "FieldStrength"
+      ],
+      "column_mapped_pct": 0.8888888888888888,
+      "data_cells_total": 36,
+      "data_cells_with_facts": 12,
+      "fact_bearing_cells_pct": 0.3333333333333333,
+      "rows_with_key": 4,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {
+        "frequency_range": 12
+      },
+      "sample_row_keys": [
+        "hz",
+        "100",
+        "100"
+      ]
+    },
+    {
+      "table_index": 9,
+      "caption": "A.3 Spektrum Ausrüstung in Radfahrzeugen",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 13,
+      "num_cols": 5,
+      "headers": [
+        "kategorie",
+        "beschreibung",
+        "prüfdauer je achse (vorschlag)",
+        "achsen",
+        "spezifikation"
+      ],
+      "header_entity_types": [
+        "ImmunityLevel",
+        "Phenomenon",
+        "NumericLimit",
+        "NumericLimit",
+        "NormativeTerm"
+      ],
+      "column_mapped_pct": 1.0,
+      "data_cells_total": 45,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 13,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {},
+      "sample_row_keys": [
+        "kraftfahrzeug,_chassismontage",
+        "kraftfahrzeug,_einbaubereich_motorraum,_",
+        "vertikal"
+      ]
+    },
+    {
+      "table_index": 10,
+      "caption": "Tabelle A.5 (2 von 2)",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 4,
+      "num_cols": 5,
+      "headers": [
+        "kategorie",
+        "beschreibung",
+        "prüfdauer je achse (vorschlag)",
+        "achsen",
+        "spezifikation"
+      ],
+      "header_entity_types": [
+        "ImmunityLevel",
+        "Phenomenon",
+        "NumericLimit",
+        "NumericLimit",
+        "NormativeTerm"
+      ],
+      "column_mapped_pct": 1.0,
+      "data_cells_total": 14,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 4,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {},
+      "sample_row_keys": [
+        "schienenfahrzeuge,_montage_an_der_achse,",
+        "vertikal",
+        "horizontal_longitudinal"
+      ]
+    },
+    {
+      "table_index": 11,
+      "caption": "Tabelle A.6 - Überkreuzungspunkte für das Spektrum Ausrüstung in Radfahrzeugen",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 13,
+      "num_cols": 9,
+      "headers": [
+        "kategorie",
+        "f 1",
+        "asd f 1",
+        "f a",
+        "f b",
+        "asd f a, f b",
+        "f 2",
+        "asd f 2",
+        "a effektiv"
+      ],
+      "header_entity_types": [
+        "ImmunityLevel",
+        "FrequencyRange",
+        "NumericLimit",
+        "FrequencyRange",
+        "FrequencyRange",
+        "",
+        "FrequencyRange",
+        "NumericLimit",
+        "FieldStrength"
+      ],
+      "column_mapped_pct": 0.8888888888888888,
+      "data_cells_total": 117,
+      "data_cells_with_facts": 55,
+      "fact_bearing_cells_pct": 0.4700854700854701,
+      "rows_with_key": 13,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {
+        "frequency_range": 52,
+        "field_strength": 3
+      },
+      "sample_row_keys": [
+        "1000",
+        "200",
+        "200"
+      ]
+    },
+    {
+      "table_index": 12,
+      "caption": "A.4 Spektrum Ausrüstung in Flugzeugen und Hubschraubern",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 9,
+      "num_cols": 5,
+      "headers": [
+        "kategorie",
+        "beschreibung",
+        "prüfdauer je achse (vorschlag)",
+        "achsen",
+        "spezifikation"
+      ],
+      "header_entity_types": [
+        "ImmunityLevel",
+        "Phenomenon",
+        "NumericLimit",
+        "NumericLimit",
+        "NormativeTerm"
+      ],
+      "column_mapped_pct": 1.0,
+      "data_cells_total": 31,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 9,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {},
+      "sample_row_keys": [
+        "starrflügler_strahltriebwerke_(unter-_un",
+        "flugzeugrumpf_anmerkung_rumpf,_außer_tra",
+        "flugzeugrumpf_anmerkung_rumpf,_außer_tra"
+      ]
+    },
+    {
+      "table_index": 13,
+      "caption": "A.4 Spektrum Ausrüstung in Flugzeugen und Hubschraubern",
+      "emc_test_type": "unknown",
+      "num_rows": 8,
+      "num_cols": 12,
+      "headers": [
+        "kat.",
+        "f 1",
+        "asd f 1",
+        "f a",
+        "f b",
+        "asd f a, f b",
+        "f c",
+        "f d",
+        "asd f c, f d",
+        "f 2",
+        "asd f 2",
+        "a effektiv"
+      ],
+      "header_entity_types": [
+        "ImmunityLevel",
+        "FrequencyRange",
+        "NumericLimit",
+        "FrequencyRange",
+        "FrequencyRange",
+        "",
+        "FrequencyRange",
+        "FrequencyRange",
+        "",
+        "FrequencyRange",
+        "NumericLimit",
+        "FieldStrength"
+      ],
+      "column_mapped_pct": 0.8333333333333334,
+      "data_cells_total": 96,
+      "data_cells_with_facts": 42,
+      "fact_bearing_cells_pct": 0.4375,
+      "rows_with_key": 0,
+      "row_key_coverage_pct": 0.0,
+      "fact_type_counts": {
+        "frequency_range": 42
+      },
+      "sample_row_keys": []
+    }
+  ],
+  "table_source_distribution": {
+    "docling": 14
+  },
+  "errors": []
+}

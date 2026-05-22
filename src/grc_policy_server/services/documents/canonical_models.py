@@ -221,7 +221,7 @@ class CanonicalNode:
             "action": str(metadata.get("action") or ""),
             "object": str(metadata.get("object") or ""),
             "condition": str(metadata.get("condition") or ""),
-            "markdown_text": str(metadata.get("markdown_text") or metadata.get("table_markdown") or ""),
+            "markdown_text": str(metadata.get("markdown_text") or ""),
             "normalized_table_text": str(metadata.get("comparison_text") or "") if self.node_type == "table" else "",
             "comparison_profile": str(metadata.get("comparison_profile") or ""),
             "importance_score": float(metadata.get("importance_score") or 0.0),
@@ -237,6 +237,8 @@ class CanonicalNode:
             "table_normalized_caption": str(metadata.get("normalized_caption") or ""),
             "canonical_metadata": metadata,
             "pure_text_hash": _pure_text_hash(self.raw_text or ""),
+            "formula_latex": str(metadata.get("formula_latex") or ""),
+            "node_type_hint": str(metadata.get("node_type_hint") or ""),
         }
 
 

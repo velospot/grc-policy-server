@@ -7,7 +7,31 @@ and maritime EMC requirements (DNV CG-0339).
 
 from __future__ import annotations
 
+import re
+
 from grc_policy_server.services.ingestion.ontology.emc_ontology import OntologyEntityType
+
+
+def _ocr_normalize(h: str) -> str:
+    """Repair common OCR artifacts in header text before dictionary lookup.
+
+    Handles:
+    - Digit-0 substituted for ö between letters: "pr0ffeldstärke" → "proffeldstärke"
+      (then the partial match catches "feldstärke")
+    - Hyphenation artifacts: "prüf- schärfe" → "prüfschärfe"
+    - ú/ů typed instead of ü (common with some OCR engines on German umlauts)
+    - Umlaut written as digraph: "ue"→"ü", "ae"→"ä", "oe"→"ö" in the
+      specific context of known German word fragments
+    """
+    # Fuse soft-hyphen word breaks: "prüf- schärfe" → "prüfschärfe"
+    h = re.sub(r"-\s+", "", h)
+    # OCR digit-0 for letter-o between word characters: "pr0f" → "prof"
+    h = re.sub(r"(?<=[a-zäöüß])0(?=[a-zäöüß])", "o", h)
+    # Latin confusables for ü: ú, ů (common in Czech/Slovak OCR bleed)
+    h = h.replace("ú", "ü").replace("ů", "ü")
+    # "ln" misread for "in" in db column headers: "lb(μa)" → "in" context
+    h = re.sub(r"\bln\b", "in", h)
+    return h
 
 # Maps normalized (lowercased, stripped) header text → OntologyEntityType
 HEADER_TO_ENTITY: dict[str, OntologyEntityType] = {
@@ -207,6 +231,54 @@ HEADER_TO_ENTITY: dict[str, OntologyEntityType] = {
     "quasi-peak": OntologyEntityType.EMISSION_LIMIT,
     "average": OntologyEntityType.EMISSION_LIMIT,
     # -----------------------------------------------------------------------
+    # TL 81000 additional — test-setup / modulation parameters
+    # -----------------------------------------------------------------------
+    "modulation": OntologyEntityType.TEST_METHOD,
+    "polarisation": OntologyEntityType.TEST_METHOD,
+    "prüfstrom": OntologyEntityType.FIELD_STRENGTH,
+    "prüfstrom in db(µa)": OntologyEntityType.FIELD_STRENGTH,
+    "prüfstrom in db(ua)": OntologyEntityType.FIELD_STRENGTH,
+    "prüfstrom in db": OntologyEntityType.FIELD_STRENGTH,
+    "einwirkzeit": OntologyEntityType.NUMERIC_LIMIT,
+    "einwirkzeit in ms": OntologyEntityType.NUMERIC_LIMIT,
+    "einwirkzeit in s": OntologyEntityType.NUMERIC_LIMIT,
+    "antennenhöhe": OntologyEntityType.TEST_METHOD,
+    "antennenhöhe in m": OntologyEntityType.TEST_METHOD,
+    "prüfumfang": OntologyEntityType.PHENOMENON,
+    "ankopplungspfad": OntologyEntityType.TEST_METHOD,
+    # Frequency range with "in mhz" / "in khz" suffix (multi-row header fragments)
+    "frequenzbereich in mhz": OntologyEntityType.FREQUENCY_RANGE,
+    "frequenzbereich in khz": OntologyEntityType.FREQUENCY_RANGE,
+    "frequenzbereich in hz": OntologyEntityType.FREQUENCY_RANGE,
+    "frequenz in mhz": OntologyEntityType.FREQUENCY_RANGE,
+    "frequenz in khz": OntologyEntityType.FREQUENCY_RANGE,
+    # -----------------------------------------------------------------------
+    # DIN EN 60068 environmental — climate, humidity, thermal columns
+    # -----------------------------------------------------------------------
+    "temperaturbereich": OntologyEntityType.NUMERIC_LIMIT,
+    "temperaturverlauf": OntologyEntityType.NUMERIC_LIMIT,
+    "temperatur untere grenze": OntologyEntityType.NUMERIC_LIMIT,
+    "temperatur obere grenze": OntologyEntityType.NUMERIC_LIMIT,
+    "grenzabweichungen der temperatur": OntologyEntityType.NUMERIC_LIMIT,
+    "feuchte untere grenze": OntologyEntityType.NUMERIC_LIMIT,
+    "feuchte obere grenze": OntologyEntityType.NUMERIC_LIMIT,
+    "grenzabweichungen der feuchte": OntologyEntityType.NUMERIC_LIMIT,
+    "relative feuchte": OntologyEntityType.NUMERIC_LIMIT,
+    "relative humidity": OntologyEntityType.NUMERIC_LIMIT,
+    "humidity": OntologyEntityType.NUMERIC_LIMIT,
+    "temperature": OntologyEntityType.NUMERIC_LIMIT,
+    "temperatur": OntologyEntityType.NUMERIC_LIMIT,
+    # -----------------------------------------------------------------------
+    # DNV CG-0339 additional maritime columns
+    # -----------------------------------------------------------------------
+    "frequency band": OntologyEntityType.FREQUENCY_RANGE,
+    "level at antenna": OntologyEntityType.FIELD_STRENGTH,
+    "applicable for": OntologyEntityType.ACCEPTANCE_CRITERION,
+    "applicable": OntologyEntityType.ACCEPTANCE_CRITERION,
+    "antenna height": OntologyEntityType.TEST_METHOD,
+    "distance": OntologyEntityType.TEST_METHOD,
+    "modulation type": OntologyEntityType.TEST_METHOD,
+    # -----------------------------------------------------------------------
     # Test / sequence number (row-index column) — German + English + generic
     # Index-only columns that carry no physical unit; mapped to TEST_NUMBER so
     # that column-unit inheritance does not synthesise spurious NormalizedFacts
@@ -251,27 +323,37 @@ def map_header(raw_header: str) -> OntologyEntityType | None:
     normalized = raw_header.strip().lower()
     if not normalized:
         return None
-    # Direct lookup
-    result = HEADER_TO_ENTITY.get(normalized)
-    if result is not None:
-        return result
-    # De-hyphenated direct lookup: "grenz-" → "grenz"
-    if normalized.endswith("-"):
-        de_hyph = normalized.rstrip("-").strip()
-        result = HEADER_TO_ENTITY.get(de_hyph)
+
+    def _lookup(h: str) -> OntologyEntityType | None:
+        # Direct lookup
+        result = HEADER_TO_ENTITY.get(h)
         if result is not None:
             return result
-    # Partial match: only apply when both strings are long enough to avoid false
-    # positives from unit fragments like "khz", "in", "bw" matching long keys.
-    if len(normalized) >= _MIN_PARTIAL_MATCH_LEN:
-        for key, entity in HEADER_TO_ENTITY.items():
-            if len(key) >= _MIN_PARTIAL_MATCH_LEN and (key in normalized or normalized in key):
-                return entity
-    # De-hyphenated partial match (same length guard)
-    if normalized.endswith("-"):
-        de_hyph = normalized.rstrip("-").strip()
-        if len(de_hyph) >= _MIN_PARTIAL_MATCH_LEN:
+        # De-hyphenated direct lookup: "grenz-" → "grenz"
+        if h.endswith("-"):
+            de_hyph = h.rstrip("-").strip()
+            result = HEADER_TO_ENTITY.get(de_hyph)
+            if result is not None:
+                return result
+        # Partial match (both strings long enough to avoid unit-fragment false positives)
+        if len(h) >= _MIN_PARTIAL_MATCH_LEN:
             for key, entity in HEADER_TO_ENTITY.items():
-                if len(key) >= _MIN_PARTIAL_MATCH_LEN and (key in de_hyph or de_hyph in key):
+                if len(key) >= _MIN_PARTIAL_MATCH_LEN and (key in h or h in key):
                     return entity
+        # De-hyphenated partial match
+        if h.endswith("-"):
+            de_hyph = h.rstrip("-").strip()
+            if len(de_hyph) >= _MIN_PARTIAL_MATCH_LEN:
+                for key, entity in HEADER_TO_ENTITY.items():
+                    if len(key) >= _MIN_PARTIAL_MATCH_LEN and (key in de_hyph or de_hyph in key):
+                        return entity
+        return None
+
+    result = _lookup(normalized)
+    if result is not None:
+        return result
+    # Fallback: OCR-normalized form (repairs common scan artifacts before retry)
+    ocr_fixed = _ocr_normalize(normalized)
+    if ocr_fixed != normalized:
+        return _lookup(ocr_fixed)
     return None

@@ -1,25 +1,24 @@
 {
-  "document_id": "57918453-a669-4022-82e2-bef91d8fd608",
+  "document_id": "79f81b22-d051-4f09-93a3-52f1d81aa250",
   "filename": "DNVGL-CG-0339_Dez_2019.pdf",
   "document_family": "dnv_cg_0339",
-  "total_tables": 33,
-  "tables_classified": 24,
+  "total_tables": 32,
+  "tables_classified": 23,
   "emc_type_distribution": {
-    "radiated_immunity": 12,
+    "radiated_immunity": 9,
     "maritime_installation": 2,
+    "conducted_emissions": 10,
     "unknown": 9,
-    "conducted_emissions": 8,
-    "safety:thermal": 1,
-    "esd": 1
+    "transient_immunity": 2
   },
-  "overall_fact_coverage": 0.1422680412371134,
-  "overall_row_key_coverage": 0.28292682926829266,
-  "overall_column_mapped_pct": 0.7204301075268817,
-  "total_normalized_facts": 88,
+  "overall_fact_coverage": 0.12572533849129594,
+  "overall_row_key_coverage": 0.30939226519337015,
+  "overall_column_mapped_pct": 0.6352941176470588,
+  "total_normalized_facts": 75,
   "table_metrics": [
     {
       "table_index": 0,
-      "caption": "Changes December 2019",
+      "caption": "Changes December 2019",
       "emc_test_type": "radiated_immunity",
       "num_rows": 3,
       "num_cols": 3,
@@ -46,9 +45,34 @@
     },
     {
       "table_index": 1,
-      "caption": "Table 1 Abbreviations",
+      "caption": "5.1 Abbreviations",
       "emc_test_type": "radiated_immunity",
-      "num_rows": 38,
+      "num_rows": 1,
+      "num_cols": 3,
+      "headers": [
+        "abbreviation",
+        "column_2",
+        "description"
+      ],
+      "header_entity_types": [
+        "",
+        "",
+        ""
+      ],
+      "column_mapped_pct": 0.0,
+      "data_cells_total": 2,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 0,
+      "row_key_coverage_pct": 0.0,
+      "fact_type_counts": {},
+      "sample_row_keys": []
+    },
+    {
+      "table_index": 2,
+      "caption": "5.1 Abbreviations",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 33,
       "num_cols": 2,
       "headers": [
         "abbreviation",
@@ -59,40 +83,7 @@
         ""
       ],
       "column_mapped_pct": 0.0,
-      "data_cells_total": 76,
-      "data_cells_with_facts": 0,
-      "fact_bearing_cells_pct": 0.0,
-      "rows_with_key": 0,
-      "row_key_coverage_pct": 0.0,
-      "fact_type_counts": {},
-      "sample_row_keys": []
-    },
-    {
-      "table_index": 2,
-      "caption": "Guidance note:",
-      "emc_test_type": "maritime_installation",
-      "num_rows": 11,
-      "num_cols": 7,
-      "headers": [
-        "column i parameters",
-        "column i",
-        "column ii main areas on board",
-        "column ii",
-        "column ii",
-        "column ii",
-        "column ii"
-      ],
-      "header_entity_types": [
-        "Phenomenon",
-        "",
-        "",
-        "",
-        "",
-        "",
-        ""
-      ],
-      "column_mapped_pct": 0.14285714285714285,
-      "data_cells_total": 55,
+      "data_cells_total": 66,
       "data_cells_with_facts": 0,
       "fact_bearing_cells_pct": 0.0,
       "rows_with_key": 0,
@@ -102,9 +93,40 @@
     },
     {
       "table_index": 3,
-      "caption": "Table 2 Tests with severity levels depending on intended location on board",
+      "caption": "Guidance note:",
+      "emc_test_type": "maritime_installation",
+      "num_rows": 10,
+      "num_cols": 6,
+      "headers": [
+        "column i",
+        "column i",
+        "column i",
+        "column ii main areas on board",
+        "column ii",
+        "column ii"
+      ],
+      "header_entity_types": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "column_mapped_pct": 0.0,
+      "data_cells_total": 58,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
+      "rows_with_key": 0,
+      "row_key_coverage_pct": 0.0,
+      "fact_type_counts": {},
+      "sample_row_keys": []
+    },
+    {
+      "table_index": 4,
+      "caption": "Guidance note:",
       "emc_test_type": "radiated_immunity",
-      "num_rows": 4,
+      "num_rows": 25,
       "num_cols": 5,
       "headers": [
         "parameters",
@@ -121,59 +143,24 @@
         "ImmunityLevel"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 17,
-      "data_cells_with_facts": 0,
-      "fact_bearing_cells_pct": 0.0,
-      "rows_with_key": 4,
-      "row_key_coverage_pct": 1.0,
-      "fact_type_counts": {},
+      "data_cells_total": 117,
+      "data_cells_with_facts": 3,
+      "fact_bearing_cells_pct": 0.02564102564102564,
+      "rows_with_key": 18,
+      "row_key_coverage_pct": 0.72,
+      "fact_type_counts": {
+        "frequency_range": 6
+      },
       "sample_row_keys": [
         "machinery_spaces,_control_rooms,_accommo:a",
-        "inside_cubicles,_desks,_etc._with_temper:b",
+        "inside_cubicles,_desks,_ambient_temperat:b_etc._with_temperature_rise_of_5o_c_or_",
         "pump_rooms,_holds,_rooms_with_no_heating:c"
       ]
     },
     {
-      "table_index": 4,
-      "caption": "Table 2 Tests with severity levels depending on intended location on board",
-      "emc_test_type": "radiated_immunity",
-      "num_rows": 26,
-      "num_cols": 6,
-      "headers": [
-        "parameters humidity",
-        "class a",
-        "location locations where special precautions are taken to avoid condensation",
-        "minimum equipment specification relative humidity up to 96% at all relevant temperatures",
-        "minimum equipment specification",
-        "minimum test level test sec.3 [8.2] (no condensation)"
-      ],
-      "header_entity_types": [
-        "Phenomenon",
-        "AcceptanceCriterion",
-        "Phenomenon",
-        "NormativeTerm",
-        "NormativeTerm",
-        "FieldStrength"
-      ],
-      "column_mapped_pct": 1.0,
-      "data_cells_total": 77,
-      "data_cells_with_facts": 3,
-      "fact_bearing_cells_pct": 0.03896103896103896,
-      "rows_with_key": 11,
-      "row_key_coverage_pct": 0.4230769230769231,
-      "fact_type_counts": {
-        "frequency_range": 7
-      },
-      "sample_row_keys": [
-        "locations_where_special_precautions_are_:a",
-        "all_other_locations:b",
-        "on_bulkheads,_beams,_deck,_bridge:a"
-      ]
-    },
-    {
       "table_index": 5,
-      "caption": "Table 3 Tests with severity level independent of location on board",
-      "emc_test_type": "radiated_immunity",
+      "caption": "Guidance note:",
+      "emc_test_type": "conducted_emissions",
       "num_rows": 6,
       "num_cols": 2,
       "headers": [
@@ -195,13 +182,13 @@
     },
     {
       "table_index": 6,
-      "caption": "1.2 Normal ambient conditions",
+      "caption": "Table 1 Normal ambient conditions",
       "emc_test_type": "radiated_immunity",
       "num_rows": 5,
       "num_cols": 2,
       "headers": [
         "temperature",
-        "t n = 20°c ± 2°c. temperatures between 15°c and 35°c may be accepted provided selected temperature is kept constant within ±2°c during all tests and actual temperature is stated in the test report."
+        "t$_{n}$ = 20°c ± 2°c. temperatures between 15°c and 35°c may be accepted provided selected temperature is kept constant within ±2°c during all tests and actual temperature is stated in the test report ."
       ],
       "header_entity_types": [
         "NumericLimit",
@@ -218,7 +205,7 @@
     },
     {
       "table_index": 7,
-      "caption": "5.2 Test levels",
+      "caption": "5.2 Test levels",
       "emc_test_type": "unknown",
       "num_rows": 7,
       "num_cols": 3,
@@ -233,7 +220,7 @@
         "FrequencyRange"
       ],
       "column_mapped_pct": 0.6666666666666666,
-      "data_cells_total": 20,
+      "data_cells_total": 21,
       "data_cells_with_facts": 0,
       "fact_bearing_cells_pct": 0.0,
       "rows_with_key": 1,
@@ -245,8 +232,8 @@
     },
     {
       "table_index": 8,
-      "caption": "Table 3 Electrical supply (direct voltage), battery power supply",
-      "emc_test_type": "radiated_immunity",
+      "caption": "5.2 Test levels",
+      "emc_test_type": "unknown",
       "num_rows": 2,
       "num_cols": 2,
       "headers": [
@@ -268,8 +255,8 @@
     },
     {
       "table_index": 9,
-      "caption": "Table 3 Electrical supply (direct voltage), battery power supply",
-      "emc_test_type": "radiated_immunity",
+      "caption": "5.2 Test levels",
+      "emc_test_type": "unknown",
       "num_rows": 2,
       "num_cols": 2,
       "headers": [
@@ -291,7 +278,7 @@
     },
     {
       "table_index": 10,
-      "caption": "Table 5 Wide band random and sweep sine tests",
+      "caption": "6.1 Definitions",
       "emc_test_type": "radiated_immunity",
       "num_rows": 1,
       "num_cols": 2,
@@ -316,7 +303,7 @@
     },
     {
       "table_index": 11,
-      "caption": "Table 6 General vibration strain, class A",
+      "caption": "6.2.4 Test levels",
       "emc_test_type": "conducted_emissions",
       "num_rows": 3,
       "num_cols": 3,
@@ -331,23 +318,23 @@
         "FieldStrength"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 6,
+      "data_cells_total": 9,
       "data_cells_with_facts": 2,
-      "fact_bearing_cells_pct": 0.3333333333333333,
+      "fact_bearing_cells_pct": 0.2222222222222222,
       "rows_with_key": 3,
       "row_key_coverage_pct": 1.0,
       "fact_type_counts": {
-        "frequency_range": 3
+        "frequency_range": 4
       },
       "sample_row_keys": [
-        "hz_to_13.2hz",
+        "2+3_0hz_to_13.2hz",
         "13.2hz_to_100hz",
         "sweep_rate"
       ]
     },
     {
       "table_index": 12,
-      "caption": "Table 7 High vibration strain, class B",
+      "caption": "Table 7 High vibration strain, class B",
       "emc_test_type": "conducted_emissions",
       "num_rows": 3,
       "num_cols": 3,
@@ -362,23 +349,23 @@
         "FieldStrength"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 6,
+      "data_cells_total": 9,
       "data_cells_with_facts": 2,
-      "fact_bearing_cells_pct": 0.3333333333333333,
+      "fact_bearing_cells_pct": 0.2222222222222222,
       "rows_with_key": 3,
       "row_key_coverage_pct": 1.0,
       "fact_type_counts": {
         "frequency_range": 3
       },
       "sample_row_keys": [
-        "hz_to_25hz",
+        "2+3_$_{0}$_hz_to_25hz",
         "25hz_to_100hz",
         "sweep_rate"
       ]
     },
     {
       "table_index": 13,
-      "caption": "Table 8 Vibration strain on masts, class C",
+      "caption": "Table 8 Vibration strain on masts, class C",
       "emc_test_type": "maritime_installation",
       "num_rows": 3,
       "num_cols": 3,
@@ -393,9 +380,9 @@
         "FieldStrength"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 6,
+      "data_cells_total": 9,
       "data_cells_with_facts": 2,
-      "fact_bearing_cells_pct": 0.3333333333333333,
+      "fact_bearing_cells_pct": 0.2222222222222222,
       "rows_with_key": 0,
       "row_key_coverage_pct": 0.0,
       "fact_type_counts": {
@@ -405,7 +392,7 @@
     },
     {
       "table_index": 14,
-      "caption": "Table 9 Extreme vibration strain",
+      "caption": "Table 9 Extreme vibration strain",
       "emc_test_type": "conducted_emissions",
       "num_rows": 2,
       "num_cols": 3,
@@ -420,9 +407,9 @@
         "FieldStrength"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 5,
+      "data_cells_total": 6,
       "data_cells_with_facts": 1,
-      "fact_bearing_cells_pct": 0.2,
+      "fact_bearing_cells_pct": 0.16666666666666666,
       "rows_with_key": 2,
       "row_key_coverage_pct": 1.0,
       "fact_type_counts": {
@@ -435,13 +422,13 @@
     },
     {
       "table_index": 15,
-      "caption": "Table 10 Tolerances",
+      "caption": "6.3.3 Tolerances",
       "emc_test_type": "conducted_emissions",
       "num_rows": 1,
       "num_cols": 2,
       "headers": [
         "psd",
-        "± 4db with bandwidthtimeproduct of minimum 300 with frequency resolution of 1/250of maximum frequency"
+        "± 4db with bandwidth time product of minimum 300 with frequency resolution of 1/250of maximum frequency"
       ],
       "header_entity_types": [
         "NumericLimit",
@@ -460,7 +447,7 @@
     },
     {
       "table_index": 16,
-      "caption": "Table 11 Upper test levels according to temperature class",
+      "caption": "7.2.4 Test levels",
       "emc_test_type": "unknown",
       "num_rows": 4,
       "num_cols": 3,
@@ -485,34 +472,32 @@
     },
     {
       "table_index": 17,
-      "caption": "9.2.4 Test levels",
-      "emc_test_type": "safety:thermal",
-      "num_rows": 4,
+      "caption": "9.2.4 Test levels",
+      "emc_test_type": "unknown",
+      "num_rows": 3,
       "num_cols": 3,
       "headers": [
-        "temperature",
+        "column_1",
         "class a",
-        "+5°c"
+        "+5oc"
       ],
       "header_entity_types": [
-        "NumericLimit",
+        "",
         "AcceptanceCriterion",
         ""
       ],
-      "column_mapped_pct": 0.6666666666666666,
-      "data_cells_total": 8,
-      "data_cells_with_facts": 4,
-      "fact_bearing_cells_pct": 0.5,
+      "column_mapped_pct": 0.3333333333333333,
+      "data_cells_total": 7,
+      "data_cells_with_facts": 0,
+      "fact_bearing_cells_pct": 0.0,
       "rows_with_key": 0,
       "row_key_coverage_pct": 0.0,
-      "fact_type_counts": {
-        "temperature_limit": 4
-      },
+      "fact_type_counts": {},
       "sample_row_keys": []
     },
     {
       "table_index": 18,
-      "caption": "Table 13 Test conditions",
+      "caption": "10.3 Test conditions",
       "emc_test_type": "unknown",
       "num_rows": 6,
       "num_cols": 2,
@@ -537,7 +522,7 @@
     },
     {
       "table_index": 19,
-      "caption": "Table 14 Dynamic test levels",
+      "caption": "11.2 Test levels",
       "emc_test_type": "unknown",
       "num_rows": 2,
       "num_cols": 2,
@@ -560,7 +545,7 @@
     },
     {
       "table_index": 20,
-      "caption": "Table 15 Static test levels",
+      "caption": "Table 15 Static test levels",
       "emc_test_type": "unknown",
       "num_rows": 1,
       "num_cols": 2,
@@ -583,23 +568,21 @@
     },
     {
       "table_index": 21,
-      "caption": "12.2.2 Tests",
+      "caption": "Table 16 Minimum insulation resistance",
       "emc_test_type": "conducted_emissions",
       "num_rows": 2,
-      "num_cols": 4,
+      "num_cols": 3,
       "headers": [
-        "rated supply voltage",
-        "test voltage d.c.",
-        "minimum insulation resistance test a",
-        "minimum insulation resistance test b"
+        "rated supply voltage test voltage d.c.",
+        "minimum insulation resistance",
+        "minimum insulation resistance test a"
       ],
       "header_entity_types": [
-        "FieldStrength",
         "FieldStrength",
         "",
         ""
       ],
-      "column_mapped_pct": 0.5,
+      "column_mapped_pct": 0.3333333333333333,
       "data_cells_total": 6,
       "data_cells_with_facts": 2,
       "fact_bearing_cells_pct": 0.3333333333333333,
@@ -612,12 +595,12 @@
     },
     {
       "table_index": 22,
-      "caption": "Table 17 High voltage test level",
+      "caption": "13.1.2 Test levels",
       "emc_test_type": "unknown",
       "num_rows": 5,
       "num_cols": 2,
       "headers": [
-        "rated voltage u n (v)",
+        "rated voltage u$_{n}$ (v)",
         "test voltage (v) ac"
       ],
       "header_entity_types": [
@@ -637,13 +620,13 @@
     },
     {
       "table_index": 23,
-      "caption": "Table 18 AC 50/60 Hz supply voltage",
-      "emc_test_type": "unknown",
+      "caption": "14.4.2 Performance test",
+      "emc_test_type": "conducted_emissions",
       "num_rows": 5,
       "num_cols": 2,
       "headers": [
         "frequency sweep range (hz)",
-        "test voltage: %of u n, min: 3v r.m.s. max. power: 2w"
+        "test voltage: % of u$_{n}$ min: 3v r.m.s. max. power: 2w"
       ],
       "header_entity_types": [
         "FrequencyRange",
@@ -653,19 +636,21 @@
       "data_cells_total": 10,
       "data_cells_with_facts": 1,
       "fact_bearing_cells_pct": 0.1,
-      "rows_with_key": 1,
-      "row_key_coverage_pct": 0.2,
+      "rows_with_key": 5,
+      "row_key_coverage_pct": 1.0,
       "fact_type_counts": {
         "frequency_range": 1
       },
       "sample_row_keys": [
-        ":::step_s"
+        "up_to_15$^{th}$_harmonics",
+        "15$^{th}$_to_100$^{th}$_harmonics",
+        "100$^{th}$_to_200$^{th}$_harmonics"
       ]
     },
     {
       "table_index": 24,
-      "caption": "Table 19 DC supply voltage",
-      "emc_test_type": "unknown",
+      "caption": "14.4.2 Performance test",
+      "emc_test_type": "conducted_emissions",
       "num_rows": 2,
       "num_cols": 2,
       "headers": [
@@ -680,18 +665,19 @@
       "data_cells_total": 4,
       "data_cells_with_facts": 0,
       "fact_bearing_cells_pct": 0.0,
-      "rows_with_key": 1,
-      "row_key_coverage_pct": 0.5,
+      "rows_with_key": 2,
+      "row_key_coverage_pct": 1.0,
       "fact_type_counts": {},
       "sample_row_keys": [
-        "1.5"
+        "signal_level",
+        "sweep_rate"
       ]
     },
     {
       "table_index": 25,
-      "caption": "14.5.1 Test procedure",
-      "emc_test_type": "conducted_emissions",
-      "num_rows": 11,
+      "caption": "Table 20 Fast transient signal test level",
+      "emc_test_type": "transient_immunity",
+      "num_rows": 12,
       "num_cols": 2,
       "headers": [
         "test levels single pulse time",
@@ -708,16 +694,16 @@
       "rows_with_key": 0,
       "row_key_coverage_pct": 0.0,
       "fact_type_counts": {
-        "field_strength": 2,
+        "field_strength": 1,
         "frequency_range": 1
       },
       "sample_row_keys": []
     },
     {
       "table_index": 26,
-      "caption": "14.6.1 Test procedure",
-      "emc_test_type": "conducted_emissions",
-      "num_rows": 7,
+      "caption": "Table 21 Slow transient signal test levels",
+      "emc_test_type": "transient_immunity",
+      "num_rows": 6,
       "num_cols": 2,
       "headers": [
         "test levels pulse",
@@ -728,9 +714,9 @@
         "FieldStrength"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 13,
+      "data_cells_total": 11,
       "data_cells_with_facts": 1,
-      "fact_bearing_cells_pct": 0.07692307692307693,
+      "fact_bearing_cells_pct": 0.09090909090909091,
       "rows_with_key": 0,
       "row_key_coverage_pct": 0.0,
       "fact_type_counts": {
@@ -740,125 +726,88 @@
     },
     {
       "table_index": 27,
-      "caption": "14.7.1 Test procedure",
+      "caption": "14.7.1 Test procedure",
       "emc_test_type": "conducted_emissions",
-      "num_rows": 7,
+      "num_rows": 3,
       "num_cols": 2,
       "headers": [
         "test levels frequency range",
-        "test levels 150khz 80mhz"
+        "test levels 150khz - 80mhz"
       ],
       "header_entity_types": [
         "FieldStrength",
         "FieldStrength"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 12,
-      "data_cells_with_facts": 4,
+      "data_cells_total": 6,
+      "data_cells_with_facts": 2,
       "fact_bearing_cells_pct": 0.3333333333333333,
-      "rows_with_key": 7,
+      "rows_with_key": 3,
       "row_key_coverage_pct": 1.0,
       "fact_type_counts": {
-        "frequency_range": 4,
         "field_strength": 1,
-        "normative_term": 1
+        "frequency_range": 1
       },
       "sample_row_keys": [
-        "frequency_range",
         "voltage_level_(e.m.f.)",
-        "amplitude_modulation"
+        "amplitude_modulation",
+        "max._sweep_rate"
       ]
     },
     {
       "table_index": 28,
-      "caption": "Table 23 Conducted radio frequencies: EMC class B",
+      "caption": "14.7.1 Test procedure",
       "emc_test_type": "radiated_immunity",
-      "num_rows": 3,
+      "num_rows": 1,
       "num_cols": 2,
       "headers": [
         "test levels in addition to the tests specified for class a, table 22, tests at spot frequencies shall be carried out as listed below",
-        "test levels"
+        "test levels voltage level (e.m.f.)"
       ],
       "header_entity_types": [
         "FieldStrength",
-        "ImmunityLevel"
+        "FieldStrength"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 5,
-      "data_cells_with_facts": 3,
-      "fact_bearing_cells_pct": 0.6,
+      "data_cells_total": 2,
+      "data_cells_with_facts": 1,
+      "fact_bearing_cells_pct": 0.5,
       "rows_with_key": 0,
       "row_key_coverage_pct": 0.0,
       "fact_type_counts": {
-        "normative_term": 1,
-        "frequency_range": 1,
         "field_strength": 1
       },
       "sample_row_keys": []
     },
     {
       "table_index": 29,
-      "caption": "Table 24 Electromagnetic field sweep frequency test levels",
-      "emc_test_type": "unknown",
-      "num_rows": 7,
+      "caption": "14.8.1 Test procedure",
+      "emc_test_type": "conducted_emissions",
+      "num_rows": 6,
       "num_cols": 2,
       "headers": [
-        "test levels frequency range",
-        "test levels 80mhz to 6ghz"
+        "column_1",
+        "test levels"
       ],
       "header_entity_types": [
-        "FieldStrength",
-        "FieldStrength"
+        "",
+        "ImmunityLevel"
       ],
-      "column_mapped_pct": 1.0,
-      "data_cells_total": 12,
-      "data_cells_with_facts": 4,
-      "fact_bearing_cells_pct": 0.3333333333333333,
-      "rows_with_key": 1,
-      "row_key_coverage_pct": 0.14285714285714285,
+      "column_mapped_pct": 0.5,
+      "data_cells_total": 11,
+      "data_cells_with_facts": 3,
+      "fact_bearing_cells_pct": 0.2727272727272727,
+      "rows_with_key": 0,
+      "row_key_coverage_pct": 0.0,
       "fact_type_counts": {
-        "frequency_range": 5,
-        "field_strength": 1,
-        "normative_term": 1
+        "frequency_range": 3,
+        "field_strength": 1
       },
-      "sample_row_keys": [
-        "1.5"
-      ]
+      "sample_row_keys": []
     },
     {
       "table_index": 30,
-      "caption": "Table 25 Electrostatic discharge test levels",
-      "emc_test_type": "esd",
-      "num_rows": 6,
-      "num_cols": 3,
-      "headers": [
-        "test levels output voltage",
-        "test levels air indirect contact",
-        "test levels 2kv, 4kv and 8kv 6kv 6kv"
-      ],
-      "header_entity_types": [
-        "FieldStrength",
-        "FieldStrength",
-        "FieldStrength"
-      ],
-      "column_mapped_pct": 1.0,
-      "data_cells_total": 12,
-      "data_cells_with_facts": 1,
-      "fact_bearing_cells_pct": 0.08333333333333333,
-      "rows_with_key": 5,
-      "row_key_coverage_pct": 0.8333333333333334,
-      "fact_type_counts": {
-        "field_strength": 5
-      },
-      "sample_row_keys": [
-        "2kv,_4kv_and_8kv_6kv_6kv",
-        "±",
-        "±_10%"
-      ]
-    },
-    {
-      "table_index": 31,
-      "caption": "Table 26 Radiated emission test",
+      "caption": "Table 26 Radiated emission test",
       "emc_test_type": "radiated_immunity",
       "num_rows": 10,
       "num_cols": 4,
@@ -866,7 +815,7 @@
         "enclosure port",
         "frequency range",
         "measuring bandwidth",
-        "limits (quasipeak)"
+        "limits (quasi peak)"
       ],
       "header_entity_types": [
         "Phenomenon",
@@ -875,24 +824,23 @@
         "EmissionLimit"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 20,
+      "data_cells_total": 38,
       "data_cells_with_facts": 20,
-      "fact_bearing_cells_pct": 1.0,
+      "fact_bearing_cells_pct": 0.5263157894736842,
       "rows_with_key": 10,
       "row_key_coverage_pct": 1.0,
       "fact_type_counts": {
-        "frequency_range": 10,
-        "emission_limit": 10
+        "frequency_range": 20
       },
       "sample_row_keys": [
         ":9khz",
         ":120khz",
-        ":120khz"
+        "emc_a_all_locations_except_bridge_and_op:120khz"
       ]
     },
     {
-      "table_index": 32,
-      "caption": "Table 27 Conducted emission test",
+      "table_index": 31,
+      "caption": "14.12 Conducted emission test",
       "emc_test_type": "radiated_immunity",
       "num_rows": 6,
       "num_cols": 4,
@@ -900,7 +848,7 @@
         "power port",
         "frequency range",
         "measuring bandwidth",
-        "limits (quasipeak)"
+        "limits (quasi peak)"
       ],
       "header_entity_types": [
         "Phenomenon",
@@ -909,24 +857,24 @@
         "EmissionLimit"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 12,
-      "data_cells_with_facts": 12,
-      "fact_bearing_cells_pct": 1.0,
+      "data_cells_total": 22,
+      "data_cells_with_facts": 18,
+      "fact_bearing_cells_pct": 0.8181818181818182,
       "rows_with_key": 6,
       "row_key_coverage_pct": 1.0,
       "fact_type_counts": {
-        "frequency_range": 6,
+        "frequency_range": 12,
         "emission_limit": 6
       },
       "sample_row_keys": [
-        ":200hz",
-        ":9khz",
+        "emc_a:200hz",
+        "all_locations_except_bridge_and_open_dec:9khz",
         ":9khz"
       ]
     }
   ],
   "table_source_distribution": {
-    "docling": 33
+    "docling": 32
   },
   "errors": []
 }

@@ -3,12 +3,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 from grc_policy_server.core.celery_app import celery_app
 from grc_policy_server.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+_MAX_SNAPSHOTS = 30
 
 
 @celery_app.task(name="grc_policy_server.tasks.refresh_accuracy_report")
@@ -40,7 +43,25 @@ def refresh_accuracy_report() -> dict[str, int]:
     report_path.write_text(
         json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+
+    # Persist a timestamped snapshot for drift tracking (rolling window of _MAX_SNAPSHOTS)
+    snapshots_dir = upload_root / "_accuracy_snapshots"
+    snapshots_dir.mkdir(exist_ok=True)
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    snapshot_path = snapshots_dir / f"{ts}.json"
+    snapshot_path.write_text(
+        json.dumps({"timestamp": ts, "results": results}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    # Prune oldest snapshots beyond _MAX_SNAPSHOTS
+    existing = sorted(snapshots_dir.glob("*.json"))
+    for old in existing[:-_MAX_SNAPSHOTS]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
     logger.info(
-        "accuracy report refreshed documents=%s errors=%s", len(results), errors
+        "accuracy report refreshed documents=%s errors=%s snapshot=%s", len(results), errors, ts
     )
     return {"documents_evaluated": len(results), "errors": errors}

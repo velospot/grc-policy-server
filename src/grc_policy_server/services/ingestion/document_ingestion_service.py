@@ -43,6 +43,155 @@ from grc_policy_server.utils.hashing import sha256_hex
 
 logger = logging.getLogger(__name__)
 
+
+def _bbox_iou(a: dict, b: dict) -> float:
+    """Compute intersection-over-union between two {x0,y0,x1,y1} dicts."""
+    ax0, ay0, ax1, ay1 = a.get("x0", 0), a.get("y0", 0), a.get("x1", 0), a.get("y1", 0)
+    bx0, by0, bx1, by1 = b.get("x0", 0), b.get("y0", 0), b.get("x1", 0), b.get("y1", 0)
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    area_a = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+    area_b = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _candidate_to_table_dict(candidate: Any, *, caption: str = "", section_path: list[str] | None = None) -> dict:
+    """Build a structured table dict from a TableCandidate for canonical_table metadata."""
+    import uuid
+    rows_text: list[list[str]] = []
+    cells_by_row: dict[int, list[dict]] = {}
+    for cell in candidate.cells:
+        r = cell.get("row", 0)
+        cells_by_row.setdefault(r, []).append(cell)
+    for r in sorted(cells_by_row):
+        rows_text.append([str(c.get("text", "")).strip() for c in sorted(cells_by_row[r], key=lambda c: c.get("col", 0))])
+    headers = [candidate.headers] if candidate.headers else []
+    return {
+        "table_uid": str(uuid.uuid4()),
+        "caption_original": caption,
+        "caption_normalized": caption.lower().strip(),
+        "section_path": section_path or [],
+        "pages": [candidate.page_number],
+        "columns": [{"index": i, "name": h, "normalized": h.lower().strip()} for i, h in enumerate(candidate.headers)],
+        "rows": [
+            {"row_number": r_idx, "cells": [
+                {"row": r_idx, "col": c_idx, "text": text, "is_header": r_idx == 0}
+                for c_idx, text in enumerate(row_cells)
+            ]}
+            for r_idx, row_cells in enumerate(rows_text)
+        ],
+        "num_rows": candidate.num_rows,
+        "num_cols": candidate.num_cols,
+        "extraction_backend": candidate.backend_name,
+        "confidence": candidate.confidence,
+        "headers": candidate.headers,
+        "source_extractor": candidate.backend_name,
+    }
+
+
+async def _correlate_camelot_tables(
+    pdf_bytes: bytes,
+    chunks: list[Any],
+    *,
+    iou_threshold: float = 0.4,
+) -> list[Any]:
+    """Run camelot on pages that have docling table chunks and update metadata.
+
+    For each docling table chunk:
+    - If a camelot candidate overlaps (IoU > iou_threshold) AND has more cells → use camelot
+    - Otherwise keep docling, mark table_source = "docling"
+
+    Requires camelot to be installed (optional dependency). Silently skips if not available.
+    """
+    import tempfile
+    import os
+    from grc_policy_server.services.ingestion.backends.camelot_extractor import CamelotTableExtractor
+
+    table_chunks = [c for c in chunks if getattr(c, "chunk_type", "") == "table"]
+    if not table_chunks:
+        return chunks
+
+    table_pages = sorted({c.page_number for c in table_chunks if c.page_number is not None})
+    if not table_pages:
+        return chunks
+
+    # Write PDF to temp file — camelot requires a file path
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+
+        extractor = CamelotTableExtractor()
+        camelot_candidates = await extractor.extract(tmp_path, page_numbers=table_pages)
+    except Exception:
+        logger.debug("camelot correlation skipped (extraction failed or not installed)")
+        return chunks
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if not camelot_candidates:
+        return chunks
+
+    # Index camelot candidates by page
+    by_page: dict[int, list[Any]] = {}
+    for cand in camelot_candidates:
+        by_page.setdefault(cand.page_number, []).append(cand)
+
+    updated = list(chunks)
+    for i, chunk in enumerate(updated):
+        if getattr(chunk, "chunk_type", "") != "table":
+            continue
+        page = chunk.page_number
+        docling_cells = (chunk.metadata.get("table_structure") or {}).get("num_rows", 0)
+        docling_cell_count = docling_cells * ((chunk.metadata.get("table_structure") or {}).get("num_cols", 0) or 1)
+
+        # Docling bbox from bbox_refs
+        docling_bbox = None
+        bbox_refs = chunk.metadata.get("bbox_refs") or getattr(chunk, "bbox_refs", None) or []
+        if bbox_refs:
+            r = bbox_refs[0]
+            docling_bbox = {"x0": r.get("l", 0), "y0": r.get("b", 0), "x1": r.get("r", 0), "y1": r.get("t", 0)}
+
+        best_cand = None
+        best_iou = iou_threshold
+        for cand in by_page.get(page, []):
+            if docling_bbox:
+                iou = _bbox_iou(docling_bbox, cand.bbox)
+            else:
+                iou = iou_threshold + 0.01  # no bbox → accept any same-page candidate
+            if iou >= best_iou:
+                cand_cell_count = cand.num_rows * cand.num_cols
+                if cand_cell_count >= docling_cell_count:
+                    best_iou = iou
+                    best_cand = cand
+
+        if best_cand is not None:
+            caption = chunk.metadata.get("normalized_caption") or chunk.title or ""
+            section_path = list(chunk.section_path or [])
+            table_dict = _candidate_to_table_dict(best_cand, caption=caption, section_path=section_path)
+            new_meta = {**chunk.metadata, "canonical_table": table_dict, "table_source": best_cand.backend_name}
+            from dataclasses import replace as dc_replace
+            updated[i] = dc_replace(chunk, metadata=new_meta)
+            logger.debug(
+                "camelot upgraded table chunk page=%d iou=%.2f rows=%d→%d",
+                page, best_iou,
+                (chunk.metadata.get("table_structure") or {}).get("num_rows", 0),
+                best_cand.num_rows,
+            )
+        else:
+            new_meta = {**chunk.metadata, "table_source": chunk.metadata.get("table_source", "docling")}
+            from dataclasses import replace as dc_replace
+            updated[i] = dc_replace(chunk, metadata=new_meta)
+
+    upgraded = sum(1 for c in updated if c.chunk_type == "table" and c.metadata.get("table_source") not in ("docling", None))
+    if upgraded:
+        logger.info("camelot correlation upgraded %d/%d table chunks", upgraded, len(table_chunks))
+    return updated
+
 _LANG_LEXICONS: dict[str, set[str]] = {
     "en": {"the", "and", "shall", "must", "should", "policy", "document", "requirements",
            "control", "controls", "access", "security", "is", "are"},
@@ -297,6 +446,7 @@ class DocumentIngestionService:
             chunks = await asyncio.to_thread(enhance_table_chunks, content, chunks)
             _profile = get_profile_for_document(filename=filename)
             chunks = filter_degenerate_table_chunks(chunks, profile=_profile)
+            chunks = await _correlate_camelot_tables(content, chunks)
 
         return chunks, ocr_metadata, extraction_json, opd_elements
 

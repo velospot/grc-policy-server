@@ -21,6 +21,9 @@ class DocumentReference(BaseModel):
     nodeId: Optional[str] = None
     textHash: Optional[str] = None
     bbox: Optional[dict] = None
+    tableData: Optional[dict] = None
+    # Shape: {caption, headers: [[str]], rows: [[str]], num_rows, num_cols, source_extractor}
+    formulaLatex: Optional[str] = None
 
 
 class ChangeDetail(BaseModel):

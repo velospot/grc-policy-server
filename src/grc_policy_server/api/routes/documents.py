@@ -57,6 +57,12 @@ router = APIRouter(
     dependencies=[Depends(require_api_bearer_token)],
 )
 
+accuracy_router = APIRouter(
+    prefix="/accuracy",
+    tags=["accuracy"],
+    dependencies=[Depends(require_api_bearer_token)],
+)
+
 
 def _to_hybrid_search_chunks(chunks: list[dict[str, Any]]) -> list[HybridSearchChunk]:
     out: list[HybridSearchChunk] = []
@@ -701,4 +707,31 @@ async def refresh_accuracy_report() -> dict[str, str]:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Could not enqueue task: {exc}",
+        ) from exc
+
+
+@accuracy_router.get(
+    "/drift",
+    summary="Accuracy drift report for a document",
+    description="Returns timestamp-based accuracy drift across all stored accuracy snapshots for a document.",
+)
+async def get_accuracy_drift(document_id: str = Query(..., description="Document ID to analyse")) -> dict:
+    from pathlib import Path
+    from grc_policy_server.core.config import settings
+    from grc_policy_server.services.ingestion.accuracy_evaluator import AccuracyEvaluator
+    import dataclasses
+
+    upload_root = Path(settings.upload_root)
+    if not upload_root.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="upload_root not found")
+
+    evaluator = AccuracyEvaluator(upload_root=upload_root)
+    try:
+        report = evaluator.compare_snapshots(document_id)
+        return dataclasses.asdict(report)
+    except Exception as exc:
+        logger.exception("accuracy drift computation failed document_id=%s", document_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Drift computation failed: {exc}",
         ) from exc

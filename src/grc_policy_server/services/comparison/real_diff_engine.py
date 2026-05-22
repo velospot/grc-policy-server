@@ -2239,6 +2239,14 @@ class RealDiffEngine:
         )
         bbox_refs = chunk.get("bbox_refs") or []
         bbox = bbox_refs[0] if bbox_refs else None
+        table_data = None
+        if chunk.get("node_type") == "table":
+            table_data = self._build_table_data(chunk)
+        formula_latex = None
+        if chunk.get("node_type") == "formula":
+            formula_latex = str(
+                (chunk.get("canonical_metadata") or {}).get("formula_latex") or ""
+            ).strip() or None
         return DocumentReference(
             section=section,
             page=int(page or 0),
@@ -2248,17 +2256,77 @@ class RealDiffEngine:
             nodeId=node_id,
             textHash=text_hash,
             bbox=bbox,
+            tableData=table_data,
+            formulaLatex=formula_latex,
         )
+
+    def _build_table_data(self, chunk: dict) -> dict | None:
+        """Build structured tableData dict for DocumentReference from a table chunk."""
+        meta = chunk.get("canonical_metadata") or {}
+        canonical_table = meta.get("canonical_table")
+        if canonical_table:
+            return {
+                "caption": canonical_table.get("caption_original") or chunk.get("title") or "",
+                "headers": [c.get("name", "") for c in (canonical_table.get("columns") or [])],
+                "rows": [
+                    [cell.get("text", "") for cell in sorted(r.get("cells", []), key=lambda c: c.get("col", 0))]
+                    for r in (canonical_table.get("rows") or [])
+                    if not all(cell.get("is_header") for cell in r.get("cells", []))
+                ],
+                "num_rows": canonical_table.get("num_rows") or chunk.get("table_num_rows") or 0,
+                "num_cols": canonical_table.get("num_cols") or chunk.get("table_num_cols") or 0,
+                "source_extractor": canonical_table.get("source_extractor") or meta.get("table_source") or "docling",
+            }
+        # Fall back to table_structure cells
+        cells = chunk.get("table_cells") or []
+        num_rows = int(chunk.get("table_num_rows") or 0)
+        num_cols = int(chunk.get("table_num_cols") or 0)
+        if not cells or not num_rows:
+            return None
+        header_cells = [c for c in cells if c.get("is_header")]
+        data_cells = [c for c in cells if not c.get("is_header")]
+        headers = [str(c.get("text", "")) for c in sorted(header_cells, key=lambda c: c.get("col", 0))]
+        rows_by_row: dict[int, list[dict]] = {}
+        for c in data_cells:
+            rows_by_row.setdefault(c.get("row", 0), []).append(c)
+        rows = [
+            [str(c.get("text", "")) for c in sorted(rows_by_row[r], key=lambda c: c.get("col", 0))]
+            for r in sorted(rows_by_row)
+        ]
+        return {
+            "caption": str(meta.get("normalized_caption") or chunk.get("title") or ""),
+            "headers": headers,
+            "rows": rows,
+            "num_rows": num_rows,
+            "num_cols": num_cols,
+            "source_extractor": str(meta.get("table_source") or "docling"),
+        }
 
     def _reference_source_text(self, chunk: dict) -> str:
         if chunk.get("node_type") == "table":
-            markdown = str(chunk.get("markdown_text") or "").strip()
-            if markdown:
-                return markdown
+            # Return caption or section as sourceText — structured data goes in tableData
+            caption = str(
+                chunk.get("table_normalized_caption")
+                or (chunk.get("canonical_metadata") or {}).get("normalized_caption")
+                or chunk.get("title")
+                or ""
+            ).strip()
+            return caption or str(chunk.get("text") or "")
+        if chunk.get("node_type") == "formula":
+            latex = str(
+                (chunk.get("canonical_metadata") or {}).get("formula_latex") or ""
+            ).strip()
+            if latex:
+                return f"$${latex}$$"
         return str(chunk.get("text") or "")
 
     def _is_non_semantic_node(self, node: dict) -> bool:
         """Return True if the node's content has no semantic diff value."""
+        # Formula nodes always have semantic value — never filter them out
+        if str(node.get("node_type_hint") or (node.get("canonical_metadata") or {}).get("node_type_hint") or "") == "formula":
+            return False
+        if str((node.get("canonical_metadata") or {}).get("formula_latex") or "").strip():
+            return False
         text = str(
             node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))
         ).strip()

@@ -15,7 +15,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,20 @@ class DocumentAccuracyMetrics:
     overall_column_mapped_pct: float = 0.0
     total_normalized_facts: int = 0
     table_metrics: list[TableAccuracyMetrics] = field(default_factory=list)
+    table_source_distribution: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AccuracyDriftReport:
+    """Drift analysis comparing accuracy snapshots over time for a document."""
+
+    document_id: str
+    snapshots: list[dict]              # [{timestamp, overall_fact_coverage, ...}]
+    delta_fact_coverage: float         # latest - previous snapshot
+    delta_row_key_coverage: float
+    delta_column_mapped_pct: float
+    trend: Literal["improving", "stable", "degrading"]
 
 
 class AccuracyEvaluator:
@@ -71,11 +84,23 @@ class AccuracyEvaluator:
             EMCTestClassifier,
             NormalizedFactExtractor,
         )
+        from grc_policy_server.services.ingestion.ontology.safety_ontology import (
+            SafetyTestClassifier,
+            SafetyFactExtractor,
+        )
+        from grc_policy_server.services.ingestion.ontology.environment_ontology import (
+            EnvTestClassifier,
+            EnvFactExtractor,
+        )
         from grc_policy_server.services.ingestion.ontology.column_mapper import map_header
         from grc_policy_server.services.ingestion.row_key_extractor import RowKeyExtractor
 
         self._classifier = EMCTestClassifier()
         self._fact_extractor = NormalizedFactExtractor()
+        self._safety_classifier = SafetyTestClassifier()
+        self._safety_fact_extractor = SafetyFactExtractor()
+        self._env_classifier = EnvTestClassifier()
+        self._env_fact_extractor = EnvFactExtractor()
         self._map_header = map_header
         self._row_key_extractor = RowKeyExtractor()
 
@@ -118,16 +143,24 @@ class AccuracyEvaluator:
 
         metrics = DocumentAccuracyMetrics(document_id=document_id, filename=document_id)
 
-        # Try to get filename from metadata
-        meta_file = doc_dir / "metadata.json"
-        if meta_file.exists():
-            try:
-                meta = json.loads(meta_file.read_text(encoding="utf-8"))
-                metrics.filename = meta.get("filename") or meta.get("original_filename") or document_id
-            except Exception:
-                pass
+        if not nodes_file.exists():
+            metrics.errors.append(f"canonical_nodes.json not found")
+            return metrics
 
-        # Resolve document family profile (for grouping in reports)
+        try:
+            raw = json.loads(nodes_file.read_text(encoding="utf-8"))
+            # Read filename from canonical_nodes.json top-level field (authoritative source).
+            # metadata.json is not written as a separate file; this is the only reliable path.
+            if isinstance(raw, dict):
+                top_filename = raw.get("filename") or raw.get("original_filename")
+                if top_filename:
+                    metrics.filename = top_filename
+            nodes = raw if isinstance(raw, list) else (raw.get("nodes") or [])
+        except Exception as e:
+            metrics.errors.append(f"load error: {e}")
+            return metrics
+
+        # Resolve document family profile now that the real filename is known
         try:
             from grc_policy_server.services.ingestion.document_family_profile import (
                 get_profile_for_document,
@@ -136,17 +169,6 @@ class AccuracyEvaluator:
             metrics.document_family = _profile.family_id if _profile else "unknown"
         except Exception:
             metrics.document_family = "unknown"
-
-        if not nodes_file.exists():
-            metrics.errors.append(f"canonical_nodes.json not found")
-            return metrics
-
-        try:
-            raw = json.loads(nodes_file.read_text(encoding="utf-8"))
-            nodes = raw if isinstance(raw, list) else (raw.get("nodes") or [])
-        except Exception as e:
-            metrics.errors.append(f"load error: {e}")
-            return metrics
 
         table_nodes = [n for n in nodes if str(n.get("node_type") or "").lower() == "table"]
         metrics.total_tables = len(table_nodes)
@@ -163,6 +185,7 @@ class AccuracyEvaluator:
 
         for idx, node in enumerate(table_nodes):
             try:
+                node["_doc_family_hint"] = metrics.document_family
                 tm = self._evaluate_table(idx, node)
                 metrics.table_metrics.append(tm)
 
@@ -170,6 +193,11 @@ class AccuracyEvaluator:
                     metrics.tables_classified += 1
                 metrics.emc_type_distribution[tm.emc_test_type] = (
                     metrics.emc_type_distribution.get(tm.emc_test_type, 0) + 1
+                )
+                # Track which backend was used for each table's canonical extract
+                table_source = str((node.get("metadata") or {}).get("table_source") or "docling")
+                metrics.table_source_distribution[table_source] = (
+                    metrics.table_source_distribution.get(table_source, 0) + 1
                 )
 
                 all_data_cells += tm.data_cells_total
@@ -190,6 +218,62 @@ class AccuracyEvaluator:
         metrics.overall_column_mapped_pct = all_mapped_headers / max(all_headers, 1)
         return metrics
 
+    def compare_snapshots(self, document_id: str) -> AccuracyDriftReport:
+        """Read all accuracy snapshots and compute drift for *document_id*.
+
+        Snapshots are stored in <upload_root>/_accuracy_snapshots/*.json by
+        refresh_accuracy_report. Returns a drift report with per-snapshot trend data
+        and delta metrics between the two most recent snapshots.
+        """
+        snapshots_dir = self.upload_root / "_accuracy_snapshots"
+        snapshot_files = sorted(snapshots_dir.glob("*.json")) if snapshots_dir.exists() else []
+
+        doc_snapshots: list[dict] = []
+        for sf in snapshot_files:
+            try:
+                raw = json.loads(sf.read_text(encoding="utf-8"))
+                ts = raw.get("timestamp") or sf.stem
+                for doc in raw.get("results") or []:
+                    if doc.get("document_id") == document_id:
+                        doc_snapshots.append({
+                            "timestamp": ts,
+                            "overall_fact_coverage": float(doc.get("overall_fact_coverage") or 0),
+                            "overall_row_key_coverage": float(doc.get("overall_row_key_coverage") or 0),
+                            "overall_column_mapped_pct": float(doc.get("overall_column_mapped_pct") or 0),
+                            "total_tables": int(doc.get("total_tables") or 0),
+                            "tables_classified": int(doc.get("tables_classified") or 0),
+                            "total_normalized_facts": int(doc.get("total_normalized_facts") or 0),
+                        })
+                        break
+            except Exception:
+                continue
+
+        if len(doc_snapshots) >= 2:
+            prev = doc_snapshots[-2]
+            latest = doc_snapshots[-1]
+            delta_fact = latest["overall_fact_coverage"] - prev["overall_fact_coverage"]
+            delta_key = latest["overall_row_key_coverage"] - prev["overall_row_key_coverage"]
+            delta_col = latest["overall_column_mapped_pct"] - prev["overall_column_mapped_pct"]
+            avg_delta = (delta_fact + delta_key + delta_col) / 3
+            if avg_delta > 0.02:
+                trend: Literal["improving", "stable", "degrading"] = "improving"
+            elif avg_delta < -0.02:
+                trend = "degrading"
+            else:
+                trend = "stable"
+        else:
+            delta_fact = delta_key = delta_col = 0.0
+            trend = "stable"
+
+        return AccuracyDriftReport(
+            document_id=document_id,
+            snapshots=doc_snapshots,
+            delta_fact_coverage=delta_fact,
+            delta_row_key_coverage=delta_key,
+            delta_column_mapped_pct=delta_col,
+            trend=trend,
+        )
+
     def _evaluate_table(self, idx: int, node: dict[str, Any]) -> TableAccuracyMetrics:
         from grc_policy_server.services.documents.canonical_table_model import TableCell, TableColumn, TableRow, CanonicalTable
 
@@ -208,6 +292,11 @@ class AccuracyEvaluator:
         from grc_policy_server.services.ingestion.table_normalization import extract_headers_from_cells
         headers, header_depth = extract_headers_from_cells(cells_raw, num_cols)
 
+        # Bug 1: When docling marks no cells as headers (common in TL 81000, DNV),
+        # ALL cells appear as data cells. Detect this and skip the first header_depth
+        # rows from data cell lists so header text isn't scored as fact-bearing data.
+        no_header_flags = cells_raw and not any(c.get("is_header") for c in cells_raw)
+
         # EMC classification (use propagated type for continuation fragments)
         propagated = meta.get("_propagated_emc_type")
         if propagated:
@@ -215,6 +304,44 @@ class AccuracyEvaluator:
             emc_type = EMCTestType(propagated)
         else:
             emc_type = self._classifier.classify_table(caption, headers)
+
+        # Bug 2: Route to the correct domain extractor based on caption/headers.
+        # Routing priority depends on document family:
+        #   - EMC families (TL 81000, DNV): EMC > Safety > Env
+        #   - Environmental families (DIN EN 60068): Env > Safety > EMC
+        #   - Unknown families: EMC > Safety > Env (conservative default)
+        # This prevents automotive voltage tables from being routed to Safety and
+        # environmental test tables from being swamped by EMC over-classification.
+        safety_type = self._safety_classifier.classify_table(caption, headers)
+        env_type = self._env_classifier.classify_table(caption, headers)
+        _env_primary_families = {"din_en_60068"}
+        doc_family = node.get("_doc_family_hint", "")  # injected below; fallback to ""
+
+        if doc_family in _env_primary_families:
+            # Env-primary: prefer Env, then Safety, then EMC
+            if env_type.value != "unknown":
+                active_extractor = self._env_fact_extractor
+                detected_domain = f"env:{env_type.value}"
+            elif safety_type.value != "unknown":
+                active_extractor = self._safety_fact_extractor
+                detected_domain = f"safety:{safety_type.value}"
+            else:
+                active_extractor = self._fact_extractor
+                detected_domain = emc_type.value
+        else:
+            # EMC-primary (TL 81000, DNV, unknown): EMC > Safety > Env
+            if emc_type.value != "unknown":
+                active_extractor = self._fact_extractor
+                detected_domain = emc_type.value
+            elif safety_type.value != "unknown":
+                active_extractor = self._safety_fact_extractor
+                detected_domain = f"safety:{safety_type.value}"
+            elif env_type.value != "unknown":
+                active_extractor = self._env_fact_extractor
+                detected_domain = f"env:{env_type.value}"
+            else:
+                active_extractor = self._fact_extractor
+                detected_domain = "unknown"
 
         # Column mapping — headers[i] corresponds to actual column position i
         from grc_policy_server.services.ingestion.ontology.column_mapper import ENTITY_TYPE_DEFAULT_UNIT
@@ -230,8 +357,16 @@ class AccuracyEvaluator:
         mapped_count = sum(1 for e in entity_types if e)
         col_mapped_pct = mapped_count / max(len(headers), 1) if headers else 0.0
 
-        # NormalizedFact extraction on data cells (non-header)
-        data_cells = [c for c in cells_raw if not c.get("is_header")]
+        # NormalizedFact extraction on data cells (non-header).
+        # When no is_header flags are set, skip the first header_depth rows by position.
+        def _is_data_cell(c: dict) -> bool:
+            if c.get("is_header"):
+                return False
+            if no_header_flags and int(c.get("row", 0)) < header_depth:
+                return False
+            return True
+
+        data_cells = [c for c in cells_raw if _is_data_cell(c)]
         cells_with_facts = 0
         fact_type_counts: dict[str, int] = {}
 
@@ -242,23 +377,36 @@ class AccuracyEvaluator:
             text = str(c.get("text") or "").strip()
             col_idx = c.get("col", 0)
             col_name = col_to_header.get(col_idx, "")
-            facts = self._fact_extractor.extract_from_cell(text, column_name=col_name)
+            facts = active_extractor.extract_from_cell(text, column_name=col_name)
 
-            # Column-unit inheritance: bare numeric + typed column → synthesise fact
+            # Column-unit inheritance: bare numeric + typed column → synthesise a fact.
+            # For EMC: uses existing ENTITY_TYPE_DEFAULT_UNIT map.
+            # For Env: NUMERIC_LIMIT columns (temperature, humidity, duration) synthesise
+            # a generic numeric_limit fact so bare values like "90" or "-10" get counted.
             if not facts:
                 col_entity = col_entity_map.get(col_idx)
                 if col_entity is not None:
-                    inherited_unit = ENTITY_TYPE_DEFAULT_UNIT.get(col_entity)
-                    if inherited_unit:
-                        fact_type_for_entity = {
-                            OntologyEntityType.EMISSION_LIMIT: "emission_limit",
-                            OntologyEntityType.FIELD_STRENGTH: "field_strength",
-                            OntologyEntityType.FREQUENCY_RANGE: "frequency_range",
-                        }.get(col_entity)
-                        if fact_type_for_entity:
-                            facts = self._fact_extractor.extract_bare_numeric_with_unit(
-                                text, inherited_unit, fact_type_for_entity
-                            )
+                    if active_extractor is self._fact_extractor:
+                        inherited_unit = ENTITY_TYPE_DEFAULT_UNIT.get(col_entity)
+                        if inherited_unit:
+                            fact_type_for_entity = {
+                                OntologyEntityType.EMISSION_LIMIT: "emission_limit",
+                                OntologyEntityType.FIELD_STRENGTH: "field_strength",
+                                OntologyEntityType.FREQUENCY_RANGE: "frequency_range",
+                            }.get(col_entity)
+                            if fact_type_for_entity:
+                                facts = self._fact_extractor.extract_bare_numeric_with_unit(
+                                    text, inherited_unit, fact_type_for_entity
+                                )
+                    elif (
+                        active_extractor in (self._env_fact_extractor, self._safety_fact_extractor)
+                        and col_entity == OntologyEntityType.NUMERIC_LIMIT
+                        and re.match(r"^[+-]?\d[\d.,\s]*$", text.strip())
+                    ):
+                        # Bare number in a NUMERIC_LIMIT column (temperature, humidity, duration)
+                        facts = self._fact_extractor.extract_bare_numeric_with_unit(
+                            text, "", "numeric_limit"
+                        )
 
             if facts:
                 cells_with_facts += 1
@@ -267,11 +415,14 @@ class AccuracyEvaluator:
 
         fact_cov = cells_with_facts / max(len(data_cells), 1)
 
-        # Row key extraction — build minimal CanonicalTable
+        # Row key extraction — build minimal CanonicalTable.
+        # Apply the same no_header_flags guard to exclude header rows from row keys.
         cols = [TableColumn(i, h, h.lower()) for i, h in enumerate(headers)]
         rows_by_idx: dict[int, list[dict]] = {}
         for c in cells_raw:
             if c.get("is_header"):
+                continue
+            if no_header_flags and int(c.get("row", 0)) < header_depth:
                 continue
             r = c.get("row", 0)
             rows_by_idx.setdefault(r, []).append(c)
@@ -308,7 +459,7 @@ class AccuracyEvaluator:
         return TableAccuracyMetrics(
             table_index=idx,
             caption=caption[:80],
-            emc_test_type=emc_type.value,
+            emc_test_type=detected_domain,
             num_rows=len(canonical_rows),
             num_cols=num_cols,
             headers=headers,

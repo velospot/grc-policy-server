@@ -339,16 +339,29 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
                 metadata["table_row_fingerprints"] = [
                     str(row.get("row_fingerprint") or "") for row in rows
                 ]
-                # Generate proper markdown from structure
-                struct_markdown = _table_structure_to_markdown(table_struct, title)
-                if struct_markdown:
-                    markdown_text = struct_markdown
-                    metadata["table_markdown"] = struct_markdown
-                # Generate better clean_text for embeddings
+                # Store clean text for embeddings; do NOT persist markdown —
+                # structured table_structure cells are the canonical form and
+                # citations render from tableData in DocumentReference.
                 struct_clean_text = _table_structure_to_clean_text(table_struct, title)
                 if struct_clean_text:
                     metadata["table_clean_text"] = struct_clean_text
 
+        elif any(
+            item.label == DocItemLabel.FORMULA for item in doc_chunk.meta.doc_items
+        ):
+            chunk_type = "clause"  # formulas are treated as clause-level content
+            # Extract LaTeX from docling formula enrichment — stored as item.text
+            formula_latex = ""
+            for item in doc_chunk.meta.doc_items:
+                if item.label == DocItemLabel.FORMULA:
+                    raw = str(getattr(item, "text", "") or "").strip()
+                    if raw:
+                        formula_latex = raw
+                        break
+            if formula_latex:
+                metadata["formula_latex"] = formula_latex
+                metadata["formula_display"] = f"$${formula_latex}$$"
+                metadata["node_type_hint"] = "formula"
         elif any(
             item.label == DocItemLabel.PICTURE for item in doc_chunk.meta.doc_items
         ):

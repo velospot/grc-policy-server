@@ -1,27 +1,27 @@
 {
-  "document_id": "57918453-a669-4022-82e2-bef91d8fd608",
-  "filename": "DNVGL-CG-0339_Dez_2019.pdf",
+  "document_id": "5a33bef0-6099-476a-924c-d15a9ab3134c",
+  "filename": "DNV-CG-0339_2021-08.pdf",
   "document_family": "dnv_cg_0339",
-  "total_tables": 33,
+  "total_tables": 35,
   "tables_classified": 24,
   "emc_type_distribution": {
     "radiated_immunity": 12,
     "maritime_installation": 2,
-    "unknown": 9,
+    "unknown": 11,
     "conducted_emissions": 8,
     "safety:thermal": 1,
     "esd": 1
   },
-  "overall_fact_coverage": 0.1422680412371134,
-  "overall_row_key_coverage": 0.28292682926829266,
-  "overall_column_mapped_pct": 0.7204301075268817,
-  "total_normalized_facts": 88,
+  "overall_fact_coverage": 0.14549180327868852,
+  "overall_row_key_coverage": 0.2926829268292683,
+  "overall_column_mapped_pct": 0.7128712871287128,
+  "total_normalized_facts": 89,
   "table_metrics": [
     {
       "table_index": 0,
-      "caption": "Changes December 2019",
+      "caption": "Changes August 2021",
       "emc_test_type": "radiated_immunity",
-      "num_rows": 3,
+      "num_rows": 1,
       "num_cols": 3,
       "headers": [
         "topic",
@@ -34,13 +34,13 @@
         ""
       ],
       "column_mapped_pct": 0.0,
-      "data_cells_total": 7,
-      "data_cells_with_facts": 2,
-      "fact_bearing_cells_pct": 0.2857142857142857,
+      "data_cells_total": 3,
+      "data_cells_with_facts": 1,
+      "fact_bearing_cells_pct": 0.3333333333333333,
       "rows_with_key": 0,
       "row_key_coverage_pct": 0.0,
       "fact_type_counts": {
-        "frequency_range": 2
+        "normative_term": 1
       },
       "sample_row_keys": []
     },
@@ -69,7 +69,7 @@
     },
     {
       "table_index": 2,
-      "caption": "Guidance note:",
+      "caption": "Table 1 Location classes - selection guide",
       "emc_test_type": "maritime_installation",
       "num_rows": 11,
       "num_cols": 7,
@@ -172,7 +172,7 @@
     },
     {
       "table_index": 5,
-      "caption": "Table 3 Tests with severity level independent of location on board",
+      "caption": "Table 2 Tests with severity levels depending on intended location on board",
       "emc_test_type": "radiated_immunity",
       "num_rows": 6,
       "num_cols": 2,
@@ -245,8 +245,8 @@
     },
     {
       "table_index": 8,
-      "caption": "Table 3 Electrical supply (direct voltage), battery power supply",
-      "emc_test_type": "radiated_immunity",
+      "caption": "5.2 Test levels",
+      "emc_test_type": "unknown",
       "num_rows": 2,
       "num_cols": 2,
       "headers": [
@@ -268,8 +268,8 @@
     },
     {
       "table_index": 9,
-      "caption": "Table 3 Electrical supply (direct voltage), battery power supply",
-      "emc_test_type": "radiated_immunity",
+      "caption": "5.2 Test levels",
+      "emc_test_type": "unknown",
       "num_rows": 2,
       "num_cols": 2,
       "headers": [
@@ -441,7 +441,7 @@
       "num_cols": 2,
       "headers": [
         "psd",
-        "± 4db with bandwidthtimeproduct of minimum 300 with frequency resolution of 1/250of maximum frequency"
+        "± 4db with bandwidth time product of minimum 300 with frequency resolution of 1/250of maximum frequency"
       ],
       "header_entity_types": [
         "NumericLimit",
@@ -612,7 +612,7 @@
     },
     {
       "table_index": 22,
-      "caption": "Table 17 High voltage test level",
+      "caption": "13.1.2 Test levels",
       "emc_test_type": "unknown",
       "num_rows": 5,
       "num_cols": 2,
@@ -746,7 +746,7 @@
       "num_cols": 2,
       "headers": [
         "test levels frequency range",
-        "test levels 150khz 80mhz"
+        "test levels 150khz - 80mhz"
       ],
       "header_entity_types": [
         "FieldStrength",
@@ -800,7 +800,7 @@
       "table_index": 29,
       "caption": "Table 24 Electromagnetic field sweep frequency test levels",
       "emc_test_type": "unknown",
-      "num_rows": 7,
+      "num_rows": 4,
       "num_cols": 2,
       "headers": [
         "test levels frequency range",
@@ -811,15 +811,14 @@
         "FieldStrength"
       ],
       "column_mapped_pct": 1.0,
-      "data_cells_total": 12,
-      "data_cells_with_facts": 4,
-      "fact_bearing_cells_pct": 0.3333333333333333,
+      "data_cells_total": 8,
+      "data_cells_with_facts": 3,
+      "fact_bearing_cells_pct": 0.375,
       "rows_with_key": 1,
-      "row_key_coverage_pct": 0.14285714285714285,
+      "row_key_coverage_pct": 0.25,
       "fact_type_counts": {
-        "frequency_range": 5,
-        "field_strength": 1,
-        "normative_term": 1
+        "frequency_range": 3,
+        "field_strength": 1
       },
       "sample_row_keys": [
         "1.5"
@@ -866,7 +865,7 @@
         "enclosure port",
         "frequency range",
         "measuring bandwidth",
-        "limits (quasipeak)"
+        "limits (quasi peak)"
       ],
       "header_entity_types": [
         "Phenomenon",
@@ -892,6 +891,42 @@
     },
     {
       "table_index": 32,
+      "caption": "Table 26 Radiated emission test",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 2,
+      "num_cols": 5,
+      "headers": [
+        "enclosure port 1)",
+        "enclosure port average limit shall be applied for frequencies above 1000mhz. the conditional testing procedure in [14.11.1] may be applied.",
+        "frequency range",
+        "measuring bandwidth",
+        "limits (quasi peak)"
+      ],
+      "header_entity_types": [
+        "Phenomenon",
+        "EmissionLimit",
+        "FrequencyRange",
+        "FrequencyRange",
+        "EmissionLimit"
+      ],
+      "column_mapped_pct": 1.0,
+      "data_cells_total": 4,
+      "data_cells_with_facts": 2,
+      "fact_bearing_cells_pct": 0.5,
+      "rows_with_key": 2,
+      "row_key_coverage_pct": 1.0,
+      "fact_type_counts": {
+        "frequency_range": 1,
+        "normative_term": 1,
+        "emission_limit": 1
+      },
+      "sample_row_keys": [
+        "1)",
+        "2)"
+      ]
+    },
+    {
+      "table_index": 33,
       "caption": "Table 27 Conducted emission test",
       "emc_test_type": "radiated_immunity",
       "num_rows": 6,
@@ -900,7 +935,7 @@
         "power port",
         "frequency range",
         "measuring bandwidth",
-        "limits (quasipeak)"
+        "limits (quasi peak)"
       ],
       "header_entity_types": [
         "Phenomenon",
@@ -923,10 +958,37 @@
         ":9khz",
         ":9khz"
       ]
+    },
+    {
+      "table_index": 34,
+      "caption": "Changes December 2019",
+      "emc_test_type": "radiated_immunity",
+      "num_rows": 3,
+      "num_cols": 3,
+      "headers": [
+        "topic",
+        "reference",
+        "description"
+      ],
+      "header_entity_types": [
+        "",
+        "",
+        ""
+      ],
+      "column_mapped_pct": 0.0,
+      "data_cells_total": 7,
+      "data_cells_with_facts": 2,
+      "fact_bearing_cells_pct": 0.2857142857142857,
+      "rows_with_key": 0,
+      "row_key_coverage_pct": 0.0,
+      "fact_type_counts": {
+        "frequency_range": 2
+      },
+      "sample_row_keys": []
     }
   ],
   "table_source_distribution": {
-    "docling": 33
+    "docling": 35
   },
   "errors": []
 }

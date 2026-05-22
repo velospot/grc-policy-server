@@ -77,7 +77,10 @@ class DoclingAdapter:
             do_cell_matching=False
         )
         pdf_options.images_scale = 2
-        # pdf_options.do_formula_enrichment = True
+        try:
+            pdf_options.do_formula_enrichment = True
+        except AttributeError:
+            pass  # older docling version without formula enrichment support
 
         # pdf_options.generate_table_images = False
         # pdf_options.generate_page_images = True

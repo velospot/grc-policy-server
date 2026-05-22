@@ -70,6 +70,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(documents.router)
+app.include_router(documents.accuracy_router)
 app.include_router(compare.router)
 app.include_router(with_summary.router)
 app.include_router(compare_v2.router)

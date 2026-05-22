@@ -25,6 +25,16 @@ from grc_policy_server.services.ingestion.ontology.emc_ontology import (
     EMCTestType,
     NormalizedFactExtractor,
 )
+from grc_policy_server.services.ingestion.ontology.safety_ontology import (
+    SAFETY_HIGH_SEVERITY_ENTITIES,
+    SafetyFactExtractor,
+    SafetyTestClassifier,
+)
+from grc_policy_server.services.ingestion.ontology.environment_ontology import (
+    ENV_HIGH_SEVERITY_ENTITIES,
+    EnvFactExtractor,
+    EnvTestClassifier,
+)
 from grc_policy_server.services.ingestion.row_key_extractor import RowChangeDetector, RowKeyExtractor
 
 # ---------------------------------------------------------------------------
@@ -33,6 +43,10 @@ from grc_policy_server.services.ingestion.row_key_extractor import RowChangeDete
 
 _FACT_EXTRACTOR = NormalizedFactExtractor()
 _TEST_CLASSIFIER = EMCTestClassifier()
+_SAFETY_FACT_EXTRACTOR = SafetyFactExtractor()
+_SAFETY_TEST_CLASSIFIER = SafetyTestClassifier()
+_ENV_FACT_EXTRACTOR = EnvFactExtractor()
+_ENV_TEST_CLASSIFIER = EnvTestClassifier()
 
 _COL_UNIT_PATTERNS: list[tuple[str, str, str]] = [
     (r"in\s*ghz|\(ghz\)",       "GHz",    "frequency_range"),
@@ -186,10 +200,16 @@ def _extract_table_entity_graph(
     test_type = _TEST_CLASSIFIER.classify_table(caption, col_names)
 
     # Use testing_department hint to resolve UNKNOWN when auto-detect fails
-    if test_type == EMCTestType.UNKNOWN and testing_department:
-        if testing_department.upper() in {"EMC", "EMV"}:
+    dept_upper = testing_department.upper() if testing_department else ""
+    if test_type == EMCTestType.UNKNOWN and dept_upper:
+        if dept_upper in {"EMC", "EMV"}:
             test_type = EMCTestType.CONDUCTED_EMISSIONS
-        # Safety/Environment keep UNKNOWN → position-based matching
+        elif dept_upper in {"SAFETY", "FUNCTIONAL_SAFETY", "SAFE"}:
+            # Route to Safety ontology — build profiles and return early
+            return _extract_safety_entity_graph(table, language=language)
+        elif dept_upper in {"ENVIRONMENT", "ENV", "ENVIRONMENTAL"}:
+            # Route to Environment ontology — build profiles and return early
+            return _extract_env_entity_graph(table, language=language)
 
     # Inherit language from table metadata when not provided at call site
     if not language:
@@ -363,6 +383,82 @@ def _diff_entity_graphs(
     return changes
 
 
+def _extract_safety_entity_graph(
+    table: CanonicalTable,
+    *,
+    language: str = "",
+) -> tuple[list[dict[str, str]], EMCTestType]:
+    """Build a Safety entity profile for every row in *table*."""
+    caption = table.caption_original or ""
+    col_names = [c.name or "" for c in (table.columns or [])]
+    _SAFETY_TEST_CLASSIFIER.classify_table(caption, col_names)  # classify for logging
+
+    if not language:
+        language = str((table.metadata or {}).get("language") or "")
+
+    profiles: list[dict[str, str]] = []
+    for row in (table.rows or []):
+        merged: dict[str, str] = {}
+        for cell in row.cells:
+            if getattr(cell, "is_header", False):
+                continue
+            col_name = col_names[cell.col] if cell.col < len(col_names) else ""
+            raw_text = (cell.text or "").strip()
+            if not raw_text:
+                continue
+            text = _preprocess_for_language(raw_text, language)
+            facts = _SAFETY_FACT_EXTRACTOR.extract_from_cell(text, column_name=col_name)
+            for fact in facts:
+                if getattr(fact, "confidence", 1.0) < _CONFIDENCE_THRESHOLD:
+                    continue
+                key = getattr(fact, "name", "") or getattr(fact, "fact_type", "")
+                value = getattr(fact, "value", "")
+                unit = getattr(fact, "unit", "")
+                val_str = f"{value} {unit}".strip() if unit else value
+                if key and val_str and key not in merged:
+                    merged[key] = val_str
+        profiles.append(merged)
+    return profiles, EMCTestType.UNKNOWN
+
+
+def _extract_env_entity_graph(
+    table: CanonicalTable,
+    *,
+    language: str = "",
+) -> tuple[list[dict[str, str]], EMCTestType]:
+    """Build an Environment entity profile for every row in *table*."""
+    caption = table.caption_original or ""
+    col_names = [c.name or "" for c in (table.columns or [])]
+    _ENV_TEST_CLASSIFIER.classify_table(caption, col_names)  # classify for logging
+
+    if not language:
+        language = str((table.metadata or {}).get("language") or "")
+
+    profiles: list[dict[str, str]] = []
+    for row in (table.rows or []):
+        merged: dict[str, str] = {}
+        for cell in row.cells:
+            if getattr(cell, "is_header", False):
+                continue
+            col_name = col_names[cell.col] if cell.col < len(col_names) else ""
+            raw_text = (cell.text or "").strip()
+            if not raw_text:
+                continue
+            text = _preprocess_for_language(raw_text, language)
+            facts = _ENV_FACT_EXTRACTOR.extract_from_cell(text, column_name=col_name)
+            for fact in facts:
+                if getattr(fact, "confidence", 1.0) < _CONFIDENCE_THRESHOLD:
+                    continue
+                key = getattr(fact, "name", "") or getattr(fact, "fact_type", "")
+                value = getattr(fact, "value", "")
+                unit = getattr(fact, "unit", "")
+                val_str = f"{value} {unit}".strip() if unit else value
+                if key and val_str and key not in merged:
+                    merged[key] = val_str
+        profiles.append(merged)
+    return profiles, EMCTestType.UNKNOWN
+
+
 # High-severity entity types — changes to these always warrant HIGH impact
 _HIGH_SEVERITY_ENTITIES = frozenset({
     "field_strength",
@@ -372,6 +468,10 @@ _HIGH_SEVERITY_ENTITIES = frozenset({
     "frequency_range",
     "test_method",
     "voltage_level",
+    # Safety high-severity entities
+    *SAFETY_HIGH_SEVERITY_ENTITIES,
+    # Environment high-severity entities
+    *ENV_HIGH_SEVERITY_ENTITIES,
 })
 
 
