@@ -7,9 +7,12 @@ wheels/
 *.egg-info
 # local storage docs
 .env
+localconf/*
 neo4j*
 weaviate_data/*
 data/uploads
+todo
+.claude
 
 # Virtual environments
 .venv

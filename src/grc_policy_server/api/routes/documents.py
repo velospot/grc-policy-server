@@ -1,12 +1,17 @@
 import logging
+import base64
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 
 from grc_policy_server.api.deps import (
     get_document_ingestion_service_factory,
     get_document_repository,
+    get_neo4j_client,
+    get_storage_provider_store,
+    get_upload_v2_dispatcher,
     get_weaviate_client,
     require_api_bearer_token,
 )
@@ -19,14 +24,30 @@ from grc_policy_server.models.schemas import (
     HybridSearchDocumentResult,
     HybridSearchRequest,
     HybridSearchResponse,
+    IngestSourcesRequest,
     UploadDocumentResponse,
     UploadDocumentsResponse,
+    UploadV2JobCreateResponse,
+    UploadV2JobStatusResponse,
 )
-from grc_policy_server.respositories.documents import DocumentRepository
+from grc_policy_server.repositories.documents import DocumentRepository
 from grc_policy_server.services.documents.mapper import to_document_response
+from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     DocumentIngestionService,
 )
+from grc_policy_server.services.ingestion.upload_v2_dispatcher import (
+    CeleryNotAvailableError,
+    CeleryTaskFailureError,
+    CeleryWorkerUnavailableError,
+    UploadV2Dispatcher,
+)
+from grc_policy_server.services.ingestion.upload_v2_models import UploadTaskFilePayload
+from grc_policy_server.services.storage.source_resolver import (
+    resolve_ingest_uri,
+    resolve_provider,
+)
+from grc_policy_server.services.storage.storage_provider_store import StorageProviderStore
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
@@ -47,19 +68,38 @@ def _to_hybrid_search_chunks(chunks: list[dict[str, Any]]) -> list[HybridSearchC
         elif isinstance(chunk_index_raw, float):
             chunk_index = int(chunk_index_raw)
 
-        score_raw = chunk.get("_distance")
+        distance_raw = chunk.get("_distance")
+        distance: float | None = None
+        if isinstance(distance_raw, (int, float)):
+            distance = float(distance_raw)
+
+        score_raw = chunk.get("_score")
         score: float | None = None
         if isinstance(score_raw, (int, float)):
             score = float(score_raw)
+        elif distance is not None:
+            # Backward compatibility for existing clients using `score`.
+            score = distance
+
+        canonical_text = str(chunk.get("canonical_text") or "").strip() or None
+        markdown = str(chunk.get("markdown_text") or "").strip() or None
+        node_type = str(chunk.get("node_type") or "").strip() or None
+        table_markdown = markdown if node_type == "table" else None
 
         out.append(
             HybridSearchChunk(
                 chunkId=str(chunk.get("chunk_id") or ""),
                 documentId=str(chunk.get("document_id") or ""),
                 sectionPath=str(chunk.get("section_path") or ""),
-                text=str(chunk.get("text") or ""),
+                text=canonical_text or str(chunk.get("text") or ""),
+                nodeType=node_type,
+                canonicalText=canonical_text,
+                markdown=markdown,
+                tableMarkdown=table_markdown,
                 chunkIndex=chunk_index,
                 score=score,
+                distance=distance,
+                scores={"score": score, "distance": distance},
             )
         )
     return out
@@ -161,6 +201,209 @@ async def upload(
     )
 
 
+@router.post(
+    "/ingest/sources",
+    response_model=UploadDocumentsResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ingest one or more documents from remote sources (URLs, S3, etc.)",
+)
+async def ingest_sources(
+    payload: IngestSourcesRequest,
+    ingestion_service_factory: Callable[[], DocumentIngestionService] = Depends(
+        get_document_ingestion_service_factory
+    ),
+    provider_store: StorageProviderStore = Depends(get_storage_provider_store),
+):
+    if not payload.sources:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No sources were provided",
+        )
+
+    ingestion_service = ingestion_service_factory()
+    results: list[UploadDocumentResponse] = []
+
+    for source in payload.sources:
+        uri = (source.uri or "").strip()
+        if not uri:
+            results.append(
+                UploadDocumentResponse(
+                    filename=source.filename or "<missing>",
+                    contentType=None,
+                    accepted=False,
+                    error="Missing source uri",
+                )
+            )
+            continue
+
+        try:
+            provider = await resolve_provider(provider_store, source.providerId)
+            downloaded = await resolve_ingest_uri(
+                uri=uri,
+                filename_hint=source.filename,
+                provider=provider,
+            )
+        except ValueError as exc:
+            results.append(
+                UploadDocumentResponse(
+                    filename=source.filename or uri,
+                    contentType=None,
+                    accepted=False,
+                    error=str(exc),
+                )
+            )
+            continue
+        except Exception:
+            logger.exception("failed to download ingest source uri=%s", uri)
+            results.append(
+                UploadDocumentResponse(
+                    filename=source.filename or uri,
+                    contentType=None,
+                    accepted=False,
+                    error="Failed to download document source",
+                )
+            )
+            continue
+
+        if not downloaded.content:
+            results.append(
+                UploadDocumentResponse(
+                    filename=downloaded.filename,
+                    contentType=None,
+                    accepted=False,
+                    error="Downloaded source is empty",
+                )
+            )
+            continue
+
+        try:
+            result = await ingestion_service.ingest_upload(
+                filename=downloaded.filename,
+                content=downloaded.content,
+                content_type=None,
+            )
+        except ValueError as exc:
+            results.append(
+                UploadDocumentResponse(
+                    filename=downloaded.filename,
+                    contentType=None,
+                    accepted=False,
+                    error=str(exc),
+                )
+            )
+            continue
+        except Exception:
+            logger.exception("failed to ingest source uri=%s", uri)
+            results.append(
+                UploadDocumentResponse(
+                    filename=downloaded.filename,
+                    contentType=None,
+                    accepted=False,
+                    error="Failed to ingest document source",
+                )
+            )
+            continue
+
+        results.append(
+            UploadDocumentResponse(
+                filename=downloaded.filename,
+                contentType=None,
+                accepted=True,
+                documentId=result.document_id,
+                chunksStored=result.chunks_stored,
+            )
+        )
+
+    accepted_count = sum(1 for result in results if result.accepted)
+    return UploadDocumentsResponse(
+        acceptedCount=accepted_count,
+        rejectedCount=len(results) - accepted_count,
+        results=results,
+    )
+
+
+@router.post(
+    "/upload/v2",
+    response_model=UploadV2JobCreateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Queue upload ingestion job (Celery worker)",
+)
+async def upload_v2(
+    files: list[UploadFile] = File(
+        ...,
+        alias="file",
+        description="Repeat the `file` field to upload multiple documents.",
+    ),
+    dispatcher: UploadV2Dispatcher = Depends(get_upload_v2_dispatcher),
+):
+    """Queue one upload-ingestion job and return a job id for polling."""
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No files were uploaded",
+        )
+
+    payload_files: list[UploadTaskFilePayload] = []
+    for upload_file in files:
+        content = await upload_file.read()
+        payload_files.append(
+            UploadTaskFilePayload(
+                filename=upload_file.filename or "",
+                content_type=upload_file.content_type,
+                content_base64=base64.b64encode(content).decode("ascii"),
+            )
+        )
+
+    try:
+        job_id = dispatcher.enqueue_uploads(payload_files)
+        return UploadV2JobCreateResponse(jobId=job_id)
+    except CeleryNotAvailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except CeleryWorkerUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except CeleryTaskFailureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/upload/v2/{job_id}",
+    response_model=UploadV2JobStatusResponse,
+    summary="Poll upload v2 job status",
+)
+def upload_v2_status(
+    job_id: str,
+    dispatcher: UploadV2Dispatcher = Depends(get_upload_v2_dispatcher),
+):
+    """Return current status for an upload v2 job id."""
+    if not job_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="job_id must not be empty",
+        )
+
+    try:
+        return dispatcher.get_upload_status(job_id=job_id.strip())
+    except CeleryNotAvailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except CeleryTaskFailureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+
 @router.get(
     "",
     response_model=list[Document],
@@ -174,6 +417,57 @@ def list_documents(
     return [to_document_response(document) for document in documents]
 
 
+@router.get(
+    "/{document_id}/download",
+    summary="Download an uploaded PDF document",
+    responses={
+        status.HTTP_200_OK: {
+            "content": {"application/pdf": {}},
+            "description": "Requested PDF document binary",
+        }
+    },
+)
+def download_document_pdf(
+    document_id: str,
+    filename: str | None = Query(
+        default=None,
+        description=(
+            "Optional PDF filename inside the document folder. "
+            "When omitted, the stored upload filename is used."
+        ),
+    ),
+    repository: DocumentRepository = Depends(get_document_repository),
+):
+    document_id = document_id.strip()
+    if not document_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document id must not be empty",
+        )
+
+    try:
+        pdf_path = repository.resolve_pdf_path(
+            document_id=document_id,
+            filename=filename,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    return FileResponse(
+        path=pdf_path,
+        media_type="application/pdf",
+        filename=pdf_path.name,
+    )
+
+
 @router.post(
     "/delete",
     response_model=DeleteDocumentsResponse,
@@ -182,9 +476,10 @@ def list_documents(
 def delete_documents(
     payload: DeleteDocumentsRequest,
     repository: DocumentRepository = Depends(get_document_repository),
-    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
+    neo4j: Neo4jClient | None = Depends(get_neo4j_client),
 ):
-    """Delete local document artifacts and associated vector records."""
+    """Delete local document artifacts and associated vector and graph records."""
     if not payload.documentIds:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -217,6 +512,15 @@ def delete_documents(
             continue
         seen_document_ids.add(document_id)
 
+        if weaviate is None:
+            results.append(
+                DeleteDocumentResult(
+                    documentId=document_id,
+                    deleted=False,
+                    error="Weaviate is unavailable — vector records not deleted",
+                )
+            )
+            continue
         try:
             deleted_chunks = weaviate.delete_chunks_by_document(document_id)
         except Exception:
@@ -231,6 +535,22 @@ def delete_documents(
                 )
             )
             continue
+
+        deleted_graph_nodes = 0
+        if neo4j is not None:
+            try:
+                deleted_graph_nodes = neo4j.delete_document_subgraph(document_id)
+            except Exception:
+                logger.exception("failed to delete graph records document_id=%s", document_id)
+                results.append(
+                    DeleteDocumentResult(
+                        documentId=document_id,
+                        deleted=False,
+                        deletedChunks=deleted_chunks,
+                        error="Failed to delete document records from Neo4j",
+                    )
+                )
+                continue
 
         try:
             deleted_local = repository.delete_document(document_id)
@@ -256,7 +576,7 @@ def delete_documents(
             )
             continue
 
-        if not deleted_local and deleted_chunks == 0:
+        if not deleted_local and deleted_chunks == 0 and deleted_graph_nodes == 0:
             results.append(
                 DeleteDocumentResult(
                     documentId=document_id,
@@ -290,9 +610,14 @@ def delete_documents(
 )
 def hybrid_search_documents(
     payload: HybridSearchRequest,
-    weaviate: WeaviateClient = Depends(get_weaviate_client),
+    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
 ):
     """Run hybrid retrieval in Weaviate for two documents and return matched chunks."""
+    if weaviate is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Weaviate is not available — hybrid search requires vector storage",
+        )
     document_id_1 = payload.documentId1.strip()
     document_id_2 = payload.documentId2.strip()
     query_string = payload.query.strip()
@@ -348,3 +673,32 @@ def hybrid_search_documents(
             ),
         ],
     )
+
+
+@router.post(
+    "/accuracy-report/refresh",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Re-evaluate ingestion accuracy metrics for all documents",
+    description="""
+Enqueues a background Celery task that runs the ontology enrichment pipeline
+against every document's canonical_nodes.json and writes an updated
+_accuracy_report.json to the upload root.
+""",
+)
+async def refresh_accuracy_report() -> dict[str, str]:
+    try:
+        from grc_policy_server.tasks.refresh_accuracy_report import (
+            refresh_accuracy_report as _task,
+        )
+
+        result = _task.delay()
+        return {
+            "task_id": str(result.id),
+            "message": "Accuracy report refresh queued",
+        }
+    except Exception as exc:
+        logger.exception("failed to enqueue refresh_accuracy_report task")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Could not enqueue task: {exc}",
+        ) from exc

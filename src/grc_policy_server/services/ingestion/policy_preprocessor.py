@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import re
+from dataclasses import replace
+
+from grc_policy_server.services.comparison.policy_semantics import (
+    clean_policy_text,
+    ends_with_terminal_punctuation,
+    extract_clause_meaning,
+    is_non_semantic_content,
+    is_noise_text,
+    starts_with_lowercase,
+)
+from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
+from grc_policy_server.utils.hashing import normalize_for_comparison
+
+_DOUBLE_DASH_BULLET_RE = re.compile(r"(?:(?<=\s)|^)- -\s*")
+
+_AUXILIARY_TITLE_RE = re.compile(
+    r"^\s*(table of contents|contents|index|glossary|list of figures|list of tables)\s*$",
+    re.IGNORECASE,
+)
+_CAPTION_ONLY_RE = re.compile(
+    r"^(?:table|tbl\.?|figure|fig\.?)\s*[a-z]?\d+(?:[\.-]\d+)*\s*[:\-]?\s*\w+",
+    re.IGNORECASE,
+)
+_OBLIGATION_HINT_RE = re.compile(
+    r"\b(shall|must|required|should|may|muss|müssen|soll|sollen|darf|doit|doivent|"
+    r"devrait|peut|obligatoire|requis|exig[eé])\b",
+    re.IGNORECASE,
+)
+_ROLE_HINT_RE = re.compile(
+    r"\b(committee|officer|team|owner|responsible|administrator|admin|manager|"
+    r"custodian|compliance|risk|security|audit)\b",
+    re.IGNORECASE,
+)
+_REG_HINT_RE = re.compile(
+    r"\b(gdpr|rgpd|dsgvo|iso\s?\d+|hipaa|sox|pci|nist|ai\s+act|eu\s+ai\s+act)\b",
+    re.IGNORECASE,
+)
+_DURATION_HINT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(day|days|week|weeks|month|months|year|years|"
+    r"hour|hours|minute|minutes|second|seconds|%|percent)\b",
+    re.IGNORECASE,
+)
+_NUMBER_HINT_RE = re.compile(r"\b\d{1,4}\b")
+
+
+def _normalize_list_text(text: str, labels: tuple[str, ...]) -> str:
+    """Strip VW-style '- -' double-dash bullet markers from list item text.
+
+    Docling preserves the literal '- -' prefix used in VW PDFs. For comparison
+    and embedding purposes these markers are noise; single-dash markdown bullets
+    in markdown_text are handled separately.
+    """
+    if "list_item" not in labels:
+        return text
+    return _DOUBLE_DASH_BULLET_RE.sub("", text).strip()
+
+
+def looks_like_auxiliary(text: str, section_title: str) -> bool:
+    body = (text or "").strip()
+    if not body:
+        return True
+
+    if section_title and _AUXILIARY_TITLE_RE.match(section_title.strip()):
+        return True
+
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    dot_leaders = len(re.findall(r"\.{3,}", body))
+    trailing_numbers = sum(1 for line in lines if re.search(r"\s\d{1,4}\s*$", line))
+    short_lines = sum(1 for line in lines if len(line) <= 70)
+
+    return (
+        len(lines) >= 6
+        and dot_leaders >= 3
+        and trailing_numbers >= 3
+        and short_lines / max(len(lines), 1) > 0.6
+    )
+
+
+def preprocess_parsed_chunks(parsed_chunks: list[ParsedChunk]) -> list[ParsedChunk]:
+    processed: list[ParsedChunk] = []
+
+    for chunk in parsed_chunks:
+        section_title = chunk.section_path[-1] if chunk.section_path else (chunk.title or "")
+        if chunk.chunk_type in {"clause", "table"} and looks_like_auxiliary(
+            chunk.text, section_title
+        ):
+            continue
+
+        if chunk.chunk_type == "table":
+            clean_source = str(chunk.metadata.get("table_clean_text") or chunk.text)
+        else:
+            clean_source = _normalize_list_text(chunk.text, chunk.labels)
+        clean_text = clean_policy_text(clean_source)
+        if chunk.chunk_type in {"clause", "table"} and (
+            not clean_text
+            or is_noise_text(clean_text)
+            or is_non_semantic_content(clean_text)
+        ):
+            continue
+
+        metadata = dict(chunk.metadata)
+        metadata["clean_text"] = clean_text
+        comparison_text = normalize_for_comparison(clean_text)
+        metadata["comparison_text"] = comparison_text
+        metadata["comparison_profile"] = (
+            "table_semantic" if chunk.chunk_type == "table" else "paragraph_semantic"
+        )
+        metadata["low_priority"] = _is_caption_like(clean_text)
+        importance_score, importance_label = _importance_score(
+            clean_text, chunk.chunk_type
+        )
+        metadata["importance_score"] = importance_score
+        metadata["importance_label"] = importance_label
+        if chunk.chunk_type == "table" and chunk.markdown_text:
+            metadata["table_markdown"] = chunk.markdown_text
+        if "list_item" in chunk.labels:
+            metadata["list_item_count"] = sum(
+                1 for lbl in chunk.labels if lbl == "list_item"
+            )
+            if chunk.markdown_text:
+                metadata["markdown_text"] = re.sub(
+                    r"(?m)^- -\s*", "- ", chunk.markdown_text
+                )
+        current = replace(chunk, metadata=metadata)
+
+        if _should_merge(processed[-1], current) if processed else False:
+            processed[-1] = _merge_chunks(processed[-1], current)
+            continue
+
+        processed.append(current)
+
+    return processed
+
+
+def _is_caption_like(text: str) -> bool:
+    """Detect low-signal caption-only blocks ("Table 3: Risk Matrix")."""
+    cleaned = (text or "").strip()
+    if not cleaned or len(cleaned.split()) > 12:
+        return False
+    return bool(_CAPTION_ONLY_RE.match(cleaned))
+
+
+def _importance_score(text: str, chunk_type: str) -> tuple[float, str]:
+    """Heuristic importance score to prioritize meaningful clauses for comparison."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return 0.0, "low"
+
+    score = 0.5 if chunk_type == "table" else 0.1
+
+    meaning = extract_clause_meaning(cleaned)
+    if meaning.obligation or _OBLIGATION_HINT_RE.search(cleaned):
+        score += 0.4
+    if _DURATION_HINT_RE.search(cleaned) or _NUMBER_HINT_RE.search(cleaned):
+        score += 0.15
+    if _ROLE_HINT_RE.search(cleaned):
+        score += 0.15
+    if _REG_HINT_RE.search(cleaned):
+        score += 0.1
+
+    score = min(score, 1.0)
+    if score >= 0.65:
+        return score, "high"
+    if score >= 0.35:
+        return score, "medium"
+    return score, "low"
+
+
+def _should_merge(previous: ParsedChunk, current: ParsedChunk) -> bool:
+    if previous.chunk_type != "clause" or current.chunk_type != "clause":
+        return False
+    if previous.section_path != current.section_path:
+        return False
+    prev_page = previous.page_number or 0
+    curr_page = current.page_number or 0
+    # Allow same-page merge (original) OR strictly consecutive cross-page continuation
+    if not (prev_page == curr_page or curr_page == prev_page + 1):
+        return False
+    previous_text = previous.metadata.get("clean_text") or ""
+    current_text = current.metadata.get("clean_text") or ""
+    if not previous_text or not current_text:
+        return False
+    return (
+        not ends_with_terminal_punctuation(previous.text)
+        and starts_with_lowercase(current.text)
+    )
+
+
+def _merge_chunks(previous: ParsedChunk, current: ParsedChunk) -> ParsedChunk:
+    merged_text = f"{previous.text.rstrip()} {current.text.lstrip()}".strip()
+    # Merge markdown_text if both exist, otherwise use whichever is available
+    merged_markdown: str | None = None
+    if previous.markdown_text and current.markdown_text:
+        merged_markdown = f"{previous.markdown_text.rstrip()}\n{current.markdown_text.lstrip()}".strip()
+    elif previous.markdown_text:
+        merged_markdown = previous.markdown_text
+    elif current.markdown_text:
+        merged_markdown = current.markdown_text
+
+    merged_metadata = dict(previous.metadata)
+    merged_metadata["clean_text"] = clean_policy_text(merged_text)
+    merged_metadata["captions"] = _merge_unique(
+        previous.metadata.get("captions"),
+        current.metadata.get("captions"),
+    )
+    merged_metadata["doc_items_refs"] = _merge_unique(
+        previous.metadata.get("doc_items_refs"),
+        current.metadata.get("doc_items_refs"),
+    )
+
+    return ParsedChunk(
+        chunk_type=previous.chunk_type,
+        text=merged_text,
+        section_path=previous.section_path,
+        page_number=previous.page_number,
+        ordinal=previous.ordinal,
+        title=previous.title,
+        markdown_text=merged_markdown,
+        docling_path=previous.docling_path or current.docling_path,
+        source_refs=tuple(_merge_unique(previous.source_refs, current.source_refs)),
+        labels=tuple(_merge_unique(previous.labels, current.labels)),
+        metadata=merged_metadata,
+        source=previous.source,
+    )
+
+
+def _merge_unique(left, right) -> list[str]:
+    merged: list[str] = []
+    for values in (left or [], right or []):
+        for value in values:
+            string_value = str(value)
+            if string_value and string_value not in merged:
+                merged.append(string_value)
+    return merged

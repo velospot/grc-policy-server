@@ -1,0 +1,27 @@
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant FE as Next.js UI
+    participant API as FastAPI /documents/upload/v2
+    participant Q as Celery + Redis
+    participant W as Worker upload_v2
+    participant ING as Ingestion Service
+    participant V as Weaviate
+    participant S as Upload Storage
+
+    U->>FE: Select files and confirm upload
+    FE->>API: POST multipart files
+    API->>Q: send_task(ingest_upload_v2)
+    API-->>FE: 202 { jobId, status: queued }
+
+    loop Until terminal state
+        FE->>API: GET /documents/upload/v2/{jobId}
+        API->>Q: AsyncResult(jobId)
+        API-->>FE: queued | running | finished | failed
+    end
+
+    Q->>W: Deliver task payload
+    W->>ING: Decode and ingest each file
+    ING->>V: upsert_chunks(vector records)
+    ING->>S: Persist file + metadata artifacts
+    W-->>Q: SUCCESS or FAILURE payload

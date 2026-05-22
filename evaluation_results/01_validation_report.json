@@ -1,0 +1,34 @@
+[
+  {
+    "document_id": "20d49955-3a83-47e7-99ba-c7ce8f8690db",
+    "filename": "20d49955-3a83-47e7-99ba-c7ce8f8690db",
+    "total_nodes": 720,
+    "total_tables": 25,
+    "total_clauses": 507,
+    "tables_with_headers": 25,
+    "tables_multi_page_stitched": 2,
+    "ocr_node_count": 0,
+    "avg_table_col_count": 7.6,
+    "degenerate_tables_filtered": 0,
+    "section_coverage_pct": 1.0,
+    "header_quality_pct": 1.0,
+    "reference_section_filter_pct": 0.0,
+    "errors": []
+  },
+  {
+    "document_id": "766ac1df-06c6-421e-9472-948611087c01",
+    "filename": "766ac1df-06c6-421e-9472-948611087c01",
+    "total_nodes": 736,
+    "total_tables": 12,
+    "total_clauses": 537,
+    "tables_with_headers": 12,
+    "tables_multi_page_stitched": 2,
+    "ocr_node_count": 0,
+    "avg_table_col_count": 4.916666666666667,
+    "degenerate_tables_filtered": 0,
+    "section_coverage_pct": 1.0,
+    "header_quality_pct": 1.0,
+    "reference_section_filter_pct": 0.0,
+    "errors": []
+  }
+]

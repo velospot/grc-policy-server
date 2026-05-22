@@ -1,0 +1,61 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments / uv
+.venv/
+venv/
+.python-version
+
+# Local data and uploads (never bake production data into the image)
+data/
+weaviate_data/
+neo4j/
+knowledge_base/
+evaluation_results/
+localconf/
+todo/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Docker artifacts
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# Documentation
+*.md
+docs/
+!README.md
+
+# Tests
+tests/
+
+# Scripts (Dockerfile uses CMD directly; scripts/ not needed at runtime)
+scripts/
+
+# CI/CD
+.github/
+
+# Misc
+*.log
+*.tmp
+neo4j_auth.txt
+opik_nginx_default_local.conf
+Makefile

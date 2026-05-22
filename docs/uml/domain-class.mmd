@@ -1,0 +1,70 @@
+classDiagram
+    class Document {
+      +string id
+      +string name
+      +string version
+      +string uploadDate
+      +string size
+      +string category
+    }
+
+    class UploadDocumentResponse {
+      +string filename
+      +string contentType
+      +bool accepted
+      +string documentId
+      +int chunksStored
+      +string error
+    }
+
+    class UploadDocumentsResponse {
+      +int acceptedCount
+      +int rejectedCount
+      +UploadDocumentResponse[] results
+    }
+
+    class UploadV2JobStatusResponse {
+      +string jobId
+      +string status
+      +bool done
+      +UploadDocumentsResponse result
+      +string error
+    }
+
+    class KeyDifference {
+      +string changeType
+      +string section
+      +string doc1Content
+      +string doc2Content
+      +string impact
+      +string nodeType
+    }
+
+    class ComparisonResult {
+      +string summary
+      +KeyDifference[] keyDifferences
+      +ActionItem[] actionPlan
+      +string[] followUpQuestions
+    }
+
+    class CompareV2JobStatusResponse {
+      +string jobId
+      +string status
+      +bool done
+      +ComparisonResult result
+      +string error
+      +bool cacheHit
+    }
+
+    class ActionItem {
+      +string priority
+      +string action
+      +string timeline
+      +string owner
+    }
+
+    UploadDocumentsResponse "1" o-- "*" UploadDocumentResponse
+    UploadV2JobStatusResponse --> UploadDocumentsResponse
+    ComparisonResult "1" o-- "*" KeyDifference
+    ComparisonResult "1" o-- "*" ActionItem
+    CompareV2JobStatusResponse --> ComparisonResult

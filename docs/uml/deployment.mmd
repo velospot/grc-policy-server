@@ -1,0 +1,59 @@
+flowchart TB
+    subgraph Client["Client Tier"]
+        Browser["Browser"]
+    end
+
+    subgraph Edge["Edge Tier"]
+        LB["Load Balancer / Ingress"]
+    end
+
+    subgraph App["Application Tier"]
+        API1["FastAPI Instance A"]
+        API2["FastAPI Instance B"]
+        W1["Celery Worker A"]
+        W2["Celery Worker B"]
+    end
+
+    subgraph Data["Data and AI Tier"]
+        Redis["Redis Broker/Backend"]
+        Weaviate["Weaviate Cluster"]
+        Neo4j["Neo4j (optional)"]
+        Obj["Object Storage / Upload Root"]
+        DB["Metadata DB (target)"]
+        LLM["Ollama Service"]
+        Cache["Shared Cache (target)"]
+    end
+
+    Browser --> LB
+    LB --> API1
+    LB --> API2
+
+    API1 --> Redis
+    API2 --> Redis
+    API1 --> Weaviate
+    API2 --> Weaviate
+    API1 --> Neo4j
+    API2 --> Neo4j
+    API1 --> Obj
+    API2 --> Obj
+    API1 --> DB
+    API2 --> DB
+    API1 --> Cache
+    API2 --> Cache
+    API1 --> LLM
+    API2 --> LLM
+
+    W1 --> Redis
+    W2 --> Redis
+    W1 --> Weaviate
+    W2 --> Weaviate
+    W1 --> Neo4j
+    W2 --> Neo4j
+    W1 --> Obj
+    W2 --> Obj
+    W1 --> DB
+    W2 --> DB
+    W1 --> Cache
+    W2 --> Cache
+    W1 --> LLM
+    W2 --> LLM

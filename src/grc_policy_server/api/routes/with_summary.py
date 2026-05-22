@@ -4,13 +4,15 @@ from grc_policy_server.api.deps import (
     get_diff_engine_stream,
     require_api_bearer_token,
 )
+from grc_policy_server.core.config import settings
 from grc_policy_server.models.schemas import (
     ActionItem,
+    ComparisonAccuracyMetrics,
     CompareRequest,
     ComparisonResult,
     KeyDifference,
 )
-from grc_policy_server.services.comparision.real_diff_engine_stream import (
+from grc_policy_server.services.comparison.real_diff_engine_stream import (
     RealDiffEngineStream,
 )
 
@@ -34,8 +36,15 @@ async def compare_with_summary(
     summary: str | None = None
     action_plan: list[ActionItem] = []
     follow_up_questions: list[str] = []
+    accuracy_metrics: ComparisonAccuracyMetrics | None = None
 
-    async for event in service.compare_stream(payload.doc1, payload.doc2):
+    stream = service.compare_stream(
+        payload.doc1,
+        payload.doc2,
+        force_re_extract=payload.forceReExtract,
+    )
+
+    async for event in stream:
         event_type = event.get("type")
 
         if event_type == "diff" and "item" in event:
@@ -50,6 +59,9 @@ async def compare_with_summary(
             follow_up_questions = [
                 str(question) for question in event.get("followUpQuestions", [])
             ]
+            raw_accuracy = event.get("accuracyMetrics")
+            if raw_accuracy is not None:
+                accuracy_metrics = ComparisonAccuracyMetrics.model_validate(raw_accuracy)
 
     if summary is None:
         raise HTTPException(
@@ -57,9 +69,22 @@ async def compare_with_summary(
             detail="Comparison stream finished without a summary payload",
         )
 
+    audit_mode = payload.auditMode
+    hidden_diffs_count = 0
+    if not audit_mode:
+        visible = [d for d in key_differences if d.changeSeverity != "low"]
+        hidden_diffs_count = len(key_differences) - len(visible)
+        key_differences = visible
+
+    require_human_review = any(d.requiresHumanReview for d in key_differences)
+
     return ComparisonResult(
         summary=summary,
         keyDifferences=key_differences,
         actionPlan=action_plan,
         followUpQuestions=follow_up_questions,
+        accuracyMetrics=accuracy_metrics,
+        comparisonMode="auditor_grade" if audit_mode else "simple",
+        requireHumanReview=require_human_review,
+        hiddenDiffsCount=hidden_diffs_count,
     )

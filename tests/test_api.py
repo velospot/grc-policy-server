@@ -1,18 +1,22 @@
+import base64
 from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 from grc_policy_server.api.deps import (
+    get_compare_v2_dispatcher,
+    get_comparison_cache_store,
     get_diff_engine,
     get_diff_engine_stream,
     get_document_ingestion_service_factory,
-    get_neo4j_client,
     get_document_repository,
+    get_neo4j_client,
+    get_upload_v2_dispatcher,
     get_weaviate_client,
 )
 from grc_policy_server.core.config import settings
-from grc_policy_server.main import app, request_lock
+from grc_policy_server.main import app
 from grc_policy_server.models.domain import DocumentDomain
 from grc_policy_server.models.schemas import (
     ActionItem,
@@ -20,8 +24,12 @@ from grc_policy_server.models.schemas import (
     DocumentReference,
     KeyDifference,
 )
+from grc_policy_server.repositories.documents import DocumentRepository
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     UploadIngestionResult,
+)
+from grc_policy_server.services.ingestion.upload_v2_dispatcher import (
+    CeleryWorkerUnavailableError,
 )
 
 client = TestClient(app)
@@ -68,7 +76,7 @@ class StubDocumentRepository:
 
 
 class StubDiffEngine:
-    async def compare(self, doc1, doc2) -> ComparisonResult:
+    async def compare(self, doc1, doc2, force_re_extract: bool = False) -> ComparisonResult:
         return ComparisonResult(
             summary=f"Compared {doc1.id} with {doc2.id}",
             keyDifferences=[
@@ -107,7 +115,7 @@ class StubDiffEngine:
 
 
 class StubDiffEngineStream:
-    async def compare_stream(self, doc1, doc2):
+    async def compare_stream(self, doc1, doc2, force_re_extract: bool = False):
         yield {"type": "progress", "stage": "load_chunks"}
         yield {
             "type": "diff",
@@ -142,6 +150,42 @@ class StubDiffEngineStream:
         }
 
 
+class StubCompareV2Dispatcher:
+    def __init__(
+        self,
+        *,
+        enqueue_job_id: str = "compare-job-1",
+        status_payload: dict | None = None,
+        enqueue_error: Exception | None = None,
+        status_error: Exception | None = None,
+    ):
+        self.enqueue_job_id = enqueue_job_id
+        self.status_payload = status_payload or {
+            "jobId": enqueue_job_id,
+            "status": "queued",
+            "done": False,
+            "result": None,
+            "error": None,
+            "cacheHit": False,
+        }
+        self.enqueue_error = enqueue_error
+        self.status_error = status_error
+        self.enqueue_calls = []
+        self.status_calls = []
+
+    def enqueue_compare(self, payload):
+        self.enqueue_calls.append(payload)
+        if self.enqueue_error is not None:
+            raise self.enqueue_error
+        return self.enqueue_job_id
+
+    def get_compare_status(self, *, job_id: str):
+        self.status_calls.append(job_id)
+        if self.status_error is not None:
+            raise self.status_error
+        return self.status_payload
+
+
 class StubDocumentIngestionService:
     async def ingest_upload(self, *, filename: str, content: bytes, content_type: str | None):
         assert content_type == "application/pdf"
@@ -152,6 +196,41 @@ class StubDocumentIngestionService:
             assert content == b"policy second content"
             return UploadIngestionResult(document_id="doc-upload-2", chunks_stored=5)
         raise AssertionError(f"Unexpected filename: {filename}")
+
+
+class StubUploadV2Dispatcher:
+    def __init__(
+        self,
+        *,
+        job_id: str = "job-1",
+        status_payload: dict | None = None,
+        enqueue_error: Exception | None = None,
+        status_error: Exception | None = None,
+    ):
+        self.job_id = job_id
+        self.status_payload = status_payload or {
+            "jobId": job_id,
+            "status": "queued",
+            "done": False,
+            "result": None,
+            "error": None,
+        }
+        self.enqueue_error = enqueue_error
+        self.status_error = status_error
+        self.enqueue_calls = []
+        self.status_calls = []
+
+    def enqueue_uploads(self, payload_files):
+        self.enqueue_calls.append(payload_files)
+        if self.enqueue_error is not None:
+            raise self.enqueue_error
+        return self.job_id
+
+    def get_upload_status(self, job_id: str):
+        self.status_calls.append(job_id)
+        if self.status_error is not None:
+            raise self.status_error
+        return self.status_payload
 
 
 class StubDeleteDocumentRepository:
@@ -180,6 +259,24 @@ class StubWeaviateDeleteClient:
         if document_id in self.failing_document_ids:
             raise RuntimeError("weaviate deletion failure")
         return self.deleted_chunks.get(document_id, 0)
+
+
+class StubNeo4jDeleteClient:
+    def __init__(
+        self,
+        *,
+        deleted_nodes: dict[str, int] | None = None,
+        failing_document_ids: set[str] | None = None,
+    ):
+        self.deleted_nodes = deleted_nodes or {}
+        self.failing_document_ids = failing_document_ids or set()
+        self.deleted_document_ids: list[str] = []
+
+    def delete_document_subgraph(self, document_id: str) -> int:
+        self.deleted_document_ids.append(document_id)
+        if document_id in self.failing_document_ids:
+            raise RuntimeError("neo4j deletion failure")
+        return self.deleted_nodes.get(document_id, 0)
 
 
 class StubWeaviateHybridSearchClient:
@@ -225,10 +322,15 @@ def test_swagger_ui_is_available():
     assert "Swagger UI" in response.text
 
 
-def test_request_lock_is_released_after_request():
+def test_health_is_available():
     response = client.get("/health")
     assert response.status_code == 200
-    assert request_lock.locked() is False
+
+
+def test_write_requests_are_not_globally_blocked():
+    app.dependency_overrides[get_diff_engine] = lambda: StubDiffEngine()
+    response = client.post("/compare", json=compare_payload(), headers=auth_headers())
+    assert response.status_code == 200
 
 
 def test_openapi_includes_core_routes():
@@ -239,11 +341,17 @@ def test_openapi_includes_core_routes():
     paths = schema["paths"]
     assert "/health" in paths
     assert "/documents" in paths
+    assert "/documents/{document_id}/download" in paths
     assert "/documents/delete" in paths
     assert "/documents/search/hybrid" in paths
     assert "/documents/upload" in paths
+    assert "/documents/upload/v2" in paths
+    assert "/documents/upload/v2/{job_id}" in paths
     assert "/compare" in paths
     assert "/compare/with-summary" in paths
+    assert "/v2/compare" in paths
+    assert "/v2/compare/response" in paths
+    assert "/v2/compare/response/{job_id}" in paths
 
     security_schemes = schema["components"]["securitySchemes"]
     assert any(
@@ -296,6 +404,83 @@ def test_list_documents():
             "category": "risk",
         }
     ]
+
+
+def test_download_document_default_pdf(tmp_path):
+    doc_dir = tmp_path / "doc-1"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "policy.pdf").write_bytes(b"%PDF-1.7 default")
+    (doc_dir / "metadata.json").write_text(
+        '{"id":"doc-1","stored_filename":"policy.pdf"}',
+        encoding="utf-8",
+    )
+
+    app.dependency_overrides[get_document_repository] = lambda: DocumentRepository(
+        upload_root=tmp_path
+    )
+    response = client.get("/documents/doc-1/download", headers=auth_headers())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert "attachment; filename=\"policy.pdf\"" in response.headers["content-disposition"]
+    assert response.content == b"%PDF-1.7 default"
+
+
+def test_download_document_specific_pdf(tmp_path):
+    doc_dir = tmp_path / "doc-1"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "policy-v1.pdf").write_bytes(b"%PDF-1.7 v1")
+    (doc_dir / "policy-v2.pdf").write_bytes(b"%PDF-1.7 v2")
+    (doc_dir / "metadata.json").write_text(
+        '{"id":"doc-1","stored_filename":"policy-v1.pdf"}',
+        encoding="utf-8",
+    )
+
+    app.dependency_overrides[get_document_repository] = lambda: DocumentRepository(
+        upload_root=tmp_path
+    )
+    response = client.get(
+        "/documents/doc-1/download?filename=policy-v2.pdf",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert "attachment; filename=\"policy-v2.pdf\"" in response.headers["content-disposition"]
+    assert response.content == b"%PDF-1.7 v2"
+
+
+def test_download_document_rejects_non_pdf_filename(tmp_path):
+    doc_dir = tmp_path / "doc-1"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "policy.pdf").write_bytes(b"%PDF-1.7")
+    (doc_dir / "metadata.json").write_text(
+        '{"id":"doc-1","stored_filename":"policy.pdf"}',
+        encoding="utf-8",
+    )
+
+    app.dependency_overrides[get_document_repository] = lambda: DocumentRepository(
+        upload_root=tmp_path
+    )
+    response = client.get(
+        "/documents/doc-1/download?filename=policy.txt",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Only PDF files can be downloaded from this endpoint"
+    }
+
+
+def test_download_document_returns_404_for_missing_document(tmp_path):
+    app.dependency_overrides[get_document_repository] = lambda: DocumentRepository(
+        upload_root=tmp_path
+    )
+    response = client.get("/documents/missing/download", headers=auth_headers())
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Document not found"}
 
 
 def test_upload_document():
@@ -384,12 +569,106 @@ def test_upload_document_rejects_empty_file_in_results():
     }
 
 
+def test_upload_document_v2():
+    dispatcher = StubUploadV2Dispatcher(job_id="upload-job-123")
+    app.dependency_overrides[get_upload_v2_dispatcher] = lambda: dispatcher
+
+    response = client.post(
+        "/documents/upload/v2",
+        files={"file": ("policy.pdf", b"policy content", "application/pdf")},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 202
+    assert response.json() == {
+        "jobId": "upload-job-123",
+        "status": "queued",
+    }
+    assert len(dispatcher.enqueue_calls) == 1
+    payload_file = dispatcher.enqueue_calls[0][0]
+    assert payload_file.filename == "policy.pdf"
+    assert payload_file.content_type == "application/pdf"
+    assert (
+        base64.b64decode(payload_file.content_base64.encode("ascii")) == b"policy content"
+    )
+
+
+def test_upload_document_v2_returns_503_when_worker_unavailable():
+    dispatcher = StubUploadV2Dispatcher(
+        enqueue_error=CeleryWorkerUnavailableError(
+            "No active Celery workers detected for upload v2 endpoint"
+        )
+    )
+    app.dependency_overrides[get_upload_v2_dispatcher] = lambda: dispatcher
+
+    response = client.post(
+        "/documents/upload/v2",
+        files={"file": ("policy.pdf", b"policy content", "application/pdf")},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "No active Celery workers detected for upload v2 endpoint"
+    }
+
+
+def test_upload_document_v2_status_finished():
+    dispatcher = StubUploadV2Dispatcher(
+        job_id="upload-job-456",
+        status_payload={
+            "jobId": "upload-job-456",
+            "status": "finished",
+            "done": True,
+            "result": {
+                "acceptedCount": 1,
+                "rejectedCount": 0,
+                "results": [
+                    {
+                        "filename": "policy.pdf",
+                        "contentType": "application/pdf",
+                        "accepted": True,
+                        "documentId": "doc-upload-v2-1",
+                        "chunksStored": 3,
+                        "error": None,
+                    }
+                ],
+            },
+            "error": None,
+        },
+    )
+    app.dependency_overrides[get_upload_v2_dispatcher] = lambda: dispatcher
+
+    response = client.get("/documents/upload/v2/upload-job-456", headers=auth_headers())
+    assert response.status_code == 200
+    assert response.json() == {
+        "jobId": "upload-job-456",
+        "status": "finished",
+        "done": True,
+        "result": {
+            "acceptedCount": 1,
+            "rejectedCount": 0,
+            "results": [
+                {
+                    "filename": "policy.pdf",
+                    "contentType": "application/pdf",
+                    "accepted": True,
+                    "documentId": "doc-upload-v2-1",
+                    "chunksStored": 3,
+                    "error": None,
+                }
+            ],
+        },
+        "error": None,
+    }
+    assert dispatcher.status_calls == ["upload-job-456"]
+
+
 def test_delete_documents():
     repository = StubDeleteDocumentRepository(
         delete_results={
             "doc-local-only": True,
             "doc-local-and-vectors": True,
             "doc-vectors-only": False,
+            "doc-graph-only": False,
             "doc-missing": False,
         }
     )
@@ -398,11 +677,22 @@ def test_delete_documents():
             "doc-local-only": 0,
             "doc-local-and-vectors": 4,
             "doc-vectors-only": 2,
+            "doc-graph-only": 0,
+            "doc-missing": 0,
+        }
+    )
+    neo4j = StubNeo4jDeleteClient(
+        deleted_nodes={
+            "doc-local-only": 1,
+            "doc-local-and-vectors": 5,
+            "doc-vectors-only": 2,
+            "doc-graph-only": 3,
             "doc-missing": 0,
         }
     )
     app.dependency_overrides[get_document_repository] = lambda: repository
     app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
         "/documents/delete",
@@ -411,6 +701,7 @@ def test_delete_documents():
                 "doc-local-only",
                 "doc-local-and-vectors",
                 "doc-vectors-only",
+                "doc-graph-only",
                 "doc-missing",
             ]
         },
@@ -418,7 +709,7 @@ def test_delete_documents():
     )
     assert response.status_code == 200
     assert response.json() == {
-        "deletedCount": 3,
+        "deletedCount": 4,
         "failedCount": 1,
         "results": [
             {
@@ -440,6 +731,12 @@ def test_delete_documents():
                 "error": None,
             },
             {
+                "documentId": "doc-graph-only",
+                "deleted": True,
+                "deletedChunks": 0,
+                "error": None,
+            },
+            {
                 "documentId": "doc-missing",
                 "deleted": False,
                 "deletedChunks": 0,
@@ -452,8 +749,10 @@ def test_delete_documents():
 def test_delete_documents_rejects_duplicate_and_blank_ids():
     repository = StubDeleteDocumentRepository(delete_results={"doc-1": True})
     weaviate = StubWeaviateDeleteClient(deleted_chunks={"doc-1": 3})
+    neo4j = StubNeo4jDeleteClient(deleted_nodes={"doc-1": 2})
     app.dependency_overrides[get_document_repository] = lambda: repository
     app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
         "/documents/delete",
@@ -490,8 +789,10 @@ def test_delete_documents_rejects_duplicate_and_blank_ids():
 def test_delete_documents_returns_error_on_weaviate_failure():
     repository = StubDeleteDocumentRepository(delete_results={"doc-1": True})
     weaviate = StubWeaviateDeleteClient(failing_document_ids={"doc-1"})
+    neo4j = StubNeo4jDeleteClient(deleted_nodes={"doc-1": 4})
     app.dependency_overrides[get_document_repository] = lambda: repository
     app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
         "/documents/delete",
@@ -512,6 +813,36 @@ def test_delete_documents_returns_error_on_weaviate_failure():
         ],
     }
     assert repository.deleted_document_ids == []
+    assert neo4j.deleted_document_ids == []
+
+
+def test_delete_documents_returns_error_on_neo4j_failure():
+    repository = StubDeleteDocumentRepository(delete_results={"doc-1": True})
+    weaviate = StubWeaviateDeleteClient(deleted_chunks={"doc-1": 3})
+    neo4j = StubNeo4jDeleteClient(failing_document_ids={"doc-1"})
+    app.dependency_overrides[get_document_repository] = lambda: repository
+    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_neo4j_client] = lambda: neo4j
+
+    response = client.post(
+        "/documents/delete",
+        json={"documentIds": ["doc-1"]},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "deletedCount": 0,
+        "failedCount": 1,
+        "results": [
+            {
+                "documentId": "doc-1",
+                "deleted": False,
+                "deletedChunks": 3,
+                "error": "Failed to delete document records from Neo4j",
+            }
+        ],
+    }
+    assert repository.deleted_document_ids == []
 
 
 def test_hybrid_search_documents():
@@ -523,8 +854,12 @@ def test_hybrid_search_documents():
                     "document_id": "doc-1",
                     "section_path": "Access Control",
                     "text": "MFA is required for admins.",
+                    "canonical_text": "mfa is required for admins.",
+                    "node_type": "clause",
+                    "markdown_text": "MFA is required for admins.",
                     "chunk_index": 2,
                     "_distance": 0.12,
+                    "_score": 0.88,
                 }
             ],
             "doc-2": [
@@ -532,9 +867,13 @@ def test_hybrid_search_documents():
                     "chunk_id": "doc-2:4",
                     "document_id": "doc-2",
                     "section_path": "Authentication",
-                    "text": "MFA is mandatory for all users.",
+                    "text": "| Role | Requirement |\n| --- | --- |\n| User | MFA mandatory |",
+                    "canonical_text": "role requirement user mfa mandatory",
+                    "node_type": "table",
+                    "markdown_text": "| Role | Requirement |\n| --- | --- |\n| User | MFA mandatory |",
                     "chunk_index": 4,
                     "_distance": 0.08,
+                    "_score": 0.92,
                 }
             ],
         }
@@ -562,9 +901,15 @@ def test_hybrid_search_documents():
                         "chunkId": "doc-1:2",
                         "documentId": "doc-1",
                         "sectionPath": "Access Control",
-                        "text": "MFA is required for admins.",
+                        "text": "mfa is required for admins.",
+                        "nodeType": "clause",
+                        "canonicalText": "mfa is required for admins.",
+                        "markdown": "MFA is required for admins.",
+                        "tableMarkdown": None,
                         "chunkIndex": 2,
-                        "score": 0.12,
+                        "score": 0.88,
+                        "distance": 0.12,
+                        "scores": {"score": 0.88, "distance": 0.12},
                     }
                 ],
             },
@@ -575,9 +920,15 @@ def test_hybrid_search_documents():
                         "chunkId": "doc-2:4",
                         "documentId": "doc-2",
                         "sectionPath": "Authentication",
-                        "text": "MFA is mandatory for all users.",
+                        "text": "role requirement user mfa mandatory",
+                        "nodeType": "table",
+                        "canonicalText": "role requirement user mfa mandatory",
+                        "markdown": "| Role | Requirement |\n| --- | --- |\n| User | MFA mandatory |",
+                        "tableMarkdown": "| Role | Requirement |\n| --- | --- |\n| User | MFA mandatory |",
                         "chunkIndex": 4,
-                        "score": 0.08,
+                        "score": 0.92,
+                        "distance": 0.08,
+                        "scores": {"score": 0.92, "distance": 0.08},
                     }
                 ],
             },
@@ -658,6 +1009,146 @@ def test_compare_with_summary():
     assert payload["keyDifferences"][0]["changeType"] == "ADDED"
 
 
+def test_compare_v2_enqueue():
+    dispatcher = StubCompareV2Dispatcher(enqueue_job_id="compare-job-123")
+
+    class StubCacheStore:
+        def load_for_pair(self, *, doc1_id: str, doc2_id: str):
+            return None
+
+        def cached_job_id_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+            return f"cached-{doc1_id}-{doc2_id}"
+
+        def cache_key_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+            return f"{doc1_id}:{doc2_id}"
+
+    app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
+    app.dependency_overrides[get_comparison_cache_store] = lambda: StubCacheStore()
+
+    response = client.post("/v2/compare", json=compare_payload(), headers=auth_headers())
+    assert response.status_code == 202
+    assert response.json() == {
+        "jobId": "compare-job-123",
+        "status": "queued",
+        "cacheHit": False,
+        "result": None,
+    }
+    assert len(dispatcher.enqueue_calls) == 1
+    queued_payload = dispatcher.enqueue_calls[0]
+    assert queued_payload.doc1.id == "policy-v1"
+    assert queued_payload.doc2.id == "policy-v2"
+    assert queued_payload.cache_key == "policy-v1:policy-v2"
+
+
+def test_compare_v2_enqueue_returns_cached_result():
+    dispatcher = StubCompareV2Dispatcher(enqueue_job_id="compare-job-123")
+    cached_result = ComparisonResult(
+        summary="cached",
+        keyDifferences=[],
+        actionPlan=[],
+        followUpQuestions=[],
+    )
+
+    class StubCacheStore:
+        def load_for_pair(self, *, doc1_id: str, doc2_id: str):
+            return cached_result
+
+        def cached_job_id_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+            return f"cached-{doc1_id}-{doc2_id}"
+
+        def cache_key_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+            return f"{doc1_id}:{doc2_id}"
+
+    app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
+    app.dependency_overrides[get_comparison_cache_store] = lambda: StubCacheStore()
+
+    response = client.post("/v2/compare", json=compare_payload(), headers=auth_headers())
+    assert response.status_code == 202
+    assert response.json() == {
+        "jobId": "cached-policy-v1-policy-v2",
+        "status": "finished",
+        "cacheHit": True,
+        "result": {
+            "summary": "cached",
+            "keyDifferences": [],
+            "actionPlan": [],
+            "followUpQuestions": [],
+            "accuracyMetrics": None,
+        },
+    }
+    assert dispatcher.enqueue_calls == []
+
+
+def test_compare_v2_response_by_path_param():
+    dispatcher = StubCompareV2Dispatcher(
+        status_payload={
+            "jobId": "compare-job-456",
+            "status": "finished",
+            "done": True,
+            "result": {
+                "summary": "Compared policy-v1 with policy-v2",
+                "keyDifferences": [],
+                "actionPlan": [],
+                "followUpQuestions": [],
+                "accuracyMetrics": None,
+            },
+            "error": None,
+            "cacheHit": False,
+        }
+    )
+    app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
+
+    response = client.get(
+        "/v2/compare/response/compare-job-456",
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "jobId": "compare-job-456",
+        "status": "finished",
+        "done": True,
+        "result": {
+            "summary": "Compared policy-v1 with policy-v2",
+            "keyDifferences": [],
+            "actionPlan": [],
+            "followUpQuestions": [],
+            "accuracyMetrics": None,
+        },
+        "error": None,
+        "cacheHit": False,
+    }
+    assert dispatcher.status_calls == ["compare-job-456"]
+
+
+def test_compare_v2_response_by_query_param():
+    dispatcher = StubCompareV2Dispatcher(
+        status_payload={
+            "jobId": "compare-job-789",
+            "status": "queued",
+            "done": False,
+            "result": None,
+            "error": None,
+            "cacheHit": False,
+        }
+    )
+    app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
+
+    response = client.get(
+        "/v2/compare/response?jobid=compare-job-789",
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "jobId": "compare-job-789",
+        "status": "queued",
+        "done": False,
+        "result": None,
+        "error": None,
+        "cacheHit": False,
+    }
+    assert dispatcher.status_calls == ["compare-job-789"]
+
+
 def test_weaviate_dependency_closes_client(monkeypatch):
     closed = {"value": False}
 
@@ -686,6 +1177,7 @@ def test_neo4j_dependency_closes_client(monkeypatch):
             closed["value"] = True
 
     monkeypatch.setattr("grc_policy_server.api.deps.Neo4jClient", StubNeo4jClient)
+    monkeypatch.setattr(settings, "neo4j_enabled", True)
 
     dep = get_neo4j_client()
     _ = next(dep)
@@ -693,3 +1185,14 @@ def test_neo4j_dependency_closes_client(monkeypatch):
         next(dep)
 
     assert closed["value"] is True
+
+
+def test_neo4j_dependency_returns_none_when_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "neo4j_enabled", False)
+
+    dep = get_neo4j_client()
+    client = next(dep)
+    with pytest.raises(StopIteration):
+        next(dep)
+
+    assert client is None

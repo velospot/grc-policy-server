@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends
 
 from grc_policy_server.api.deps import get_diff_engine, require_api_bearer_token
+from grc_policy_server.core.config import settings
 from grc_policy_server.models.schemas import CompareRequest, ComparisonResult
-from grc_policy_server.services.comparision.real_diff_engine import RealDiffEngine
+from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 
 router = APIRouter(
     prefix="/compare",
@@ -20,4 +21,11 @@ async def compare_documents(
     payload: CompareRequest,
     service: RealDiffEngine = Depends(get_diff_engine),
 ):
-    return await service.compare(payload.doc1, payload.doc2)
+    effective_save_to_db = payload.saveToDb or settings.save_comparison_to_db
+    return await service.compare(
+        payload.doc1,
+        payload.doc2,
+        force_re_extract=payload.forceReExtract,
+        audit_mode=payload.auditMode,
+        save_to_db=effective_save_to_db,
+    )
