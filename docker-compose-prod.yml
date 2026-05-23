@@ -72,10 +72,30 @@ services:
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
       PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
       ENABLE_API_BASED_MODULES: "true"
-      ENABLE_MODULES: "text2vec-huggingface,text2vec-ollama,generative-ollama"
-      DEFAULT_VECTORIZER_MODULE: "text2vec-huggingface"
-      HUGGINGFACE_APIKEY: ${HUGGINGFACE_APIKEY:-}
+      ENABLE_MODULES: "text2vec-ollama,generative-ollama"
+      DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
       CLUSTER_HOSTNAME: "node1"
+  # GPU worker — requires NVIDIA Container Toolkit on the host.
+  # Build image first: docker build -f Dockerfile.gpu -t grc-policy-server:gpu .
+  # worker-gpu:
+  #   container_name: grc_worker_gpu
+  #   image: grc-policy-server:gpu
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   environment:
+  #     DOCLING_CUDA_USE_FLASH_ATTENTION2: "true"
+  #     DOCLING_ACCELERATOR_DEVICE: "cuda"
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  #   command: ["celery", "-A", "grc_policy_server.worker", "worker", "--loglevel=info"]
+  #   networks:
+  #     - grc_shared_net
+
 networks:
   grc_shared_net:
     external: true

@@ -48,6 +48,10 @@ gmft = [
     "transformers>=4.40.0",
     "Pillow>=10.0.0",
 ]
+cuda = [
+    "torch>=2.0.0",
+    "flash-attn>=2.7.0",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,37 @@
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
+
+ENV PYTHONUNBUFFERED=1 \
+    VIRTUAL_ENV="/app/.venv" \
+    PATH="/app/.venv/bin:/root/.local/bin:$PATH" \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+# Python 3.13 is not in Ubuntu 24.04 default repos — use deadsnakes PPA
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common curl ghostscript && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3.13 python3.13-dev python3.13-venv && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project --python python3.13
+
+COPY src/ src/
+RUN uv sync --frozen --no-dev --python python3.13
+
+# flash-attn must compile against CUDA headers present in this devel image.
+# It is installed separately because uv.lock cannot be generated on non-CUDA machines.
+RUN pip install flash-attn --no-build-isolation
+
+EXPOSE 8500
+
+ENV DOCLING_CUDA_USE_FLASH_ATTENTION2=true
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python3.13 -c "import os,urllib.request; urllib.request.urlopen(f\"http://localhost:{os.environ.get('PORT','8500')}/health\")" || exit 1
+
+CMD ["python3.13", "-m", "grc_policy_server.main"]

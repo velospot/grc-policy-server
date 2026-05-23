@@ -88,9 +88,17 @@ class DoclingAdapter:
         pdf_options.accelerator_options.num_threads = (
             settings.docling_accelerator_threads
         )
-        pdf_options.accelerator_options.cuda_use_flash_attention2 = (
-            settings.docling_cuda_use_flash_attention2
-        )
+        flash_attention2 = settings.docling_cuda_use_flash_attention2
+        if flash_attention2:
+            try:
+                import flash_attn  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "flash_attn package is not installed; "
+                    "disabling cuda_use_flash_attention2 to avoid ingestion failure"
+                )
+                flash_attention2 = False
+        pdf_options.accelerator_options.cuda_use_flash_attention2 = flash_attention2
         pdf_options.ocr_options = OcrAutoOptions(force_full_page_ocr=True)
         pdf_options.layout_batch_size = 64
         pdf_options.table_batch_size = 4

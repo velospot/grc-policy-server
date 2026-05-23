@@ -309,6 +309,37 @@ Key runtime variables (all available in `.env.example`):
 uv sync --dev
 ```
 
+### Optional extras
+
+The project has three optional dependency groups. None are installed by default.
+
+| Extra | Packages | When to use |
+|---|---|---|
+| `table-extraction` | `camelot-py`, `pdf2image`, `opencv-python-headless` | Better PDF table extraction via Camelot |
+| `cuda` | `torch`, `flash-attn` | NVIDIA GPU acceleration for Docling (requires CUDA) |
+| `gmft` | `torch`, `transformers`, `Pillow` | GMFT-based table analysis |
+
+```bash
+# Camelot table extraction (CPU, all platforms)
+make install-table-extraction
+# or: uv sync --extra table-extraction
+
+# FlashAttention-2 (NVIDIA GPU + CUDA required — do not run on macOS)
+make install-cuda
+# or: uv sync --extra cuda
+# If uv cannot resolve flash-attn without CUDA headers:
+# pip install flash-attn --no-build-isolation
+```
+
+After installing `cuda`, enable it in `.env`:
+
+```bash
+DOCLING_CUDA_USE_FLASH_ATTENTION2=true
+DOCLING_ACCELERATOR_DEVICE=cuda
+```
+
+If `flash-attn` is not installed but `DOCLING_CUDA_USE_FLASH_ATTENTION2=true` is set, the server logs a warning and falls back to standard attention — ingestion still succeeds.
+
 ### Configure environment
 
 ```bash
@@ -431,6 +462,35 @@ How it fits this service:
 - `postgres`
 - `redis`
 - `weaviate`
+
+### Docker builds
+
+**Standard image (CPU only):**
+
+```bash
+docker build -t grc-policy-server .
+```
+
+**With Camelot table extraction:**
+
+```bash
+docker build --build-arg EXTRAS=table-extraction -t grc-policy-server:camelot .
+```
+
+**GPU image with FlashAttention-2** (`Dockerfile.gpu`) — requires an NVIDIA GPU host with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html):
+
+```bash
+make build-gpu
+# or: docker build -f Dockerfile.gpu -t grc-policy-server:gpu .
+```
+
+The GPU image uses `nvidia/cuda:12.6.3-devel-ubuntu24.04` as its base so that `flash-attn` can compile against the CUDA headers at build time. `DOCLING_CUDA_USE_FLASH_ATTENTION2=true` is set automatically inside the image.
+
+To run the GPU worker alongside the standard services, uncomment the `worker-gpu` service block in `docker-compose-prod.yml` and start it:
+
+```bash
+docker compose -f docker-compose-prod.yml up -d worker-gpu
+```
 
 `docker-compose.opik.yml` adds the optional Opik observability stack:
 

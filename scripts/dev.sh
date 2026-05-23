@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 mkdir -p "${PROJECT_ROOT}/data/uploads"
 
-DEFAULT_ENV_FILE="${PROJECT_ROOT}/.env"
+DEFAULT_ENV_FILE="${PROJECT_ROOT}/.env.local"
 read -r -p "Path to .env file [${DEFAULT_ENV_FILE}]: " ENV_FILE_INPUT
 
 if [[ -z "${ENV_FILE_INPUT}" ]]; then

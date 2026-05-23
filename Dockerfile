@@ -4,16 +4,20 @@ ENV PYTHONUNBUFFERED=1 \
     VIRTUAL_ENV="/app/.venv" \
     PATH="/app/.venv/bin:/root/.local/bin:$PATH"
 
+# Optional extras to install at build time (e.g. table-extraction).
+# Usage: docker build --build-arg EXTRAS=table-extraction .
+ARG EXTRAS=""
+
 WORKDIR /app
-RUN apt install ghostscript
+RUN apt-get update && apt-get install -y --no-install-recommends ghostscript && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project ${EXTRAS:+--extra $EXTRAS}
 
 COPY src/ src/
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev ${EXTRAS:+--extra $EXTRAS}
 
 EXPOSE 8500
 
