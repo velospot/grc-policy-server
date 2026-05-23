@@ -24,6 +24,31 @@ from grc_policy_server.services.ingestion.table_normalization import (
 
 logger = logging.getLogger(__name__)
 
+_INFORMATIVE_ROLE_RE = re.compile(
+    r"\b(?:annex|appendix|informative|foreword|preface|note|example|"
+    r"anhang|hinweis|beispiel|anmerkung|erläuterung)\b",
+    re.IGNORECASE,
+)
+_NORMATIVE_ROLE_RE = re.compile(
+    r"\b(?:requirement|shall|normative|scope|general|"
+    r"anforderung|normativ|anwendungsbereich)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_section_role(section_path: tuple[str, ...] | list[str]) -> str:
+    """Return 'informative' or 'normative' based on the section heading path.
+
+    Scans from innermost heading outward; first match wins.  Defaults to
+    'normative' when no heading contains a recognizable role keyword.
+    """
+    for heading in reversed(list(section_path)):
+        if _INFORMATIVE_ROLE_RE.search(heading):
+            return "informative"
+        if _NORMATIVE_ROLE_RE.search(heading):
+            return "normative"
+    return "normative"
+
 
 class MDTableSerializerProvider(ChunkingSerializerProvider):
     def get_serializer(self, doc):
@@ -274,9 +299,11 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
         chunk_type: str = "clause"
 
         # Initialize metadata first so we can add to it
+        _section_path_for_role = fields.get("section_path") or []
         metadata: dict[str, Any] = {
             "captions": captions,
             "doc_items_refs": list(source_refs),
+            "section_role": _detect_section_role(_section_path_for_role),
         }
         if fields.get("docling_path"):
             metadata["docling_path"] = fields["docling_path"]
@@ -362,6 +389,12 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
                 metadata["formula_latex"] = formula_latex
                 metadata["formula_display"] = f"$${formula_latex}$$"
                 metadata["node_type_hint"] = "formula"
+        elif any(
+            item.label == DocItemLabel.FOOTNOTE for item in doc_chunk.meta.doc_items
+        ):
+            chunk_type = "footnote"
+            metadata["section_role"] = "informative"
+            metadata["node_type_hint"] = "footnote"
         elif any(
             item.label == DocItemLabel.PICTURE for item in doc_chunk.meta.doc_items
         ):

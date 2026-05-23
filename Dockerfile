@@ -5,6 +5,7 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:/root/.local/bin:$PATH"
 
 WORKDIR /app
+RUN apt install ghostscript
 
 RUN pip install --no-cache-dir uv
 

@@ -1356,12 +1356,45 @@ class TableMatchingEngine:
 
         return diffs
 
+    @staticmethod
+    def _normalize_caption_for_match(caption: str) -> str:
+        """Strip 'Table N:' / 'Tabelle N:' prefixes and normalize whitespace/case."""
+        cleaned = _re.sub(
+            r'^(?:table|tabelle|tbl\.?|figure|fig\.?)\s*[\d.]+\s*[-–:.]?\s*',
+            '',
+            (caption or "").strip(),
+            flags=_re.IGNORECASE,
+        )
+        return " ".join(cleaned.lower().split())
+
+    @staticmethod
+    def _caption_similarity(old_table: CanonicalTable, new_table: CanonicalTable) -> float:
+        """SequenceMatcher similarity of normalized table captions."""
+        from difflib import SequenceMatcher  # noqa: PLC0415
+
+        a = TableMatchingEngine._normalize_caption_for_match(
+            old_table.caption_normalized or old_table.caption_original
+        )
+        b = TableMatchingEngine._normalize_caption_for_match(
+            new_table.caption_normalized or new_table.caption_original
+        )
+        if not a and not b:
+            return 1.0  # both captionless — treat as equal
+        if not a or not b:
+            return 0.0  # one captionless, one has caption — unknown
+        return SequenceMatcher(None, a, b).ratio()
+
     def _find_semantic_match(
         self,
         old_table: CanonicalTable,
         new_tables: dict[str, CanonicalTable],
     ) -> tuple[CanonicalTable, float] | None:
-        """Find semantically similar table for unmatched old table."""
+        """Find semantically similar table for unmatched old table.
+
+        Caption pre-filter: skip candidates with caption_sim < 0.35 and
+        structural_sim < 0.70 (likely different tables mismatched by size).
+        Caption boost: +0.10 when caption_sim ≥ 0.80 to prefer exact-title matches.
+        """
         if not new_tables:
             return None
 
@@ -1369,10 +1402,16 @@ class TableMatchingEngine:
         best_score = 0.65  # Minimum similarity threshold (lowered; Dice metric scores higher)
 
         for new_table in new_tables.values():
-            score = self.diff_engine._compute_table_similarity(old_table, new_table)
+            struct_sim = self.diff_engine._compute_table_similarity(old_table, new_table)
+            cap_sim = self._caption_similarity(old_table, new_table)
 
-            if score > best_score:
-                best_score = score
+            # Hard veto: very different captions AND weak structural match
+            if cap_sim < 0.35 and struct_sim < 0.70:
+                continue
+
+            combined = struct_sim + (0.10 if cap_sim >= 0.80 else 0.0)
+            if combined > best_score:
+                best_score = combined
                 best_match = new_table
 
         return (best_match, best_score) if best_match else None

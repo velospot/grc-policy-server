@@ -295,14 +295,39 @@ def get_stopwords(language: str = "") -> set[str]:
 
 
 _UNICODE_PUNCT_TRANSLATION = {
-    ord("“"): '"',
-    ord("”"): '"',
-    ord("‘"): "'",
-    ord("’"): "'",
-    ord("–"): "-",
-    ord("—"): "-",
-    ord("…"): "...",
+    0x201C: '"',  # left double quotation mark
+    0x201D: '"',  # right double quotation mark
+    0x2018: "'",  # left single quotation mark
+    0x2019: "'",  # right single quotation mark
+    0x2013: "-",  # en-dash
+    0x2014: "-",  # em-dash
+    0x2026: "...",  # ellipsis
+    # Unicode superscript digits and footnote symbols stripped so
+    # "10 V/m" compares equal whether or not a footnote marker is appended.
+    0x00B9: "",  # superscript 1
+    0x00B2: "",  # superscript 2
+    0x00B3: "",  # superscript 3
+    0x2074: "",  # superscript 4
+    0x2075: "",  # superscript 5
+    0x2076: "",  # superscript 6
+    0x2077: "",  # superscript 7
+    0x2078: "",  # superscript 8
+    0x2079: "",  # superscript 9
+    0x2070: "",  # superscript 0
+    0x2020: "",  # dagger footnote marker
+    0x2021: "",  # double dagger
+    0x00A7: "",  # section sign used as footnote marker
+    0x00B6: "",  # pilcrow
 }
+
+# Matches a leading footnote marker at start of a paragraph.
+# Superscript digits, daggers, asterisk, numbered or lettered markers.
+_FOOTNOTE_LEAD_RE = re.compile(
+    r"^[\u00B9\u00B2\u00B3\u2074-\u2079\u2070\u2020\u2021\u00A7\u00B6*]\s"
+    r"|^\d{1,2}[)]\s|^\([a-z*]\)\s",
+    re.UNICODE,
+)
+
 _CANONICAL_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     # English MFA variants
     (
@@ -505,6 +530,22 @@ _HAS_OBLIGATION_RE = re.compile(
 )
 
 
+def is_footnote_text(text: str) -> bool:
+    """Return True when *text* looks like a standalone footnote paragraph.
+
+    Detects two patterns:
+    1. Leads with a Unicode superscript / dagger / asterisk footnote marker.
+    2. Leads with a bare number or letter in parentheses used as a footnote key.
+
+    Excludes obligation-verb content so normative footnotes are not silently
+    dropped — they must be surfaced to auditors at MEDIUM severity.
+    """
+    cleaned = normalize_whitespace(text or "").strip()
+    if not cleaned or len(cleaned) > 400:
+        return False
+    return bool(_FOOTNOTE_LEAD_RE.match(cleaned))
+
+
 def is_docling_orphan_fragment(text: str, node_type: str = "clause") -> bool:
     """Return True for Docling extraction artifacts with no diff signal.
 
@@ -521,14 +562,16 @@ def is_docling_orphan_fragment(text: str, node_type: str = "clause") -> bool:
         return True
     if _FIGURE_CAPTION_RE.match(cleaned):
         return True
-    # Running headers: short, title-case or ALL-CAPS
+    # Running headers: short, title-case or ALL-CAPS (up to 60 chars)
+    if len(cleaned) <= 60 and cleaned == cleaned.upper() and not any(c.islower() for c in cleaned):
+        return True
     if (
         len(cleaned) <= 45
-        and (cleaned == cleaned.upper() or cleaned.istitle())
+        and cleaned.istitle()
     ):
         return True
-    # Continuation artifact: starts lowercase, < 30 chars (mid-word page split)
-    if len(cleaned) < 30 and cleaned[0].islower():
+    # Continuation artifact: starts lowercase, < 50 chars (mid-word page split)
+    if len(cleaned) < 50 and cleaned[0].islower() and not _HAS_OBLIGATION_RE.search(cleaned):
         return True
     return False
 

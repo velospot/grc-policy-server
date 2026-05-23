@@ -650,7 +650,7 @@ class DocumentIngestionService:
                         except Exception:
                             continue
                         if re_page == orig_page and re_cols == orig_cols:
-                            orig_table.data.grid = re_table.data.grid
+                            orig_table.data = re_table.data
                             break
 
             logger.info(

@@ -578,11 +578,69 @@ class ClauseMatcher:
     # Detects a table/figure caption row: starts with "table N" or "figure N"
     _CAPTION_ROW_RE = re.compile(r'^(?:table|tbl\.?|figure|fig\.?)\s*\d', re.IGNORECASE)
 
+    # Bilingual heading glossary: German canonical form → English canonical form
+    # Applied token-by-token before SequenceMatcher to enable cross-language alignment
+    HEADING_SYNONYMS: dict[str, str] = {
+        "prüfung": "test",
+        "prüfverfahren": "test method",
+        "prüfschritt": "test step",
+        "prüfaufbau": "test setup",
+        "prüfbedingungen": "test conditions",
+        "messung": "measurement",
+        "messverfahren": "measurement method",
+        "anforderung": "requirement",
+        "anforderungen": "requirements",
+        "anwendungsbereich": "scope",
+        "geltungsbereich": "scope",
+        "allgemein": "general",
+        "allgemeines": "general",
+        "begriffe": "terms",
+        "definitionen": "definitions",
+        "abkürzungen": "abbreviations",
+        "symbole": "symbols",
+        "normative verweise": "normative references",
+        "literaturhinweise": "bibliography",
+        "einleitung": "introduction",
+        "grenzwert": "limit",
+        "grenzwerte": "limits",
+        "prüfpegel": "test level",
+        "prüfpegel und klassen": "test levels and classes",
+        "prüfaufbau und konfiguration": "test setup and configuration",
+        "störfestigkeit": "immunity",
+        "störaussendung": "emission",
+        "frequenzbereich": "frequency range",
+        "klimaprüfung": "climatic test",
+        "schwingungsprüfung": "vibration test",
+        "schockprüfung": "shock test",
+        "sicherheit": "safety",
+        "schutzgrad": "protection degree",
+    }
+
     def _normalize_section_title(self, title: str) -> str:
-        """Strip leading section numbers/keywords so titles like
-        '3.1 Data Protection' and '4.1 Data Protection' compare as equal."""
+        """Strip leading section numbers/keywords and apply bilingual synonym mapping.
+
+        This enables SequenceMatcher to pair sections that were renamed
+        from German to English (or vice versa) across document versions.
+        """
         cleaned = self._SECTION_NUMBER_RE.sub('', title).strip()
-        return cleaned or title
+        if not cleaned:
+            return title
+        # Apply synonym substitution token by token
+        tokens = cleaned.split()
+        normalized_tokens = []
+        i = 0
+        while i < len(tokens):
+            # Try two-token phrases first, then single tokens
+            if i + 1 < len(tokens):
+                bigram = f"{tokens[i]} {tokens[i + 1]}"
+                if bigram in self.HEADING_SYNONYMS:
+                    normalized_tokens.append(self.HEADING_SYNONYMS[bigram])
+                    i += 2
+                    continue
+            tok = tokens[i]
+            normalized_tokens.append(self.HEADING_SYNONYMS.get(tok, tok))
+            i += 1
+        return " ".join(normalized_tokens)
 
     def _numbering_depth_score(self, left_key: str, right_key: str) -> float:
         """Score how closely the section numbering depths match.
@@ -688,6 +746,11 @@ class ClauseMatcher:
         left_title = self._normalize_section_title(left.title.lower())
         right_title = self._normalize_section_title(right.title.lower())
         title_score = SequenceMatcher(None, left_title, right_title).ratio()
+        # When SequenceMatcher gives a low score, check token overlap (handles
+        # cross-language synonyms not yet covered by HEADING_SYNONYMS).
+        if title_score < 0.5:
+            tok_overlap = token_overlap(left_title, right_title, self.language)
+            title_score = max(title_score, tok_overlap * 0.8)
         content_score = token_overlap(left.clean_text, right.clean_text, self.language)
         numbering_score = self._numbering_depth_score(left.title, right.title)
         order_penalty = abs(left.order - right.order)

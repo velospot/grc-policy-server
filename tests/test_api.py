@@ -76,7 +76,7 @@ class StubDocumentRepository:
 
 
 class StubDiffEngine:
-    async def compare(self, doc1, doc2, force_re_extract: bool = False) -> ComparisonResult:
+    async def compare(self, doc1, doc2, force_re_extract: bool = False, audit_mode: bool = False, save_to_db: bool = False) -> ComparisonResult:
         return ComparisonResult(
             summary=f"Compared {doc1.id} with {doc2.id}",
             keyDifferences=[
@@ -941,31 +941,39 @@ def test_hybrid_search_documents():
 
 
 def test_hybrid_search_documents_rejects_invalid_payload():
-    response = client.post(
-        "/documents/search/hybrid",
-        json={
-            "documentId1": "doc-1",
-            "documentId2": "doc-1",
-            "query": "   ",
-        },
-        headers=auth_headers(),
-    )
-    assert response.status_code == 400
-    assert response.json() == {"detail": "documentId1 and documentId2 must be different"}
+    app.dependency_overrides[get_weaviate_client] = lambda: StubWeaviateHybridSearchClient()
+    try:
+        response = client.post(
+            "/documents/search/hybrid",
+            json={
+                "documentId1": "doc-1",
+                "documentId2": "doc-1",
+                "query": "   ",
+            },
+            headers=auth_headers(),
+        )
+        assert response.status_code == 400
+        assert response.json() == {"detail": "documentId1 and documentId2 must be different"}
+    finally:
+        app.dependency_overrides.pop(get_weaviate_client, None)
 
 
 def test_hybrid_search_documents_rejects_blank_query():
-    response = client.post(
-        "/documents/search/hybrid",
-        json={
-            "documentId1": "doc-1",
-            "documentId2": "doc-2",
-            "query": "   ",
-        },
-        headers=auth_headers(),
-    )
-    assert response.status_code == 400
-    assert response.json() == {"detail": "Query must not be empty"}
+    app.dependency_overrides[get_weaviate_client] = lambda: StubWeaviateHybridSearchClient()
+    try:
+        response = client.post(
+            "/documents/search/hybrid",
+            json={
+                "documentId1": "doc-1",
+                "documentId2": "doc-2",
+                "query": "   ",
+            },
+            headers=auth_headers(),
+        )
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Query must not be empty"}
+    finally:
+        app.dependency_overrides.pop(get_weaviate_client, None)
 
 
 def test_hybrid_search_documents_returns_error_on_weaviate_failure():
@@ -1074,6 +1082,9 @@ def test_compare_v2_enqueue_returns_cached_result():
             "actionPlan": [],
             "followUpQuestions": [],
             "accuracyMetrics": None,
+            "comparisonMode": "auditor_grade",
+            "requireHumanReview": False,
+            "hiddenDiffsCount": 0,
         },
     }
     assert dispatcher.enqueue_calls == []
@@ -1113,6 +1124,9 @@ def test_compare_v2_response_by_path_param():
             "actionPlan": [],
             "followUpQuestions": [],
             "accuracyMetrics": None,
+            "comparisonMode": "auditor_grade",
+            "requireHumanReview": False,
+            "hiddenDiffsCount": 0,
         },
         "error": None,
         "cacheHit": False,

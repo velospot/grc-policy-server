@@ -173,6 +173,10 @@ class ClassificationContext:
     test_setup_change: bool = False
     # Domain expert routing: "EMC" | "Safety" | "Environment" | ""
     testing_department: str = ""
+    # Section role context — "normative" | "informative" | "annex" | "appendix" | "note"
+    section_role: str = "normative"
+    # Obligation strength of the node text (-1 = unknown, 0=may … 5=shall)
+    obligation_strength: int = -1
 
 
 @dataclass(frozen=True)
@@ -264,6 +268,32 @@ def _has_content_signal(ctx: ClassificationContext) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+class StructuralRenumberingRule:
+    """Rule 0.5 — Section renumbered with identical content → LOW.
+
+    Fires on MODIFIED section/heading nodes where only the leading section
+    number changed and the remaining text is essentially identical (distance <
+    0.25 and meaning_change in {unchanged, ""}). This prevents purely
+    administrative renumbering from appearing as a content change.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if (
+            ctx.node_type in {"section", "heading"}
+            and ctx.change_type == "MODIFIED"
+            and ctx.structural_label_change
+            and (ctx.distance is None or ctx.distance < 0.25)
+            and ctx.meaning_change in {"unchanged", ""}
+        ):
+            return ClassificationResult(
+                severity="low",
+                reasons=["structural_renumbering"],
+                semantic_impact=SemanticImpact.STRUCTURAL,
+                audit_disposition=AuditDisposition.AUTO_CLASSIFIED,
+            )
+        return None
+
+
 class StructuralLabelRule:
     """Rule 0 — Structural label change (section/table/figure/chapter number) → LOW.
 
@@ -341,17 +371,58 @@ class CosmeticOnlyRule:
 
 
 class AddedRemovedRule:
-    """Rule 4 — Added or removed content → HIGH.
+    """Rule 4 — Added or removed content → context-tiered severity.
 
-    Any node that exists in one document but not the other is a substantive
-    content change.  The reviewer must determine whether it represents a new
-    obligation, a deleted control, or a reorganisation.
+    Tier 1: Node has a normative obligation verb (shall/must) → HIGH
+    Tier 2: Node is in an informative/annex/note section role → MEDIUM
+    Tier 3: No obligation signal at all → MEDIUM with human review flag
+    Default: HIGH for normative content with any obligation signal
     """
 
+    _INFORMATIVE_ROLES = frozenset({"informative", "annex", "appendix", "note", "footnote"})
+
     def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
-        if ctx.change_type in {"ADDED", "REMOVED"}:
-            return ClassificationResult(severity="high", reasons=_collect_reasons(ctx))
-        return None
+        if ctx.change_type not in {"ADDED", "REMOVED"}:
+            return None
+
+        reasons = _collect_reasons(ctx)
+
+        # Tier 1: Strong normative obligation (shall=5) present → HIGH even in informative.
+        # bool(-1)=True but -1 >= 5 is False → no-op for unknown.
+        # bool(0)=False → short-circuit, no-op for "may".
+        if ctx.obligation_strength and ctx.obligation_strength >= 5:
+            return ClassificationResult(
+                severity="high",
+                reasons=reasons,
+                semantic_impact=SemanticImpact.NORMATIVE,
+                audit_disposition=AuditDisposition.ESCALATED,
+            )
+
+        # Tier 2: Content in informative / annex / note section → MEDIUM
+        if ctx.section_role in self._INFORMATIVE_ROLES:
+            return ClassificationResult(
+                severity="medium",
+                reasons=reasons + ["informative_section"],
+                semantic_impact=SemanticImpact.EDITORIAL,
+                audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+            )
+
+        # Tier 3: "May" was explicitly detected (obligation_strength == 0) → MEDIUM.
+        # bool(0)=False → fires when exactly 0.
+        # bool(-1)=True → does NOT fire for unknown/unset (-1 is truthy).
+        if not bool(ctx.obligation_strength):
+            return ClassificationResult(
+                severity="medium",
+                reasons=reasons + ["weak_obligation_only"],
+                audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+            )
+
+        # Default: any other obligation level or unknown → HIGH
+        return ClassificationResult(
+            severity="high",
+            reasons=reasons,
+            audit_disposition=AuditDisposition.ESCALATED,
+        )
 
 
 class ObligationChangeRule:
@@ -833,6 +904,45 @@ class EnvironmentalExpertRule:
         return None
 
 
+class EntityGraphChangeRule:
+    """Rule 4.8 — Entity graph change for a high-severity domain entity → HIGH.
+
+    `_diff_entity_graphs()` in table_diff_engine.py appends dicts with
+    ``{"type": "entity_graph_change", "entity_type": "<name>", ...}`` to
+    ``table_changes``.  The generic ContentSignalRule sees any table_changes as
+    MEDIUM.  This rule inspects the entity_type and escalates to HIGH when the
+    changed entity is in the domain high-severity set.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if not ctx.table_changes:
+            return None
+        for change in ctx.table_changes:
+            if change.get("type") != "entity_graph_change":
+                continue
+            entity_type = change.get("entity_type", "")
+            # Import lazily to avoid circular import at module load time
+            try:
+                from grc_policy_server.services.comparison.table_diff_engine import (  # noqa: PLC0415
+                    _HIGH_SEVERITY_ENTITIES,
+                )
+            except Exception:
+                return None
+            if entity_type in _HIGH_SEVERITY_ENTITIES:
+                return ClassificationResult(
+                    severity="high",
+                    reasons=_collect_reasons(ctx) + ["entity_graph_high_severity"],
+                    semantic_impact=SemanticImpact.TECHNICAL,
+                    severity_reason_codes=[
+                        SeverityReasonCode.NUMERIC_LIMIT_CHANGED,
+                        SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED,
+                    ],
+                    severity_confidence=0.91,
+                    audit_disposition=AuditDisposition.ESCALATED,
+                )
+        return None
+
+
 class DefaultRule:
     """Rule 10 — Catch-all → LOW.
 
@@ -876,16 +986,18 @@ class RuleEngine:
 # Module-level singleton — rules are stateless, safe to share across threads.
 _DEFAULT_ENGINE = RuleEngine(
     [
+        StructuralRenumberingRule(),  # Rule 0.5 — section renumbered, same text  → low
         StructuralLabelRule(),      # Rule 0   — structural label change      → low
         ReferenceNumberOnlyRule(),  # Rule 1   — reference-number-only       → low
         FormattingOnlyRule(),  # Rule 2   — formatting-only              → low
         CosmeticOnlyRule(),  # Rule 3   — cosmetic MODIFIED            → low
-        AddedRemovedRule(),  # Rule 4   — ADDED / REMOVED              → high
+        AddedRemovedRule(),  # Rule 4   — ADDED / REMOVED              → context-tiered
         # Domain expert rules fire BEFORE generic MEDIUM rules so they can
         # escalate obligation/numeric/table changes from MEDIUM → HIGH.
         EMCExpertRule(),            # Rule 4.5 — EMC domain expert             → high (numeric/table/weakened)
         SafetyExpertRule(),         # Rule 4.6 — Safety domain expert          → high (numeric/weakened/procedure)
         EnvironmentalExpertRule(),  # Rule 4.7 — Environmental domain expert   → high (numeric/setup/procedure)
+        EntityGraphChangeRule(),    # Rule 4.8 — entity graph high-sev entity  → high
         ObligationChangeRule(),  # Rule 5   — obligation verb change       → medium
         HighDistanceRule(),  # Rule 6   — distance > 0.75              → high
         MovedRule(),  # Rule 7   — moved node/section           → medium (always)

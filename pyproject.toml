@@ -27,6 +27,7 @@ dependencies = [
     "structlog>=25.5.0",
     "uvicorn>=0.39.0",
     "weaviate-client>=4.19.2",
+    "numpy>=1.26.0",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,16 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "ruff",
     "mypy",
+]
+table-extraction = [
+    "camelot-py[base]>=0.11.0",
+    "pdf2image>=1.16.0",
+    "opencv-python-headless>=4.5.0",
+]
+gmft = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "Pillow>=10.0.0",
 ]
 
 [build-system]

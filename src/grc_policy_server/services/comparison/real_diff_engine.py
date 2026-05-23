@@ -48,9 +48,11 @@ from grc_policy_server.services.comparison.policy_semantics import (
     ends_with_terminal_punctuation,
     extract_clause_meaning,
     is_docling_orphan_fragment,
+    is_footnote_text,
     is_non_semantic_content,
     starts_with_lowercase,
 )
+from grc_policy_server.services.ingestion.docling_chunker import _detect_section_role
 from grc_policy_server.services.comparison.severity_classifier import (
     AuditDisposition,
     ClassificationContext,
@@ -1207,22 +1209,50 @@ class RealDiffEngine:
                         for egc in _diff_entity_graphs(
                             old_graph, new_graph, resolved_tt
                         ):
-                            table_changes.append(
-                                {
-                                    "type": "entity_graph_change",
-                                    "entity_type": egc.get("entity_type", ""),
-                                    "old_value": egc.get("old_value", ""),
-                                    "new_value": egc.get("new_value", ""),
-                                    "change_type": egc.get("change_type", ""),
-                                    "semantic_description": egc.get(
-                                        "semantic_description", ""
-                                    ),
-                                }
-                            )
+                            egc_entry = {
+                                "type": "entity_graph_change",
+                                "entity_type": egc.get("entity_type", ""),
+                                "old_value": egc.get("old_value", ""),
+                                "new_value": egc.get("new_value", ""),
+                                "change_type": egc.get("change_type", ""),
+                                "semantic_description": egc.get(
+                                    "semantic_description", ""
+                                ),
+                            }
+                            table_changes.append(egc_entry)
+                            # Promote highest-severity entity type to ontology_entity_type
+                            # so DomainEntityRule (9.1) can also inspect it
+                            if not ontology_entity_type and egc_entry["entity_type"]:
+                                ontology_entity_type = egc_entry["entity_type"]
             except Exception:
                 logger.debug(
                     "entity graph diff failed in change record pair", exc_info=True
                 )
+
+        # Section role — read from metadata first, then compute inline from heading_path.
+        # Also detect heuristic footnote paragraphs by text content.
+        primary_node = left or right
+        _section_role = "normative"
+        if primary_node:
+            _section_role = (
+                primary_node.get("metadata", {}).get("section_role")
+                or primary_node.get("section_role")
+                or _detect_section_role(
+                    primary_node.get("heading_path")
+                    or primary_node.get("section_path")
+                    or []
+                )
+            )
+        # Heuristic upgrade: if the text looks like a standalone footnote paragraph
+        # (starts with a superscript marker), override role to "footnote" so the
+        # AddedRemovedRule produces MEDIUM instead of HIGH.
+        if _section_role == "normative" and is_footnote_text(left_src or right_src):
+            _section_role = "footnote"
+
+        # Obligation strength — use the primary node's text
+        _obligation_strength = _extract_normative_strength(
+            left_src if left_src else right_src
+        )
 
         classification = self.severity_classifier.classify(
             ClassificationContext(
@@ -1242,6 +1272,8 @@ class RealDiffEngine:
                 test_procedure_change=test_procedure_change,
                 test_setup_change=test_setup_change,
                 testing_department=testing_department,
+                section_role=_section_role,
+                obligation_strength=_obligation_strength,
             )
         )
         significance = classification.severity

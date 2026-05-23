@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 NodeType = Literal["document", "section", "clause", "table", "figure"]
-ChunkType = Literal["heading", "clause", "table", "figure"]
+ChunkType = Literal["heading", "clause", "table", "figure", "footnote"]
 
 
 @dataclass(frozen=True)

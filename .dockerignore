@@ -56,6 +56,7 @@ scripts/
 # Misc
 *.log
 *.tmp
+.env.local
 neo4j_auth.txt
 opik_nginx_default_local.conf
 Makefile

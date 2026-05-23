@@ -19,6 +19,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - grc_shared_net
 
   redis:
     container_name: grc_redis
@@ -26,6 +28,8 @@ services:
     ports:
       - "6379:6379"
     restart: always
+    networks:
+      - grc_shared_net
 
   # neo4j:
   #   container_name: rag_neo4j
@@ -42,31 +46,33 @@ services:
   #     - "7687:7687"
   #   restart: always
 
-  # weaviate:
-  #   container_name: weaviate_chat_db
-  #   command:
-  #     - --host
-  #     - 0.0.0.0
-  #     - --port
-  #     - "8080"
-  #     - --scheme
-  #     - http
-  #   image: cr.weaviate.io/semitechnologies/weaviate:1.31.5
-  #   ports:
-  #     - 8085:8080
-  #     - 50051:50051
-  #   volumes:
-  #     - ./weaviate_data:/var/lib/weaviate
-  #   restart: on-failure:2
-  #   environment:
-  #     DISABLE_TELEMETRY: true
-  #     QUERY_DEFAULTS_LIMIT: 25
-  #     AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
-  #     PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-  #     ENABLE_API_BASED_MODULES: "true"
-  #     ENABLE_MODULES: "text2vec-ollama,generative-ollama"
-  #     DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
-  #     CLUSTER_HOSTNAME: "node1"
+  weaviate:
+    container_name: weaviate_chat_db
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --scheme
+      - http
+    image: cr.weaviate.io/semitechnologies/weaviate:1.31.5
+    ports:
+      - 8085:8080
+      - 50051:50051
+    volumes:
+      - ./weaviate_data:/var/lib/weaviate
+    restart: on-failure:2
+    networks:
+      - grc_shared_net
+    environment:
+      DISABLE_TELEMETRY: true
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      ENABLE_API_BASED_MODULES: "true"
+      ENABLE_MODULES: "text2vec-ollama,generative-ollama"
+      DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
+      CLUSTER_HOSTNAME: "node1"
 
   # OpenDataLoader hybrid backend — routes complex/table pages to docling for higher accuracy.
   # Set OPENDATALOADER_HYBRID_URL=http://opendataloader-hybrid:5002 in your .env to enable.
@@ -78,6 +84,12 @@ services:
     ports:
       - "5002:5002"
     restart: unless-stopped
+    networks:
+      - grc_shared_net
 
 volumes:
   postgres_data:
+
+networks:
+  grc_shared_net:
+    external: true

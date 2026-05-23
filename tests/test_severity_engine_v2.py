@@ -219,7 +219,7 @@ class TestBackwardCompatibility:
         assert self.classifier.classify(ctx).severity == "high"
 
     def test_high_distance_still_high(self):
-        ctx = _ctx(distance=0.75)
+        ctx = _ctx(distance=0.76)  # HighDistanceRule fires at distance > 0.75 (strictly)
         assert self.classifier.classify(ctx).severity == "high"
 
     def test_formatting_only_still_low(self):
