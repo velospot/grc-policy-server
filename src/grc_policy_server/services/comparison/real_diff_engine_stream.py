@@ -476,7 +476,8 @@ class RealDiffEngineStream:
                 ):
                     if token:
                         tokens.append(token)
-                        yield {"type": "diff_token", "change_id": change_id, "token": token}
+                        if token.strip().upper() != "SKIP":
+                            yield {"type": "diff_token", "change_id": change_id, "token": token}
             except Exception as exc:
                 logger.warning(
                     "diff table row stream failed change_id=%s: %s", change_id, exc
@@ -508,8 +509,7 @@ class RealDiffEngineStream:
                 "skipped": skipped,
             }
 
-            if self.inter_diff_delay_ms > 0:
-                await asyncio.sleep(self.inter_diff_delay_ms / 1000.0)
+            await asyncio.sleep(self.inter_diff_delay_ms / 1000.0 if self.inter_diff_delay_ms > 0 else 0)
 
         # Assembled table
         table_md = _assemble_table(collected_rows)
@@ -525,12 +525,8 @@ class RealDiffEngineStream:
         yield {"type": "progress", "stage": "summarizing", "message": "Generating summary"}
         non_skipped_diffs = [
             d for d in key_diffs
-            if not (
-                not (
-                    (d.doc1Reference.sourceText if d.doc1Reference else None)
-                    or (d.doc2Reference.sourceText if d.doc2Reference else None)
-                )
-            )
+            if (d.doc1Reference.sourceText if d.doc1Reference else None)
+            or (d.doc2Reference.sourceText if d.doc2Reference else None)
         ]
         try:
             summary = await self.llm.summarize_changes(
