@@ -42,6 +42,19 @@ class OntologyEntityType(str, Enum):
     TEST_NUMBER = "TestNumber"
 
 
+# Fact types whose values are compliance-critical — changes always warrant HIGH severity.
+# These match the fact_type strings produced by NormalizedFactExtractor so that
+# table_diff_engine._HIGH_SEVERITY_ENTITIES stays in sync with the ontology layer.
+EMC_HIGH_SEVERITY_ENTITIES: frozenset[str] = frozenset({
+    "field_strength",
+    "emission_limit",
+    "acceptance_class",
+    "acceptance_criterion",
+    "frequency_range",
+    "test_method",
+    "voltage_level",
+})
+
 # KB spec: domain-specific row key column patterns per test type
 EMC_DOMAIN_ROW_KEYS: dict[EMCTestType, list[str]] = {
     EMCTestType.RADIATED_IMMUNITY: [

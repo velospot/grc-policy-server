@@ -50,7 +50,7 @@ _CONDITION_RE = re.compile(
     re.IGNORECASE,
 )
 
-_OBLIGATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+OBLIGATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # English
     ("shall", re.compile(r"\bshall\b", re.IGNORECASE)),
     ("must", re.compile(r"\bmust\b", re.IGNORECASE)),
@@ -724,7 +724,7 @@ def _split_condition(text: str) -> tuple[str, str]:
 
 def _detect_obligation(text: str) -> tuple[str, int, int]:
     candidates: list[tuple[int, int, str]] = []
-    for label, pattern in _OBLIGATION_PATTERNS:
+    for label, pattern in OBLIGATION_PATTERNS:
         match = pattern.search(text)
         if match:
             candidates.append((match.start(), match.end(), label))

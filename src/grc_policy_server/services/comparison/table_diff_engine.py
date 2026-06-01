@@ -26,14 +26,15 @@ from grc_policy_server.services.ingestion.ontology.emc_ontology import (
     NormalizedFactExtractor,
 )
 from grc_policy_server.services.ingestion.ontology.safety_ontology import (
-    SAFETY_HIGH_SEVERITY_ENTITIES,
     SafetyFactExtractor,
     SafetyTestClassifier,
 )
 from grc_policy_server.services.ingestion.ontology.environment_ontology import (
-    ENV_HIGH_SEVERITY_ENTITIES,
     EnvFactExtractor,
     EnvTestClassifier,
+)
+from grc_policy_server.services.ingestion.ontology.high_severity_registry import (
+    ALL_HIGH_SEVERITY_ENTITIES as _HIGH_SEVERITY_ENTITIES,
 )
 from grc_policy_server.services.ingestion.row_key_extractor import RowChangeDetector, RowKeyExtractor
 
@@ -459,20 +460,6 @@ def _extract_env_entity_graph(
     return profiles, EMCTestType.UNKNOWN
 
 
-# High-severity entity types — changes to these always warrant HIGH impact
-_HIGH_SEVERITY_ENTITIES = frozenset({
-    "field_strength",
-    "emission_limit",
-    "acceptance_class",
-    "acceptance_criterion",
-    "frequency_range",
-    "test_method",
-    "voltage_level",
-    # Safety high-severity entities
-    *SAFETY_HIGH_SEVERITY_ENTITIES,
-    # Environment high-severity entities
-    *ENV_HIGH_SEVERITY_ENTITIES,
-})
 
 
 class TableDiffType(str, Enum):

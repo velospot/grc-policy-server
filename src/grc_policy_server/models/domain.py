@@ -77,6 +77,18 @@ class ChangeSeverity(str, Enum):
     HIGH = "high"
 
 
+class TestingDepartment(str, Enum):
+    """Canonical testing department identifier used in ClassificationContext.
+
+    Domain expert rules in severity_classifier.py compare against these values.
+    Use UNKNOWN when the document metadata does not specify a department.
+    """
+    EMC = "EMC"
+    SAFETY = "Safety"
+    ENVIRONMENT = "Environment"
+    UNKNOWN = ""
+
+
 # ---------------------------------------------------------------------------
 # Document
 # ---------------------------------------------------------------------------
