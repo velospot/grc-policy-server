@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1
 
-RUN pip install --no-cache-dir "opendataloader-pdf[hybrid]>=2.4.3" docling
+RUN pip install --no-cache-dir "opendataloader-pdf[hybrid]>=2.4.7" docling
 
 EXPOSE 5002
 

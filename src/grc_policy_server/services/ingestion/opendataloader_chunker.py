@@ -224,6 +224,10 @@ def _element_bbox(element: dict) -> dict | None:
     raw = element.get("bounding box") or element.get("bbox") or {}
     if not raw:
         return None
+    if isinstance(raw, list):
+        if len(raw) >= 4:
+            return {"l": raw[0], "t": raw[1], "r": raw[2], "b": raw[3]}
+        return None
     return {
         "l": raw.get("l"),
         "t": raw.get("t"),
