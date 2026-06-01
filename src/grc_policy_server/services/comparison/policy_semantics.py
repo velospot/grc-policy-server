@@ -51,7 +51,11 @@ _CONDITION_RE = re.compile(
 )
 
 OBLIGATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    # English
+    # English — negations first so "shall not" is never matched as bare "shall"
+    ("shall_not", re.compile(r"\bshall\s+not\b", re.IGNORECASE)),
+    ("must_not", re.compile(r"\bmust\s+not\b", re.IGNORECASE)),
+    ("must_not", re.compile(r"\b(?:prohibited|forbidden|not\s+permitted)\b", re.IGNORECASE)),
+    # English — positive obligations
     ("shall", re.compile(r"\bshall\b", re.IGNORECASE)),
     ("must", re.compile(r"\bmust\b", re.IGNORECASE)),
     (

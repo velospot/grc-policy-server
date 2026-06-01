@@ -5,6 +5,19 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from grc_policy_server.models.schemas import ChangeDetail, DocumentReference
+from grc_policy_server.services.comparison.pattern_registry import (
+    ACCEPTANCE_CLASS_RE as _ACCEPTANCE_CLASS_RE,
+    DWELL_TIME_RE as _DWELL_TIME_RE,
+    EMISSION_LIMIT_RE as _EMISSION_LIMIT_RE,
+    FIELD_STRENGTH_RE as _FIELD_STRENGTH_RE,
+    FORMATTING_STRIP_RE as _FORMATTING_STRIP_RE,
+    FREQ_RANGE_RE as _FREQ_RANGE_RE,
+    NUMBER_RE as _NUMBER_RE,
+    REF_NUM_RE as _REF_NUM_RE,
+    TEST_METHOD_RE as _TEST_METHOD_RE,
+    TEST_SETUP_RE as _TEST_SETUP_RE,
+)
+from grc_policy_server.services.comparison.policy_semantics import OBLIGATION_PATTERNS
 from grc_policy_server.services.comparison.severity_classifier import (
     ClassificationContext,
     SeverityClassifier,
@@ -12,31 +25,10 @@ from grc_policy_server.services.comparison.severity_classifier import (
 
 ChangeType = Literal["ADDED", "REMOVED", "MODIFIED"]
 
-_NUMBER_RE = re.compile(
-    r"\b\d+(?:[.,]\d+)?\s*(?:%|percent|days?|weeks?|months?|years?|"
-    r"hours?|minutes?|seconds?|kg|g|mg|ms|s|m|cm|mm|w|kw|v|a)?\b",
-    re.IGNORECASE,
-)
-# Cross-reference patterns: "Figure 3", "Table 5.2", "Section 3.1.2", "Annex A.1", etc.
-# Changes to these are structural reordering artefacts, not semantic content changes.
-_REF_NUM_RE = re.compile(
-    r"\b(?:figure|fig\.?|table|tbl\.?|section|sec\.?|clause|annex|"
-    r"appendix|chapter|part|article)\s*(?:[A-Z]\.)?[\d]+(?:[.\-][\d]+)*",
-    re.IGNORECASE,
-)
-# Characters that are purely formatting — changes to these alone carry no semantic weight.
-_FORMATTING_STRIP_RE = re.compile(r"[-–—\n\r;]")
-_REQ_VERB_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"\bshall\s+not\b", "shall_not"),
-    (r"\bmust\s+not\b", "must_not"),
-    (r"\b(?:prohibited|forbidden|not\s+permitted)\b", "must_not"),
-    (r"\bshall\b", "shall"),
-    (r"\bmust\b", "must"),
-    (r"\b(?:required|mandatory|obligatoire|requis|erforderlich)\b", "required"),
-    (r"\b(?:should|soll(?:en)?|devrait)\b", "should"),
-    (r"\b(?:recommended|recommendation|empfohlen)\b", "recommended"),
-    (r"\b(?:may|optional|peut|kann)\b", "may"),
-)
+# Obligation strength scale for direction detection.
+# Uses a 0–8 range so prohibitions (must_not/shall_not) rank strictly above
+# positive obligations — this differs intentionally from OBLIGATION_STRENGTH in
+# policy_semantics.py which uses 0–5 and treats prohibitions at the same level.
 _REQ_STRENGTH = {
     "": 0,
     "may": 1,
@@ -48,34 +40,6 @@ _REQ_STRENGTH = {
     "must_not": 7,
     "shall_not": 8,
 }
-
-_FIELD_STRENGTH_RE = re.compile(
-    r'\b\d+(?:[.,]\d+)?\s*(?:v/m|mv/m|kv/m|db[µu]v/m)\b', re.IGNORECASE
-)
-_FREQ_RANGE_RE = re.compile(
-    r'\b\d+(?:[.,]\d+)?\s*(?:hz|khz|mhz|ghz)\b.*?\b\d+(?:[.,]\d+)?\s*(?:hz|khz|mhz|ghz)\b',
-    re.IGNORECASE | re.DOTALL,
-)
-_EMISSION_LIMIT_RE = re.compile(
-    r'\b\d+(?:[.,]\d+)?\s*(?:db[µμu]v(?:/m)?|db[µμu]a)\b', re.IGNORECASE
-)
-_ACCEPTANCE_CLASS_RE = re.compile(
-    r'\b(?:class|performance\s+criterion|performance\s+level)\s*[a-e]\b',
-    re.IGNORECASE,
-)
-_TEST_METHOD_RE = re.compile(
-    r'\b(?:iec|cispr|iso|din\s+en|vde|sae)\s*\d+[-\s.]\d+(?:[-\s.]\d+)?(?:\s+ed\.?\s*\d+)?',
-    re.IGNORECASE,
-)
-_DWELL_TIME_RE = re.compile(
-    r'\b(?:dwell|exposure|soak|dwell\s+time|exposure\s+time)\b.*?\b\d+\s*(?:s|ms|min|h|second|minute|hour)',
-    re.IGNORECASE,
-)
-_TEST_SETUP_RE = re.compile(
-    r'\b(?:temperature|humidity|eut\s+orientation|antenna\s+distance|ground\s+plane|test\s+distance'
-    r'|pre-conditioning|precondition|polarisation|polarization)\b',
-    re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True)
@@ -169,9 +133,9 @@ def detect_requirement_verb_change(
 
 def detect_requirement_verb(text: str) -> str:
     lowered = (text or "").lower()
-    for pattern, value in _REQ_VERB_PATTERNS:
-        if re.search(pattern, lowered):
-            return value
+    for label, pattern in OBLIGATION_PATTERNS:
+        if pattern.search(lowered):
+            return label
     return ""
 
 

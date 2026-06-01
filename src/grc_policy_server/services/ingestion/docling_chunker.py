@@ -13,6 +13,7 @@ from docling_core.transforms.chunker.hierarchical_chunker import (
 from docling_core.transforms.serializer.markdown import MarkdownTableSerializer
 from docling_core.types.doc.labels import DocItemLabel
 
+from grc_policy_server.services.ingestion.chunk_enricher import _detect_section_role
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 from grc_policy_server.services.ingestion.table_normalization import (
     extract_headers_from_cells,
@@ -23,31 +24,6 @@ from grc_policy_server.services.ingestion.table_normalization import (
 )
 
 logger = logging.getLogger(__name__)
-
-_INFORMATIVE_ROLE_RE = re.compile(
-    r"\b(?:annex|appendix|informative|foreword|preface|note|example|"
-    r"anhang|hinweis|beispiel|anmerkung|erläuterung)\b",
-    re.IGNORECASE,
-)
-_NORMATIVE_ROLE_RE = re.compile(
-    r"\b(?:requirement|shall|normative|scope|general|"
-    r"anforderung|normativ|anwendungsbereich)\b",
-    re.IGNORECASE,
-)
-
-
-def _detect_section_role(section_path: tuple[str, ...] | list[str]) -> str:
-    """Return 'informative' or 'normative' based on the section heading path.
-
-    Scans from innermost heading outward; first match wins.  Defaults to
-    'normative' when no heading contains a recognizable role keyword.
-    """
-    for heading in reversed(list(section_path)):
-        if _INFORMATIVE_ROLE_RE.search(heading):
-            return "informative"
-        if _NORMATIVE_ROLE_RE.search(heading):
-            return "normative"
-    return "normative"
 
 
 class MDTableSerializerProvider(ChunkingSerializerProvider):

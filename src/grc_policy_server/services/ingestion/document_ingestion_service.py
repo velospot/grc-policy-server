@@ -12,7 +12,6 @@ from uuid import uuid4
 import re
 
 from grc_policy_server.core.config import settings
-from grc_policy_server.services.comparison.policy_semantics import meaning_to_metadata
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
@@ -25,6 +24,7 @@ from grc_policy_server.services.ingestion.hierarchy_builder import (
 )
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 from grc_policy_server.services.ingestion.ocr_fallback import build_ocr_fallback_chunks
+from grc_policy_server.services.ingestion.chunk_enricher import ChunkEnricher
 from grc_policy_server.services.ingestion.opendataloader_adapter import OpenDataLoaderAdapter
 from grc_policy_server.services.ingestion.opendataloader_chunker import (
     parse_opendataloader_elements,
@@ -192,45 +192,6 @@ async def _correlate_camelot_tables(
         logger.info("camelot correlation upgraded %d/%d table chunks", upgraded, len(table_chunks))
     return updated
 
-_LANG_LEXICONS: dict[str, set[str]] = {
-    "en": {"the", "and", "shall", "must", "should", "policy", "document", "requirements",
-           "control", "controls", "access", "security", "is", "are"},
-    "de": {"der", "die", "das", "und", "nicht", "mit", "sind", "muss", "müssen",
-           "soll", "sollen", "richtlinie", "dokument", "anforderungen", "zugriff", "sicherheit"},
-    "fr": {"le", "la", "les", "et", "pas", "avec", "sont", "doit", "doivent",
-           "politique", "document", "exigences", "accès", "securite", "sécurité", "conformité"},
-}
-
-
-def _detect_language_rule_based(chunks: list[ParsedChunk]) -> str:
-    """Rule-based language detection from chunk text — no LLM required."""
-    sample_texts = []
-    for chunk in chunks[:5]:
-        text = (chunk.text or "").strip()
-        if text:
-            sample_texts.append(text)
-        if len(" ".join(sample_texts)) > 500:
-            break
-    if not sample_texts:
-        return ""
-    sample = " ".join(sample_texts)[:500].lower()
-    tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", sample)
-    if not tokens:
-        return ""
-    scores: dict[str, int] = {code: 0 for code in _LANG_LEXICONS}
-    for token in tokens:
-        for code, lexicon in _LANG_LEXICONS.items():
-            if token in lexicon:
-                scores[code] += 1
-    if any(ch in sample for ch in "äöüß"):
-        scores["de"] += 2
-    if any(ch in sample for ch in "àâçéèêëîïôûùüÿœæ"):
-        scores["fr"] += 2
-    best = max(scores, key=scores.get)
-    if scores[best] == 0:
-        return ""
-    winners = [code for code, score in scores.items() if score == scores[best]]
-    return best if len(winners) == 1 else ""
 
 
 @dataclass(frozen=True)
@@ -281,7 +242,7 @@ class DocumentIngestionService:
         docling_language = str(ocr_metadata.pop("_docling_language", "") or "")
         self._log_extraction_score(filename, parsed_chunks)
         parsed_chunks = preprocess_parsed_chunks(parsed_chunks)
-        parsed_chunks = await self._enrich_clause_semantics(parsed_chunks, docling_language=docling_language)
+        parsed_chunks = ChunkEnricher().enrich(parsed_chunks, docling_language=docling_language)
 
         hierarchy = build_document_hierarchy(
             document_id=document_id,
@@ -663,35 +624,6 @@ class DocumentIngestionService:
             logger.exception("targeted table OCR failed filename=%s; using original", filename)
 
         return dl_doc
-
-    async def _enrich_clause_semantics(
-        self,
-        parsed_chunks: list[ParsedChunk],
-        docling_language: str = "",
-    ) -> list[ParsedChunk]:
-        language = docling_language or _detect_language_rule_based(parsed_chunks)
-
-        enriched = list(parsed_chunks)
-        for index, chunk in enumerate(enriched):
-            if language:
-                metadata = dict(chunk.metadata)
-                metadata.setdefault("detected_language", language)
-                enriched[index] = replace(chunk, metadata=metadata)
-
-            if chunk.chunk_type != "clause":
-                continue
-            text = (chunk.text or "").strip()
-            if not text:
-                continue
-
-            metadata = dict(chunk.metadata)
-            metadata.update(meaning_to_metadata(text))
-            metadata["semantic_source"] = "rule_based"
-            if language:
-                metadata["detected_language"] = language
-            enriched[index] = replace(chunk, metadata=metadata)
-
-        return enriched
 
     def _apply_ocr_fallback(
         self,

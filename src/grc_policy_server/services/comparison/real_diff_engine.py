@@ -52,7 +52,7 @@ from grc_policy_server.services.comparison.policy_semantics import (
     is_non_semantic_content,
     starts_with_lowercase,
 )
-from grc_policy_server.services.ingestion.docling_chunker import _detect_section_role
+from grc_policy_server.services.ingestion.chunk_enricher import _detect_section_role
 from grc_policy_server.services.comparison.severity_classifier import (
     AuditDisposition,
     ClassificationContext,
