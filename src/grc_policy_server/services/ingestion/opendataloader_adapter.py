@@ -41,11 +41,15 @@ class OpenDataLoaderAdapter:
 
     @staticmethod
     def _check_hybrid_reachability(url: str) -> bool:
-        import urllib.request
+        import socket
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 5002
         try:
-            urllib.request.urlopen(url, timeout=3)
-            return True
-        except Exception:
+            with socket.create_connection((host, port), timeout=3):
+                return True
+        except OSError:
             return False
 
     def convert_bytes(self, *, filename: str, content: bytes) -> list[dict]:

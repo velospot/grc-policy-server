@@ -84,6 +84,12 @@ services:
     ports:
       - "5002:5002"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; socket.create_connection((\"localhost\", 5002), timeout=2)'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
     networks:
       - grc_shared_net
 
