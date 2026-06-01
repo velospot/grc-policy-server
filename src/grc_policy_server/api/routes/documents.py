@@ -518,45 +518,34 @@ def delete_documents(
             continue
         seen_document_ids.add(document_id)
 
-        if weaviate is None:
-            results.append(
-                DeleteDocumentResult(
-                    documentId=document_id,
-                    deleted=False,
-                    error="Weaviate is unavailable — vector records not deleted",
+        # Weaviate — optional (same pattern as ingestion)
+        deleted_chunks = 0
+        if weaviate is not None:
+            try:
+                deleted_chunks = weaviate.delete_chunks_by_document(document_id)
+            except Exception:
+                logger.warning(
+                    "weaviate delete failed document_id=%s — continuing with other stores",
+                    document_id,
+                    exc_info=True,
                 )
+        else:
+            logger.debug(
+                "weaviate unavailable — vector records not deleted for document_id=%s",
+                document_id,
             )
-            continue
-        try:
-            deleted_chunks = weaviate.delete_chunks_by_document(document_id)
-        except Exception:
-            logger.exception(
-                "failed to delete weaviate records document_id=%s", document_id
-            )
-            results.append(
-                DeleteDocumentResult(
-                    documentId=document_id,
-                    deleted=False,
-                    error="Failed to delete document records from Weaviate",
-                )
-            )
-            continue
 
+        # Neo4j — optional
         deleted_graph_nodes = 0
         if neo4j is not None:
             try:
                 deleted_graph_nodes = neo4j.delete_document_subgraph(document_id)
             except Exception:
-                logger.exception("failed to delete graph records document_id=%s", document_id)
-                results.append(
-                    DeleteDocumentResult(
-                        documentId=document_id,
-                        deleted=False,
-                        deletedChunks=deleted_chunks,
-                        error="Failed to delete document records from Neo4j",
-                    )
+                logger.warning(
+                    "neo4j delete failed document_id=%s — continuing with filesystem delete",
+                    document_id,
+                    exc_info=True,
                 )
-                continue
 
         try:
             deleted_local = repository.delete_document(document_id)

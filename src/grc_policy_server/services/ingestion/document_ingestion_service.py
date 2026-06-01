@@ -25,10 +25,6 @@ from grc_policy_server.services.ingestion.hierarchy_builder import (
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 from grc_policy_server.services.ingestion.ocr_fallback import build_ocr_fallback_chunks
 from grc_policy_server.services.ingestion.chunk_enricher import ChunkEnricher
-from grc_policy_server.services.ingestion.opendataloader_adapter import OpenDataLoaderAdapter
-from grc_policy_server.services.ingestion.opendataloader_chunker import (
-    parse_opendataloader_elements,
-)
 from grc_policy_server.services.ingestion.document_family_profile import get_profile_for_document
 from grc_policy_server.services.ingestion.table_quality_enhancer import (
     enhance_table_chunks,
@@ -214,7 +210,6 @@ class DocumentIngestionService:
         llm: BaseLLM,
         upload_root: Path,
         canonical_store: CanonicalDocumentStore | None = None,
-        opendataloader_adapter: OpenDataLoaderAdapter | None = None,
     ):
         self.docling_adapter = docling_adapter
         self.weaviate = weaviate
@@ -222,7 +217,6 @@ class DocumentIngestionService:
         self.llm = llm
         self.upload_root = upload_root
         self.canonical_store = canonical_store
-        self.opendataloader_adapter = opendataloader_adapter
 
     async def ingest_upload(
         self,
@@ -235,7 +229,7 @@ class DocumentIngestionService:
         document_id = str(uuid4())
         content_hash = sha256_hex(content)
 
-        parsed_chunks, ocr_metadata, doc_json, opd_elements = await self._extract_parsed_chunks(
+        parsed_chunks, ocr_metadata, doc_json = await self._extract_parsed_chunks(
             filename=filename,
             content=content,
         )
@@ -273,7 +267,6 @@ class DocumentIngestionService:
                 docling_json=doc_json,
                 hierarchy=normalized_tree,
                 metadata=normalized_tree["metadata"],
-                opd_elements=opd_elements,
             )
 
         if self.weaviate is not None:
@@ -381,118 +374,18 @@ class DocumentIngestionService:
         *,
         filename: str,
         content: bytes,
-    ) -> tuple[list[ParsedChunk], dict[str, Any], dict[str, Any] | None, list[dict] | None]:
-        """Return (chunks, ocr_metadata, docling_json, opd_elements).
-
-        Routing for PDFs is controlled by PDF_EXTRACTOR env setting:
-          "opendataloader" (default) — OPD first, docling fallback
-          "docling"                  — docling first, OPD fallback
-        Non-PDF files (DOCX, etc.) always use docling.
-        opd_elements is the raw OPD element list when OPD was used, else None.
-        """
+    ) -> tuple[list[ParsedChunk], dict[str, Any], dict[str, Any]]:
+        """Return (chunks, ocr_metadata, docling_json). All extraction uses Docling."""
         is_pdf = filename.lower().endswith(".pdf")
-        opd_primary = settings.pdf_extractor.strip().lower() != "docling"
-
-        if is_pdf and opd_primary:
-            chunks, ocr_metadata, extraction_json, opd_elements = await self._try_opd_then_docling(
-                filename=filename, content=content
-            )
-        else:
-            # Docling primary (or non-PDF)
-            chunks, ocr_metadata, extraction_json, opd_elements = await self._try_docling_then_opd(
-                filename=filename, content=content, allow_opd_fallback=is_pdf
-            )
-
+        chunks, ocr_metadata, doc_json = await self._run_docling(
+            filename=filename, content=content
+        )
         if is_pdf:
             chunks = await asyncio.to_thread(enhance_table_chunks, content, chunks)
             _profile = get_profile_for_document(filename=filename)
             chunks = filter_degenerate_table_chunks(chunks, profile=_profile)
             chunks = await _correlate_camelot_tables(content, chunks)
-
-        return chunks, ocr_metadata, extraction_json, opd_elements
-
-    async def _try_opd_then_docling(
-        self,
-        *,
-        filename: str,
-        content: bytes,
-    ) -> tuple[list[ParsedChunk], dict[str, Any], dict[str, Any] | None, list[dict] | None]:
-        if self.opendataloader_adapter is not None:
-            try:
-                elements = await asyncio.to_thread(
-                    self.opendataloader_adapter.convert_bytes,
-                    filename=filename,
-                    content=content,
-                )
-                chunks = await asyncio.to_thread(parse_opendataloader_elements, elements)
-                content_chunks = [c for c in chunks if c.chunk_type != "heading"]
-                if content_chunks:
-                    logger.info(
-                        "opendataloader extracted filename=%s chunks=%d",
-                        filename,
-                        len(chunks),
-                    )
-                    return chunks, {}, {
-                        "source": "opendataloader",
-                        "element_count": len(elements),
-                        "hybrid": bool(self.opendataloader_adapter.hybrid_url),
-                    }, elements
-                logger.warning(
-                    "opendataloader produced no content chunks for %s, falling back to docling",
-                    filename,
-                )
-            except Exception:
-                logger.warning(
-                    "opendataloader failed for %s, falling back to docling",
-                    filename,
-                    exc_info=True,
-                )
-
-        chunks, ocr_meta, doc_json = await self._run_docling(filename=filename, content=content)
-        return chunks, ocr_meta, doc_json, None
-
-    async def _try_docling_then_opd(
-        self,
-        *,
-        filename: str,
-        content: bytes,
-        allow_opd_fallback: bool,
-    ) -> tuple[list[ParsedChunk], dict[str, Any], dict[str, Any] | None, list[dict] | None]:
-        chunks, ocr_metadata, doc_json = await self._run_docling(
-            filename=filename, content=content
-        )
-        content_chunks = [c for c in chunks if c.chunk_type != "heading"]
-        if content_chunks:
-            return chunks, ocr_metadata, doc_json, None
-
-        if allow_opd_fallback and self.opendataloader_adapter is not None:
-            logger.warning(
-                "docling produced no content chunks for %s, falling back to opendataloader",
-                filename,
-            )
-            try:
-                elements = await asyncio.to_thread(
-                    self.opendataloader_adapter.convert_bytes,
-                    filename=filename,
-                    content=content,
-                )
-                opd_chunks = await asyncio.to_thread(parse_opendataloader_elements, elements)
-                if any(c.chunk_type != "heading" for c in opd_chunks):
-                    logger.info(
-                        "opendataloader fallback extracted filename=%s chunks=%d",
-                        filename,
-                        len(opd_chunks),
-                    )
-                    # Save both: docling JSON (from primary attempt) and OPD elements (fallback)
-                    return opd_chunks, {}, doc_json, elements
-            except Exception:
-                logger.warning(
-                    "opendataloader fallback also failed for %s",
-                    filename,
-                    exc_info=True,
-                )
-
-        return chunks, ocr_metadata, doc_json, None
+        return chunks, ocr_metadata, doc_json
 
     async def _run_docling(
         self,

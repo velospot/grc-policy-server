@@ -57,7 +57,7 @@ class CanonicalNode:
     ocr_used: bool = False
     text_density: float = 0.0
     has_native_text: bool = True
-    source_extractor: str = ""  # "docling"|"opendataloader"|"pytesseract"
+    source_extractor: str = ""  # "docling"|"pytesseract"
     reading_order: int = -1
 
     @classmethod

@@ -230,10 +230,10 @@ class TestCanonicalNodeProvenance:
         assert node.reading_order == 3
 
     def test_to_dict_round_trip(self):
-        node = self._make_node(source_extractor="opendataloader", reading_order=7)
+        node = self._make_node(source_extractor="docling", reading_order=7)
         d = node.to_dict()
         restored = CanonicalNode.from_dict(d)
-        assert restored.source_extractor == "opendataloader"
+        assert restored.source_extractor == "docling"
         assert restored.reading_order == 7
 
     def test_from_hierarchy_record_falls_through_to_defaults(self):

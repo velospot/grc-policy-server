@@ -1,9 +1,10 @@
 """Canonical output type for document extraction adapters.
 
-Both DoclingAdapter and OpenDataLoaderAdapter convert raw bytes into
-ParsedChunk lists via their respective chunkers.  ExtractorOutput wraps
-that result with provenance metadata so DocumentIngestionService can
-treat all extractors uniformly.
+Canonical output type for document extraction adapters.
+
+DoclingAdapter converts raw bytes into ParsedChunk lists.  ExtractorOutput
+wraps that result with provenance metadata so the ingestion service can treat
+all extractors uniformly.
 
 Adding a new extractor (e.g. Azure Document Intelligence):
   1. Produce a list[ParsedChunk] from raw bytes.

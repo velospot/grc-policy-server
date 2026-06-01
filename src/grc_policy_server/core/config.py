@@ -196,13 +196,6 @@ class Settings(BaseSettings):
     docling_vlm_ollama_url: str = "http://localhost:11434"
     docling_vlm_timeout_sec: float = 300.0
 
-    opendataloader_enabled: bool = True
-    opendataloader_hybrid_url: str | None = None
-    opendataloader_timeout_sec: float = 180.0
-    opendataloader_hybrid_timeout_sec: float = 30.0
-    # "opendataloader" (default) → OPD first, docling fallback for PDFs
-    # "docling"                  → docling first, OPD fallback for PDFs
-    pdf_extractor: str = "opendataloader"
 
     opik_enabled: bool = False
     opik_url_override: str = "http://localhost:5173/api"

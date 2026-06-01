@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extraction quality audit script.
 
-Reads canonical_nodes.json (and raw_opd.json / raw_docling.json) from all
+Reads canonical_nodes.json (and raw_docling.json) from all
 document directories under data/uploads/ and reports quality metrics.
 
 Usage:
@@ -100,22 +100,15 @@ def audit_document(doc_dir: Path) -> dict:
     empty_nodes = [n for n in nodes if not (n.get("raw_text") or "").strip()]
 
     # Determine extractor source
-    opd_file = doc_dir / "raw_opd.json"
     docling_file = doc_dir / "raw_docling.json"
-    opd_data = _read_json(opd_file)
     docling_data = _read_json(docling_file)
 
-    if opd_data and isinstance(opd_data, list):
-        extractor = "opendataloader"
-        raw_element_count = len(opd_data)
-    elif isinstance(docling_data, dict) and docling_data.get("schema_name"):
+    if isinstance(docling_data, dict) and docling_data.get("schema_name"):
         extractor = "docling"
-        raw_element_count = "n/a"
     else:
-        # Fallback: check metadata in canonical payload
         meta = payload.get("metadata") or {}
-        extractor = str(meta.get("source") or "unknown")
-        raw_element_count = "n/a"
+        extractor = str(meta.get("source") or "docling")
+    raw_element_count = "n/a"
 
     filename = payload.get("filename", doc_dir.name)
 

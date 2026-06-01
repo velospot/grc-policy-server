@@ -1,7 +1,7 @@
 """Post-parse enrichment pipeline for ParsedChunk lists.
 
-ChunkEnricher is a composable, extractor-agnostic pass that runs AFTER both
-Docling and OpenDataLoader chunkers have produced ParsedChunk objects.  It adds
+ChunkEnricher is a composable pass that runs AFTER Docling chunking has
+produced ParsedChunk objects.  It adds
 metadata that requires the full chunk list (language detection) or that should
 be computed identically regardless of which extractor was used (section role,
 clause semantics).
