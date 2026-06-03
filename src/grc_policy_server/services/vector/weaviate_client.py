@@ -142,20 +142,11 @@ class WeaviateClient:
                 "markdown_text",
                 "title",
             ]
-            vectorizer = (settings.weaviate_vectorizer or "ollama").strip().lower()
-
-            if vectorizer == "huggingface":
-                vector_config = Configure.Vectors.text2vec_huggingface(
-                    endpoint_url=settings.weaviate_huggingface_endpoint_url,
-                    model=settings.weaviate_huggingface_model,
-                    source_properties=source_properties,
-                )
-            else:
-                vector_config = Configure.Vectors.text2vec_ollama(
-                    api_endpoint=settings.ollama_embedding_url,
-                    model=settings.ollama_embed_model,
-                    source_properties=source_properties,
-                )
+            vector_config = Configure.Vectors.text2vec_ollama(
+                api_endpoint=settings.ollama_embedding_url,
+                model=settings.ollama_embed_model,
+                source_properties=source_properties,
+            )
 
             self.client.collections.create(
                 name=name,

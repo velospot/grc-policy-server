@@ -10,11 +10,16 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import logging
 from grc_policy_server.repositories.documents import DocumentRepository
+from grc_policy_server.repositories.human_review import HumanReviewQueue
+from grc_policy_server.services.agents.evidence_agent import EvidenceExtractionAgent
+from grc_policy_server.services.agents.explanation_agent import ExplanationAgent
+from grc_policy_server.services.audit.audit_log import AuditLogStore
 from grc_policy_server.services.comparison.compare_v2_dispatcher import (
     CompareV2Dispatcher,
 )
 from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
 from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
+from grc_policy_server.services.comparison.offline_diff_engine import OfflineDiffEngine
 from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 from grc_policy_server.services.comparison.real_diff_engine_stream import (
     RealDiffEngineStream,
@@ -35,6 +40,7 @@ from grc_policy_server.services.llm.ollama_client import OllamaClient, OllamaSet
 from grc_policy_server.services.storage.storage_provider_store import (
     StorageProviderStore,
 )
+from grc_policy_server.services.ontology.ontology_classifier import OntologyClassifier
 from grc_policy_server.services.vector.weaviate_client import (
     WeaviateClient,
 )
@@ -173,33 +179,109 @@ def get_storage_provider_store() -> StorageProviderStore:
     )
 
 
+def get_audit_log_store() -> AuditLogStore | None:
+    """Return an AuditLogStore when AUDIT_LOG_ENABLED=true (default)."""
+    if not settings.audit_log_enabled:
+        return None
+    return AuditLogStore(
+        database_url=settings.database_url,
+        upload_root=Path(settings.upload_root),
+    )
+
+
+def get_evidence_agent() -> EvidenceExtractionAgent | None:
+    """Return an EvidenceExtractionAgent when EVIDENCE_EXTRACTION_ENABLED=true."""
+    if not settings.evidence_extraction_enabled:
+        return None
+    base_url = settings.ollama_url
+    if not base_url:
+        return None
+    return EvidenceExtractionAgent(base_url=base_url, model=settings.ollama_chat_model)
+
+
+def _should_use_offline_engine() -> bool:
+    """Return True when the offline engine should be selected.
+
+    - Always True for COMPARISON_BACKEND=offline.
+    - In 'auto' mode: True when Weaviate or LLM health checks report DOWN,
+      relying on the circuit-breaking ServiceHealthRegistry.
+    - Always False for COMPARISON_BACKEND=online (forces online even if degraded).
+    """
+    backend = settings.comparison_backend
+    if backend == "offline":
+        return True
+    if backend == "online":
+        return False
+    # auto mode — probe via registry (reads from cache, never blocks >2s)
+    if settings.offline_fallback:
+        from grc_policy_server.services.health.service_health_registry import (
+            get_service_health_registry,
+        )
+        registry = get_service_health_registry()
+        weaviate_ok = registry.is_healthy("weaviate")
+        llm_ok = registry.is_healthy("llm")
+        if not weaviate_ok or not llm_ok:
+            logger.info(
+                "auto mode: degrading to offline engine "
+                "(weaviate=%s llm=%s)",
+                "up" if weaviate_ok else "down",
+                "up" if llm_ok else "down",
+            )
+            return True
+    return False
+
+
 def get_diff_engine(
     weaviate: WeaviateClient | None = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
     trace_store: ComparisonTraceStore = Depends(get_comparison_trace_store),
+    audit_log: AuditLogStore | None = Depends(get_audit_log_store),
+    evidence_agent: EvidenceExtractionAgent | None = Depends(get_evidence_agent),
 ) -> RealDiffEngine:
+    if _should_use_offline_engine():
+        return OfflineDiffEngine(
+            canonical_store=canonical_store,
+            trace_store=trace_store,
+        )
     return RealDiffEngine(
         weaviate=weaviate,
         neo4j=neo4j,
         llm=llm,
         canonical_store=canonical_store,
         trace_store=trace_store,
+        audit_log=audit_log,
+        evidence_agent=evidence_agent,
     )
+
+
+def get_explanation_agent(
+    llm: BaseLLM = Depends(get_llm_client),
+) -> BaseLLM:
+    """Return ExplanationAgent (wrapping the raw LLM) when enabled.
+
+    ExplanationAgent overrides generate_diff_table_row_stream() with a
+    focused compliance explanation prompt.  All other BaseLLM methods
+    delegate to the underlying Ollama/vLLM client unchanged.
+    """
+    if settings.explanation_agent_enabled:
+        return ExplanationAgent(llm=llm, max_tokens=settings.max_explanation_tokens)
+    return llm
 
 
 def get_diff_engine_stream(
     weaviate: WeaviateClient | None = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
-    llm: BaseLLM = Depends(get_llm_client),
+    explanation_llm: BaseLLM = Depends(get_explanation_agent),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
     trace_store: ComparisonTraceStore = Depends(get_comparison_trace_store),
 ) -> RealDiffEngineStream:
+    # Streaming uses the full online engine; offline callers use /compare directly.
     return RealDiffEngineStream(
         weaviate=weaviate,
         neo4j=neo4j,
-        llm=llm,
+        llm=explanation_llm,
         canonical_store=canonical_store,
         trace_store=trace_store,
         inter_diff_delay_ms=settings.llm_stream_inter_diff_delay_ms,
@@ -210,12 +292,36 @@ def get_document_repository() -> DocumentRepository:
     return DocumentRepository(upload_root=Path(settings.upload_root))
 
 
+def get_ontology_classifier() -> OntologyClassifier | None:
+    """Return an OntologyClassifier instance, or None when disabled."""
+    if not settings.ontology_classification_enabled:
+        return None
+    base_url = settings.ontology_classifier_url or settings.ollama_url
+    model = settings.ontology_classifier_model or settings.ollama_chat_model
+    if not base_url:
+        return None
+    return OntologyClassifier(
+        base_url=base_url,
+        model=model,
+        confidence_threshold=settings.ontology_confidence_threshold,
+    )
+
+
+def get_human_review_queue() -> HumanReviewQueue:
+    return HumanReviewQueue(
+        database_url=settings.database_url,
+        upload_root=Path(settings.upload_root),
+    )
+
+
 def get_document_ingestion_service(
     docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
     weaviate: WeaviateClient | None = Depends(get_weaviate_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
+    ontology_classifier: OntologyClassifier | None = Depends(get_ontology_classifier),
+    human_review_queue: HumanReviewQueue = Depends(get_human_review_queue),
 ) -> DocumentIngestionService:
     return DocumentIngestionService(
         docling_adapter=docling_adapter,
@@ -224,6 +330,8 @@ def get_document_ingestion_service(
         llm=llm,
         upload_root=Path(settings.upload_root),
         canonical_store=canonical_store,
+        ontology_classifier=ontology_classifier,
+        human_review_queue=human_review_queue,
     )
 
 
@@ -233,6 +341,8 @@ def get_document_ingestion_service_factory(
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
+    ontology_classifier: OntologyClassifier | None = Depends(get_ontology_classifier),
+    human_review_queue: HumanReviewQueue = Depends(get_human_review_queue),
 ) -> Callable[[], DocumentIngestionService]:
     def _factory() -> DocumentIngestionService:
         return DocumentIngestionService(
@@ -242,6 +352,8 @@ def get_document_ingestion_service_factory(
             llm=llm,
             upload_root=Path(settings.upload_root),
             canonical_store=canonical_store,
+            ontology_classifier=ontology_classifier,
+            human_review_queue=human_review_queue,
         )
 
     return _factory

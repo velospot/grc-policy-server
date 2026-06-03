@@ -143,10 +143,6 @@ class Settings(BaseSettings):
     weaviate_grpc_host: str | None = None
     weaviate_grpc_port: int | None = None
     weaviate_grpc_secure: bool | None = None
-    weaviate_vectorizer: str = "huggingface"  # "huggingface" | "ollama"
-    weaviate_huggingface_endpoint_url: str | None = None
-    weaviate_huggingface_model: str = "Qwen/Qwen3-Embedding-0.6B"
-
     ollama_url: str = "http://localhost:11434"
     ollama_embedding_url: str = "http://localhost:11434"
     ollama_chat_model: str = Field(
@@ -161,34 +157,40 @@ class Settings(BaseSettings):
     ollama_connect_timeout_sec: float = 10.0
     ollama_write_timeout_sec: float = 60.0
 
-    llm_primary_provider: str = "vllm"  # "vllm" | "ollama"
-    vllm_enabled: bool = True
-    vllm_chat_url: str = Field(
-        default="http://localhost:8001",
-        validation_alias=AliasChoices("VLLM_CHAT_URL", "LLAMACPP_CHAT_URL", "OPENAI_CHAT_URL"),
-    )
-    vllm_embed_url: str = Field(
-        default="http://localhost:8001",
-        validation_alias=AliasChoices("VLLM_EMBED_URL", "LLAMACPP_EMBED_URL", "OPENAI_EMBED_URL"),
-    )
-    vllm_api_key: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("VLLM_API_KEY", "LLAMACPP_API_KEY", "OPENAI_API_KEY"),
-    )
-    vllm_chat_model: str = Field(
-        default="ibm-granite/granite-3.3-8b-instruct",
-        validation_alias=AliasChoices("VLLM_CHAT_MODEL", "LLAMACPP_CHAT_MODEL", "OPENAI_CHAT_MODEL"),
-    )
-    vllm_embed_model: str = Field(
-        default="Qwen/Qwen3-Embedding-0.6B",
-        validation_alias=AliasChoices("VLLM_EMBED_MODEL", "LLAMACPP_EMBED_MODEL", "OPENAI_EMBED_MODEL"),
-    )
-    vllm_connect_timeout_sec: float = 5.0
-    vllm_timeout_sec: float = 600.0
-    vllm_write_timeout_sec: float = 60.0
-    vllm_max_retries: int = 2
+    llm_enrichment_enabled: bool = False  # LLM semantic extraction — rule-based by default
 
-    llm_enrichment_enabled: bool = False  # LLM semantic extraction disabled — rule-based only
+    # Offline / degradation settings
+    # "offline" — pure local processing (PostgreSQL + files, no external services)
+    # "online"  — current behaviour (Weaviate + LLM + Celery)
+    # "auto"    — use online when services are reachable, degrade to offline otherwise
+    comparison_backend: str = "auto"
+    offline_fallback: bool = True   # auto-degrade to offline when Celery/LLM unavailable
+    bge_m3_model: str = "BAAI/bge-m3"  # sentence-transformer model for local embeddings
+
+    # Ontology classification (Phase 3) — disabled by default; requires an LLM endpoint
+    # When enabled, async upload (v2) classifies each chunk into the 10-type universal ontology.
+    # Low-confidence items (< ontology_confidence_threshold) go to the human review queue.
+    ontology_classification_enabled: bool = False
+    ontology_classifier_url: str = ""   # defaults to vllm_chat_url when empty
+    ontology_classifier_model: str = "" # defaults to vllm_chat_model when empty
+    ontology_confidence_threshold: float = 0.70
+
+    # Audit log (Phase 4) — append-only PostgreSQL table + JSONL file fallback
+    audit_log_enabled: bool = True
+    # Evidence extraction (Phase 4) — LLM-powered meaningful-change extraction for MODIFIED pairs
+    # Disabled by default; requires a configured LLM endpoint (vllm_chat_url)
+    evidence_extraction_enabled: bool = False
+
+    # Circuit breaker (Phase 6) — governs ServiceHealthRegistry behaviour
+    circuit_breaker_threshold: int = 3    # consecutive failures before circuit opens
+    circuit_breaker_timeout_s: float = 60.0  # seconds circuit stays open before re-probe
+
+    # ExplanationAgent (Phase 5) — focused per-diff compliance explanation
+    # Wraps the configured LLM client with a compliance-focused prompt.
+    # See docs/agentic_limitations.md for token budget guidance.
+    explanation_agent_enabled: bool = True
+    max_explanation_tokens: int = 80      # cap per-diff output (L5 mitigation)
+    explanation_batch_size: int = 10      # diffs per summary batch (L4 mitigation)
 
     # VLM-based table extraction via granite-docling (Ollama API)
     docling_vlm_enabled: bool = False

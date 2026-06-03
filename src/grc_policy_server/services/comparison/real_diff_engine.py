@@ -282,6 +282,9 @@ class RealDiffEngine:
     topk: int = 5
     max_diffs: int = 40
     severity_classifier: SeverityClassifier = field(default_factory=SeverityClassifier)
+    # Phase 4: optional audit log and evidence extraction agent
+    audit_log: "Any | None" = field(default=None)     # AuditLogStore | None
+    evidence_agent: "Any | None" = field(default=None) # EvidenceExtractionAgent | None
 
     def _weaviate_search_fn(self):
         """Return a search callable that silently falls back on any Weaviate error."""
@@ -310,6 +313,25 @@ class RealDiffEngine:
         save_to_db: bool = False,
         testing_department: str = "",
     ) -> ComparisonResult:
+        import hashlib as _hashlib
+        import uuid as _uuid
+
+        comparison_id = str(_uuid.uuid4())
+        if self.audit_log is not None:
+            try:
+                self.audit_log.log_event(
+                    event_type="comparison_started",
+                    doc_id=doc1.id,
+                    comparison_id=comparison_id,
+                    input_hash=_hashlib.sha256(
+                        f"{doc1.id}:{doc2.id}".encode()
+                    ).hexdigest(),
+                    payload={"doc1_name": doc1.name, "doc2_name": doc2.name,
+                             "audit_mode": audit_mode},
+                )
+            except Exception:
+                logger.warning("audit_log.log_event(comparison_started) failed", exc_info=True)
+
         left_nodes = self._load_comparison_nodes(doc1.id)
         right_nodes = self._load_comparison_nodes(doc2.id)
         left_nodes = self._stitch_page_fragments(left_nodes)
@@ -366,6 +388,11 @@ class RealDiffEngine:
                     testing_department=testing_department,
                 )
             )
+
+        # Phase 4: evidence extraction for MODIFIED pairs with meaningful distance.
+        if self.evidence_agent is not None:
+            change_records = await self._run_evidence_extraction(change_records)
+
         diffs = [self._key_difference_from_record(record) for record in change_records]
 
         # Filter non-semantic diffs and their corresponding change_records together
@@ -513,6 +540,46 @@ class RealDiffEngine:
 
         if save_to_db:
             self._try_save_comparison_to_postgres(doc1.id, doc2.id, result, audit_mode)
+
+        # Phase 4: log comparison_completed event.
+        if self.audit_log is not None:
+            try:
+                import hashlib as _hashlib2
+                output_hash = _hashlib2.sha256(
+                    result.model_dump_json().encode()
+                ).hexdigest()
+                self.audit_log.log_event(
+                    event_type="comparison_completed",
+                    doc_id=doc1.id,
+                    comparison_id=comparison_id,
+                    output_hash=output_hash,
+                    confidence=(
+                        result.accuracyMetrics.overall_confidence
+                        if result.accuracyMetrics
+                        else None
+                    ),
+                    payload={
+                        "doc1_id": doc1.id,
+                        "doc2_id": doc2.id,
+                        "total_diffs": len(result.keyDifferences),
+                        "high": sum(
+                            1 for d in result.keyDifferences if d.changeSeverity == "high"
+                        ),
+                        "medium": sum(
+                            1 for d in result.keyDifferences if d.changeSeverity == "medium"
+                        ),
+                        "low": sum(
+                            1 for d in result.keyDifferences if d.changeSeverity == "low"
+                        ),
+                        "requires_human_review": result.requireHumanReview,
+                        "hidden_diffs_count": result.hiddenDiffsCount,
+                        "comparison_mode": result.comparisonMode,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "audit_log.log_event(comparison_completed) failed", exc_info=True
+                )
 
         return result
 
@@ -690,6 +757,55 @@ class RealDiffEngine:
                 f"No data source available for document {document_id}. "
                 "Canonical store returned no nodes and Weaviate is unreachable."
             ) from exc
+
+    async def _run_evidence_extraction(
+        self, change_records: list[ChangeRecord]
+    ) -> list[ChangeRecord]:
+        """Run EvidenceExtractionAgent on MODIFIED pairs with distance > 0.20.
+
+        Records whose evidence result shows has_meaningful_change=True but
+        whose severity is currently "low" get their requires_human_review flag
+        promoted to True so auditors are not misled by low-distance cosmetic
+        classifications.
+        """
+        from dataclasses import replace as _dc_replace
+
+        # Build index of which change_records to send (MODIFIED, distance > 0.20)
+        indexed: list[tuple[int, ChangeRecord]] = [
+            (i, r)
+            for i, r in enumerate(change_records)
+            if r.change_type == "MODIFIED"
+            and r.distance is not None
+            and r.distance > 0.20
+            and r.left_nodes
+            and r.right_nodes
+        ]
+        if not indexed:
+            return change_records
+
+        pairs = [
+            {
+                "left": r.left_nodes[0],
+                "right": r.right_nodes[0],
+                "alignment": r.alignment_type,
+            }
+            for _, r in indexed
+        ]
+        try:
+            results = await self.evidence_agent.extract_batch(pairs)
+        except Exception:
+            logger.warning("evidence_agent.extract_batch failed", exc_info=True)
+            return change_records
+
+        updated = list(change_records)
+        for (i, record), ev_result in zip(indexed, results):
+            if (
+                ev_result.has_meaningful_change
+                and record.severity == "low"
+                and not record.requires_human_review
+            ):
+                updated[i] = _dc_replace(record, requires_human_review=True)
+        return updated
 
     def _detect_moves(
         self,
@@ -1274,6 +1390,7 @@ class RealDiffEngine:
                 testing_department=testing_department,
                 section_role=_section_role,
                 obligation_strength=_obligation_strength,
+                ontology_type=str((left or {}).get("ontology_type") or (right or {}).get("ontology_type") or "") or None,
             )
         )
         significance = classification.severity
@@ -2698,6 +2815,12 @@ class RealDiffEngine:
         for m in matches:
             breakdown[m.matched_by] = breakdown.get(m.matched_by, 0) + 1
 
+        # Tally detected_language from left nodes (doc1 side).
+        lang_breakdown: dict[str, int] = {}
+        for m in matches:
+            lang = str(m.left.get("detected_language") or "").strip() or "en"
+            lang_breakdown[lang] = lang_breakdown.get(lang, 0) + 1
+
         weighted_confidence = (
             high_conf * 1.0 + medium_conf * 0.7 + low_conf * 0.3
         ) / len(matches)
@@ -2712,6 +2835,7 @@ class RealDiffEngine:
             overall_confidence=round(weighted_confidence, 4),
             confidence_breakdown=breakdown,
             section_metrics=self._section_accuracy_metrics(matches),
+            language_breakdown=lang_breakdown if len(lang_breakdown) > 1 else None,
         )
 
     def _table_content_for_llm(self, node: dict | None) -> str | None:

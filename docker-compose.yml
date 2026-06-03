@@ -1,6 +1,21 @@
-#version: "3.9"
+# GRC Policy Server — Docker Compose (development / default)
+#
+# OFFLINE MODE (PostgreSQL + local Ollama only — no Weaviate, no Redis):
+#   docker compose up postgres
+#   COMPARISON_BACKEND=offline uvicorn grc_policy_server.main:app
+#
+# FULL STACK (Weaviate + Redis + Celery worker):
+#   docker compose up
+#
+# Profiles
+#   (no profile)  — postgres + redis + weaviate (full stack)
+#   offline       — postgres only
+#
+# Usage with offline profile:
+#   docker compose --profile offline up
 
 services:
+  # ── PostgreSQL ─── always required ─────────────────────────────────────────
   postgres:
     container_name: grc_postgres
     image: postgres:17.9
@@ -14,40 +29,34 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test:
-        ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
     networks:
       - grc_shared_net
+    profiles:
+      - ""        # default (no profile = always starts)
+      - offline
 
+  # ── Redis ─── required for Celery (async upload/compare) ───────────────────
+  # Not needed when COMPARISON_BACKEND=offline (compare v2 runs synchronously).
   redis:
     container_name: grc_redis
     image: redis:7-alpine
+    restart: always
     ports:
       - "6379:6379"
-    restart: always
     networks:
       - grc_shared_net
 
-  # neo4j:
-  #   container_name: rag_neo4j
-  #   image: neo4j:community-trixie
-  #   volumes:
-  #     - ./neo4j/logs:/logs
-  #     - ./neo4j/config:/config
-  #     - ./neo4j/data:/data
-  #     - ./neo4j/plugins:/plugins
-  #   environment:
-  #     - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
-  #   ports:
-  #     - "7474:7474"
-  #     - "7687:7687"
-  #   restart: always
-
+  # ── Weaviate ─── optional vector search backend ─────────────────────────────
+  # Not required when COMPARISON_BACKEND=offline.
+  # ServiceHealthRegistry probes this at /v1/.well-known/ready every 30s;
+  # if it's unreachable, auto mode degrades to OfflineDiffEngine automatically.
   weaviate:
     container_name: weaviate_chat_db
+    image: cr.weaviate.io/semitechnologies/weaviate:1.31.5
     command:
       - --host
       - 0.0.0.0
@@ -55,18 +64,17 @@ services:
       - "8080"
       - --scheme
       - http
-    image: cr.weaviate.io/semitechnologies/weaviate:1.31.5
     ports:
-      - 8085:8080
-      - 50051:50051
+      - "8085:8080"
+      - "50051:50051"
     volumes:
-      - ./weaviate_data:/var/lib/weaviate
+      - weaviate_data:/var/lib/weaviate
     restart: on-failure:2
     networks:
       - grc_shared_net
     environment:
-      DISABLE_TELEMETRY: true
-      QUERY_DEFAULTS_LIMIT: 25
+      DISABLE_TELEMETRY: "true"
+      QUERY_DEFAULTS_LIMIT: "25"
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
       PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
       ENABLE_API_BASED_MODULES: "true"
@@ -74,8 +82,28 @@ services:
       DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
       CLUSTER_HOSTNAME: "node1"
 
+  # ── Neo4j ─── optional knowledge graph (disabled by default) ───────────────
+  # Uncomment and set NEO4J_ENABLED=true to enable.
+  # neo4j:
+  #   container_name: grc_neo4j
+  #   image: neo4j:community-trixie
+  #   volumes:
+  #     - ./neo4j/logs:/logs
+  #     - ./neo4j/config:/config
+  #     - ./neo4j/data:/data
+  #     - ./neo4j/plugins:/plugins
+  #   environment:
+  #     NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}"
+  #   ports:
+  #     - "7474:7474"
+  #     - "7687:7687"
+  #   restart: always
+  #   networks:
+  #     - grc_shared_net
+
 volumes:
   postgres_data:
+  weaviate_data:
 
 networks:
   grc_shared_net:

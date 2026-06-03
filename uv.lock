@@ -1005,7 +1005,6 @@ dependencies = [
     { name = "neo4j" },
     { name = "neo4j-graphrag" },
     { name = "numpy" },
-    { name = "opendataloader-pdf" },
     { name = "opik" },
     { name = "pdfplumber" },
     { name = "psycopg", extra = ["binary"] },
@@ -1064,7 +1063,6 @@ requires-dist = [
     { name = "neo4j-graphrag", specifier = ">=1.13.0" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "opencv-python-headless", marker = "extra == 'table-extraction'", specifier = ">=4.5.0" },
-    { name = "opendataloader-pdf", specifier = ">=2.4.7" },
     { name = "opik", specifier = ">=1.11.2" },
     { name = "pdf2image", marker = "extra == 'table-extraction'", specifier = ">=1.16.0" },
     { name = "pdfplumber", specifier = ">=0.11.0" },
@@ -2227,15 +2225,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4b/33/b5db29a6c00eb8f50708110d8d453747ca125c8b805bc437b289dbdcc057/opencv_python_headless-4.13.0.92-cp37-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:0bd48544f77c68b2941392fcdf9bcd2b9cdf00e98cb8c29b2455d194763cf99e", size = 60391106, upload-time = "2026-02-05T10:30:14.236Z" },
     { url = "https://files.pythonhosted.org/packages/fb/c3/52cfea47cd33e53e8c0fbd6e7c800b457245c1fda7d61660b4ffe9596a7f/opencv_python_headless-4.13.0.92-cp37-abi3-win32.whl", hash = "sha256:a7cf08e5b191f4ebb530791acc0825a7986e0d0dee2a3c491184bd8599848a4b", size = 30812232, upload-time = "2026-02-05T07:02:29.594Z" },
     { url = "https://files.pythonhosted.org/packages/4a/90/b338326131ccb2aaa3c2c85d00f41822c0050139a4bfe723cfd95455bd2d/opencv_python_headless-4.13.0.92-cp37-abi3-win_amd64.whl", hash = "sha256:77a82fe35ddcec0f62c15f2ba8a12ecc2ed4207c17b0902c7a3151ae29f37fb6", size = 40070414, upload-time = "2026-02-05T07:02:26.448Z" },
-]
-
-[[package]]
-name = "opendataloader-pdf"
-version = "2.4.7"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/1d/5a/98cd2079f2828f7886ee447eae21ee60a858930596aebcc8d275a1fe2b12/opendataloader_pdf-2.4.7.tar.gz", hash = "sha256:a16e995f2f526d706045218d9e359a31f50371a0bc0e3bb1bc15abb467c08fb7", size = 22554865, upload-time = "2026-05-27T10:04:54.285Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b7/14/f897eabf04eab4e6a40dce9214d921558165f3eaed68335892a5b1a004d0/opendataloader_pdf-2.4.7-py3-none-any.whl", hash = "sha256:1c359183650f4c012875010c156f13b6d3477b00762b8e3fbd8479fa03feb628", size = 22568934, upload-time = "2026-05-27T10:04:49.902Z" },
 ]
 
 [[package]]

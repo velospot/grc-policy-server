@@ -484,3 +484,124 @@ git tag v1.0.0
 git push origin v1.0.0
 # Publishes ghcr.io/<your-org>/grc-policy-server:1.0.0 and :1.0
 ```
+
+---
+
+## Offline Deployment (Local Ollama, No Cloud Services)
+
+This mode runs with **PostgreSQL + local Ollama only** — no Weaviate, no Celery,
+no cloud LLM. Suitable for air-gapped or on-premise installations.
+
+### Minimum services required
+
+```bash
+docker compose up postgres   # PostgreSQL only
+# Then run Ollama separately on the host:
+ollama serve
+ollama pull granite3.3:8b
+ollama pull qwen3-embedding:0.6b
+```
+
+### Required ENV variables
+
+```bash
+# ── Backend selection ──────────────────────────────────────────────────
+COMPARISON_BACKEND=offline          # Use local Ollama + PostgreSQL only
+OFFLINE_FALLBACK=true               # Degrade to zero-LLM if Ollama unreachable
+
+# ── Local Ollama ───────────────────────────────────────────────────────
+OLLAMA_URL=http://localhost:11434
+OLLAMA_CHAT_MODEL=granite3.3:8b     # ~8 GB VRAM
+OLLAMA_EMBED_MODEL=qwen3-embedding:0.6b  # ~0.6 GB VRAM
+
+# ── PostgreSQL ─────────────────────────────────────────────────────────
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_USER=grc_admin
+POSTGRES_PASSWORD=<your-password>
+POSTGRES_DB=grc_db
+
+# ── Disable Celery (sync comparison via asyncio.run()) ─────────────────
+# No CELERY_BROKER_URL needed — compare v2 runs synchronously
+
+# ── Audit log ──────────────────────────────────────────────────────────
+AUDIT_LOG_ENABLED=true              # Append-only audit log in PostgreSQL
+
+# ── Agent token budgets (local hardware) ───────────────────────────────
+MAX_EXPLANATION_TOKENS=80           # Cap per-diff LLM output
+EXPLANATION_BATCH_SIZE=10           # Diffs per summary batch
+EXPLANATION_AGENT_ENABLED=true
+
+# ── Ontology classification (opt-in) ───────────────────────────────────
+ONTOLOGY_CLASSIFICATION_ENABLED=false   # Enable after confirming Ollama stability
+ONTOLOGY_CLASSIFIER_URL=http://localhost:11434
+ONTOLOGY_CLASSIFIER_MODEL=granite3.3:8b
+ONTOLOGY_CONFIDENCE_THRESHOLD=0.70
+
+# ── Circuit breaker ────────────────────────────────────────────────────
+CIRCUIT_BREAKER_THRESHOLD=3         # Failures before circuit opens
+CIRCUIT_BREAKER_TIMEOUT_S=60        # Seconds circuit stays open
+
+# ── Streaming ──────────────────────────────────────────────────────────
+LLM_STREAM_INTER_DIFF_DELAY_MS=0    # No artificial delay
+
+# ── Embedding (Sentence-Transformers, CPU fallback) ────────────────────
+BGE_M3_MODEL=BAAI/bge-m3            # Used for local cosine similarity
+```
+
+### Health check
+
+```bash
+# Service availability
+curl http://localhost:8000/health
+# → {"status": "ok"}
+
+# Per-service status (new in Phase 6)
+curl -H "Authorization: Bearer <token>" http://localhost:8000/health/services
+# → {"weaviate": {"status": "down"}, "neo4j": {"status": "disabled"},
+#    "celery": {"status": "down"}, "llm": {"status": "up"}}
+```
+
+In offline mode, `weaviate` and `celery` will show `"down"` — this is expected.
+The comparison engine degrades automatically.
+
+### Expected latency (local Ollama, granite3.3:8b)
+
+| Operation | Estimated time |
+|-----------|---------------|
+| Document upload (sync, 50 pages) | 30–90 seconds |
+| Comparison /compare (20 diffs) | 5–15 seconds |
+| Comparison /v4/compare/stream (20 diffs + explanations) | 40–80 seconds |
+
+For documents > 100 pages, use `/documents/upload/v2` (async) + `/v2/compare`.
+
+### VRAM allocation guide (RTX 5070 Ti 16 GB)
+
+| Component | VRAM |
+|-----------|------|
+| granite3.3:8b (chat) | ~8 GB |
+| qwen3-embedding:0.6b (embed) | ~0.6 GB |
+| Docling (OCR/VLM disabled) | 0 GB |
+| **Total** | ~8.6 GB |
+
+> **Note:** BGE-M3 (4 GB) conflicts with granite3.3:8b on 16 GB GPU.
+> Use `qwen3-embedding:0.6b` via Ollama instead of BGE-M3 for local deployments.
+
+### All new ENV variables (Phases 1–6 summary)
+
+| Variable | Default | Phase | Description |
+|----------|---------|-------|-------------|
+| `COMPARISON_BACKEND` | `auto` | 1 | `auto\|offline\|online` |
+| `OFFLINE_FALLBACK` | `true` | 1 | Degrade to offline on service failure |
+| `BGE_M3_MODEL` | `BAAI/bge-m3` | 1 | Local sentence-transformer model |
+| `ONTOLOGY_CLASSIFICATION_ENABLED` | `false` | 3 | Universal ontology classification |
+| `ONTOLOGY_CLASSIFIER_URL` | `` | 3 | Ollama/vLLM URL for classifier |
+| `ONTOLOGY_CLASSIFIER_MODEL` | `` | 3 | Model for ontology classification |
+| `ONTOLOGY_CONFIDENCE_THRESHOLD` | `0.70` | 3 | Below this → human review queue |
+| `AUDIT_LOG_ENABLED` | `true` | 4 | Append-only comparison audit log |
+| `EVIDENCE_EXTRACTION_ENABLED` | `false` | 4 | LLM evidence extraction per diff |
+| `EXPLANATION_AGENT_ENABLED` | `true` | 5 | Focused per-diff explanations |
+| `MAX_EXPLANATION_TOKENS` | `80` | 5 | Token budget per diff explanation |
+| `EXPLANATION_BATCH_SIZE` | `10` | 5 | Diffs per summary LLM batch |
+| `CIRCUIT_BREAKER_THRESHOLD` | `3` | 6 | Failures before circuit opens |
+| `CIRCUIT_BREAKER_TIMEOUT_S` | `60` | 6 | Seconds circuit stays open |

@@ -910,6 +910,14 @@ class OllamaClient(BaseLLM):
         testing_department: str | None = None,
         language: str = "",
     ):
+        """Stream per-diff explanation tokens using Ollama's NDJSON streaming API.
+
+        Calls /api/generate with stream=true and yields each response fragment
+        as a separate SSE token — real progressive streaming instead of
+        buffering the full response (L1 limitation mitigation, agentic_limitations.md).
+
+        Falls back to non-streaming on any error.
+        """
         prompt = self._prompt_diff_table_row(
             section=section,
             page=page,
@@ -922,10 +930,57 @@ class OllamaClient(BaseLLM):
             testing_department=testing_department,
             language=language,
         )
-        result = await self._generate_text(prompt, temperature=0.0)
-        if result.strip():
-            yield result
-        else:
+        try:
+            async for token in self._generate_text_stream(prompt, temperature=0.0):
+                yield token
+        except Exception:
+            logger.debug(
+                "Ollama streaming failed — falling back to non-streaming", exc_info=True
+            )
+            result = await self._generate_text(prompt, temperature=0.0)
+            if result.strip():
+                yield result
+            else:
+                yield "SKIP"
+
+    async def _generate_text_stream(self, prompt: str, temperature: float = 0.0):
+        """Yield text tokens from Ollama's NDJSON streaming API (/api/generate?stream=true).
+
+        Ollama streaming format: each line is a JSON object:
+          {"model": "...", "created_at": "...", "response": "<token>", "done": false}
+        The last object has "done": true.
+        """
+        payload = {
+            "model": self.settings.chat_model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {"temperature": temperature},
+        }
+        accumulated: list[str] = []
+        try:
+            async with self._async_client.stream("POST", "/api/generate", json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except Exception:
+                        continue
+                    token = str(chunk.get("response") or "")
+                    # Strip chain-of-thought tags (Granite/DeepSeek style).
+                    token = re.sub(r"<think>.*?</think>", "", token, flags=re.DOTALL)
+                    if token:
+                        accumulated.append(token)
+                        yield token
+                    if chunk.get("done"):
+                        break
+        except Exception:
+            # Re-raise so the caller can fall back to non-streaming.
+            raise
+
+        full_text = "".join(accumulated).strip()
+        if not full_text:
             yield "SKIP"
 
     async def explain_table_diff(

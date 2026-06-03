@@ -128,7 +128,10 @@ class ChunkEnricher:
         *,
         docling_language: str = "",
     ) -> list[ParsedChunk]:
-        language = docling_language or _detect_language_rule_based(chunks)
+        # Guarantee a non-empty language so every node gets detected_language set.
+        # "en" is the safe default: it keeps the English obligation patterns active
+        # and avoids None/empty language propagating into the comparison pipeline.
+        language = docling_language or _detect_language_rule_based(chunks) or "en"
         enriched = list(chunks)
 
         for i, chunk in enumerate(enriched):

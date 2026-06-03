@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from grc_policy_server.api.deps import (
     get_document_ingestion_service_factory,
     get_document_repository,
+    get_human_review_queue,
     get_neo4j_client,
     get_storage_provider_store,
     get_upload_v2_dispatcher,
@@ -48,6 +49,7 @@ from grc_policy_server.services.storage.source_resolver import (
     resolve_provider,
 )
 from grc_policy_server.services.storage.storage_provider_store import StorageProviderStore
+from grc_policy_server.repositories.human_review import HumanReviewQueue
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 
 logger = logging.getLogger(__name__)
@@ -697,6 +699,28 @@ async def refresh_accuracy_report() -> dict[str, str]:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Could not enqueue task: {exc}",
         ) from exc
+
+
+@router.get(
+    "/{document_id}/review-queue",
+    summary="List pending human-review items for a document",
+    description=(
+        "Returns ontology classification items that scored below the confidence "
+        "threshold and need auditor review. Empty list when ontology classification "
+        "is disabled or all items were high-confidence."
+    ),
+)
+async def get_document_review_queue(
+    document_id: str,
+    queue: HumanReviewQueue = Depends(get_human_review_queue),
+) -> list[dict]:
+    doc_id = document_id.strip()
+    if not doc_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="document_id must not be empty",
+        )
+    return queue.list_pending(document_id=doc_id)
 
 
 @accuracy_router.get(

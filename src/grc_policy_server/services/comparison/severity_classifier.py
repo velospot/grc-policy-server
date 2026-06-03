@@ -177,6 +177,10 @@ class ClassificationContext:
     section_role: str = "normative"
     # Obligation strength of the node text (-1 = unknown, 0=may … 5=shall)
     obligation_strength: int = -1
+    # Universal 10-type ontology classification (Phase 3) — None when not yet classified
+    # Values: Requirement | Observation | Measurement | Threshold | Control |
+    #         Evidence | Deviation | Risk | Standard | Section
+    ontology_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -979,6 +983,36 @@ class RuleEngine:
         return ClassificationResult(severity="low", reasons=_collect_reasons(ctx))
 
 
+class OntologyMeasurementRule:
+    """Rule 4.81 — Universal ontology Measurement/Threshold node changed → HIGH.
+
+    Fires when the node pair is classified as Measurement or Threshold in the
+    universal 10-type ontology (Phase 3 OntologyClassifier).  These nodes always
+    carry quantitative compliance data — any non-cosmetic change warrants auditor
+    review regardless of the semantic distance score.
+
+    Inserted between EntityGraphChangeRule (4.8) and ObligationChangeRule (5).
+    """
+
+    _TRIGGER_TYPES = frozenset({"Measurement", "Threshold"})
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if ctx.ontology_type not in self._TRIGGER_TYPES:
+            return None
+        if ctx.change_type not in ("ADDED", "REMOVED", "MODIFIED"):
+            return None
+        if ctx.cosmetic_change or ctx.formatting_only_change:
+            return None
+        return ClassificationResult(
+            severity="high",
+            reasons=[*_collect_reasons(ctx), "ONTOLOGY_MEASUREMENT_CHANGE"],
+            semantic_impact=SemanticImpact.TECHNICAL,
+            severity_reason_codes=[SeverityReasonCode.NUMERIC_LIMIT_CHANGED],
+            severity_confidence=0.90,
+            audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+        )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Public service
 # ──────────────────────────────────────────────────────────────────────────────
@@ -997,7 +1031,8 @@ _DEFAULT_ENGINE = RuleEngine(
         EMCExpertRule(),            # Rule 4.5 — EMC domain expert             → high (numeric/table/weakened)
         SafetyExpertRule(),         # Rule 4.6 — Safety domain expert          → high (numeric/weakened/procedure)
         EnvironmentalExpertRule(),  # Rule 4.7 — Environmental domain expert   → high (numeric/setup/procedure)
-        EntityGraphChangeRule(),    # Rule 4.8 — entity graph high-sev entity  → high
+        EntityGraphChangeRule(),    # Rule 4.8  — entity graph high-sev entity  → high
+        OntologyMeasurementRule(),  # Rule 4.81 — universal ontology Measurement/Threshold → high
         ObligationChangeRule(),  # Rule 5   — obligation verb change       → medium
         HighDistanceRule(),  # Rule 6   — distance > 0.75              → high
         MovedRule(),  # Rule 7   — moved node/section           → medium (always)

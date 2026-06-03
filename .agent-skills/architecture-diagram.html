@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EMC Compliance Platform — Architecture</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1e2630;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --agent: #7c3aed;
+    --agent-light: #a78bfa;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+    padding: 32px;
+    min-height: 100vh;
+  }
+
+  h1 {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: -0.3px;
+    margin-bottom: 4px;
+  }
+
+  .subtitle {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 32px;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0;
+  }
+
+  .tab {
+    padding: 8px 16px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.15s;
+    font-family: 'Segoe UI', sans-serif;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+  }
+
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ARCHITECTURE DIAGRAM */
+  .arch-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2px;
+    max-width: 900px;
+  }
+
+  .layer {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    position: relative;
+    transition: border-color 0.2s, background 0.2s;
+    cursor: pointer;
+  }
+
+  .layer:hover {
+    border-color: var(--accent);
+    background: var(--surface2);
+  }
+
+  .layer.selected {
+    border-color: var(--accent);
+    background: var(--surface2);
+    box-shadow: 0 0 0 1px var(--accent)20;
+  }
+
+  .layer-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+
+  .layer-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  .layer-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    font-family: 'Segoe UI', sans-serif;
+  }
+
+  .layer-tech {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-left: auto;
+    background: var(--bg);
+    padding: 2px 8px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+  }
+
+  .layer-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .chip {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid;
+    font-family: 'Segoe UI', sans-serif;
+  }
+
+  .chip-blue  { background: #58a6ff18; border-color: #58a6ff40; color: #79c0ff; }
+  .chip-green { background: #3fb95018; border-color: #3fb95040; color: #56d364; }
+  .chip-orange{ background: #d2992218; border-color: #d2992240; color: #e3b341; }
+  .chip-red   { background: #f8514918; border-color: #f8514940; color: #ff7b72; }
+  .chip-purple{ background: #7c3aed18; border-color: #7c3aed40; color: var(--agent-light); }
+
+  .arrow {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 16px;
+    padding: 2px 0;
+    opacity: 0.6;
+  }
+
+  .detail-panel {
+    margin-top: 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    max-width: 900px;
+    display: none;
+  }
+
+  .detail-panel.visible { display: block; }
+  .detail-title { font-size: 14px; font-weight: 700; color: var(--accent); margin-bottom: 12px; font-family: 'Segoe UI', sans-serif; }
+  .detail-body { font-size: 12px; line-height: 1.8; color: var(--text-muted); }
+  .detail-body strong { color: var(--text); }
+
+  /* AGENTS VIEW */
+  .agents-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+    max-width: 900px;
+  }
+
+  .agent-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    border-top: 3px solid var(--agent);
+    transition: border-color 0.2s;
+  }
+
+  .agent-card:hover { border-color: var(--agent-light); }
+  .agent-card:hover { border-top-color: var(--agent-light); }
+
+  .agent-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--agent-light);
+    font-family: 'Segoe UI', sans-serif;
+    margin-bottom: 6px;
+  }
+
+  .agent-role {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.5;
+    font-family: 'Segoe UI', sans-serif;
+    margin-bottom: 10px;
+  }
+
+  .agent-rules { border-top: 1px solid var(--border); padding-top: 10px; }
+  .rule { font-size: 10px; color: var(--text-muted); padding: 2px 0; display: flex; gap: 6px; font-family: 'Segoe UI', sans-serif; }
+  .rule-icon { flex-shrink: 0; }
+  .rule.allow .rule-icon { color: var(--accent2); }
+  .rule.deny  .rule-icon { color: var(--danger); }
+
+  /* ONTOLOGY VIEW */
+  .onto-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    max-width: 900px;
+  }
+
+  .onto-section { }
+  .onto-title { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; font-family: 'Segoe UI', sans-serif; }
+
+  .onto-node {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 4px;
+    font-size: 11px;
+    font-family: 'Segoe UI', sans-serif;
+  }
+
+  .onto-node-name { font-weight: 700; color: var(--text); }
+  .onto-node-desc { color: var(--text-muted); font-size: 10px; margin-top: 2px; }
+
+  .domain-map {
+    overflow: hidden;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+
+  .domain-header {
+    background: var(--surface2);
+    padding: 8px 12px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    font-family: 'Segoe UI', sans-serif;
+  }
+
+  table.mapping-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    font-family: 'Segoe UI', sans-serif;
+  }
+
+  .mapping-table th {
+    background: var(--surface);
+    padding: 6px 10px;
+    text-align: left;
+    color: var(--text-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .mapping-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border)80;
+    color: var(--text);
+  }
+
+  .mapping-table tr:last-child td { border-bottom: none; }
+  .mapping-table .onto { color: var(--accent); font-weight: 700; }
+  .mapping-table .emc  { color: #56d364; }
+  .mapping-table .safe { color: #e3b341; }
+  .mapping-table .env  { color: #79c0ff; }
+
+  /* SCOPE TABLE */
+  .scope-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 900px; }
+  .scope-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .scope-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; font-family: 'Segoe UI', sans-serif; }
+  .scope-in  .scope-label { color: var(--accent2); }
+  .scope-out .scope-label { color: var(--danger); }
+  .scope-item { font-size: 11px; color: var(--text-muted); padding: 4px 0; display: flex; gap: 6px; align-items: flex-start; font-family: 'Segoe UI', sans-serif; line-height: 1.4; }
+  .scope-item::before { content: '•'; flex-shrink: 0; margin-top: 1px; }
+  .scope-in  .scope-item::before { color: var(--accent2); }
+  .scope-out .scope-item::before { color: var(--danger); }
+
+  .hw-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 900px; margin-top: 20px; }
+  .hw-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
+  .hw-label { font-size: 10px; color: var(--text-muted); font-family: 'Segoe UI', sans-serif; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .hw-value { font-size: 18px; font-weight: 700; color: var(--accent); font-family: 'Segoe UI', sans-serif; }
+  .hw-sub { font-size: 10px; color: var(--text-muted); font-family: 'Segoe UI', sans-serif; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<h1>EMC / EMV Compliance Platform</h1>
+<p class="subtitle">Deterministic compliance evidence reconciliation engine · Architecture Reference</p>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('arch')">Architecture</div>
+  <div class="tab" onclick="switchTab('agents')">Agents</div>
+  <div class="tab" onclick="switchTab('ontology')">Ontology</div>
+  <div class="tab" onclick="switchTab('scope')">Scope & Hardware</div>
+</div>
+
+<!-- ARCHITECTURE TAB -->
+<div id="tab-arch" class="panel active">
+  <div class="arch-grid">
+
+    <div class="layer" onclick="showDetail('frontend')">
+      <div class="layer-header">
+        <div class="layer-icon" style="background:#58a6ff20">🖥</div>
+        <div class="layer-title">Frontend UI</div>
+        <div class="layer-tech">React / Next.js</div>
+      </div>
+      <div class="layer-chips">
+        <span class="chip chip-blue">Compliance Tree</span>
+        <span class="chip chip-blue">Diff Viewer</span>
+        <span class="chip chip-blue">Evidence Panel</span>
+        <span class="chip chip-blue">Ignored Changes</span>
+        <span class="chip chip-blue">Risk Heatmap</span>
+      </div>
+    </div>
+
+    <div class="arrow">↕ REST / WebSocket</div>
+
+    <div class="layer" onclick="showDetail('gateway')">
+      <div class="layer-header">
+        <div class="layer-icon" style="background:#3fb95020">🔀</div>
+        <div class="layer-title">API Gateway</div>
+        <div class="layer-tech">FastAPI + Celery + Redis</div>
+      </div>
+      <div class="layer-chips">
+        <span class="chip chip-green">POST /upload</span>
+        <span class="chip chip-green">POST /compare</span>
+        <span class="chip chip-green">GET /status</span>
+        <span class="chip chip-green">WS /progress</span>
+        <span class="chip chip-green">Auth / Audit Log</span>
+      </div>
+    </div>
+
+    <div class="arrow">↓ Async Jobs</div>
+
+    <div class="layer" onclick="showDetail('pipeline')">
+      <div class="layer-header">
+        <div class="layer-icon" style="background:#d2992220">⚙️</div>
+        <div class="layer-title">Processing Pipeline</div>
+        <div class="layer-tech">Python + Docling</div>
+      </div>
+      <div class="layer-chips">
+        <span class="chip chip-orange">Docling Parser</span>
+        <span class="chip chip-orange">Noise Filter</span>
+        <span class="chip chip-orange">Table → EMV Schema</span>
+        <span class="chip chip-orange">Text Normalization</span>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="layer" onclick="showDetail('agents-layer')">
+      <div class="layer-header">
+        <div class="layer-icon" style="background:#7c3aed20">🤖</div>
+        <div class="layer-title">Claude Agent Layer</div>
+        <div class="layer-tech">claude-sonnet-4</div>
+      </div>
+      <div class="layer-chips">
+        <span class="chip chip-purple">Orchestrator</span>
+        <span class="chip chip-purple">Parser Agent</span>
+        <span class="chip chip-purple">Ontology Mapper</span>
+        <span class="chip chip-purple">Alignment Agent</span>
+        <span class="chip chip-purple">Evidence Agent</span>
+        <span class="chip chip-purple">Explanation Agent</span>
+        <span class="chip chip-purple">Report Agent</span>
+      </div>
+    </div>
+
+    <div class="arrow">↓ Structured JSON only — no agent makes compliance decisions</div>
+
+    <div class="layer" onclick="showDetail('data')">
+      <div class="layer-header">
+        <div class="layer-icon" style="background:#58a6ff20">🗄</div>
+        <div class="layer-title">Data Layer</div>
+        <div class="layer-tech">PostgreSQL + Neo4j + Qdrant</div>
+      </div>
+      <div class="layer-chips">
+        <span class="chip chip-blue">PostgreSQL — measurements, jobs</span>
+        <span class="chip chip-blue">Neo4j — ontology graph</span>
+        <span class="chip chip-blue">Qdrant — embeddings</span>
+        <span class="chip chip-blue">Redis — cache + queue</span>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="layer" onclick="showDetail('compare')">
+      <div class="layer-header">
+        <div class="layer-icon" style="background:#3fb95020">⚖️</div>
+        <div class="layer-title">Comparison Engine</div>
+        <div class="layer-tech">Deterministic — No LLM</div>
+      </div>
+      <div class="layer-chips">
+        <span class="chip chip-green">Semantic Alignment (BGE-M3)</span>
+        <span class="chip chip-green">Graph Diff Engine</span>
+        <span class="chip chip-green">EMV Rules Engine</span>
+        <span class="chip chip-green">Evidence Extraction</span>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="layer" onclick="showDetail('llm')">
+      <div class="layer-header">
+        <div class="layer-icon" style="background:#7c3aed20">💬</div>
+        <div class="layer-title">LLM Explanation Layer</div>
+        <div class="layer-tech">Qwen3 32B (Ollama) / Claude</div>
+      </div>
+      <div class="layer-chips">
+        <span class="chip chip-purple">Finding explanations only</span>
+        <span class="chip chip-purple">Report narrative</span>
+        <span class="chip chip-red">❌ Never decides compliance</span>
+        <span class="chip chip-red">❌ Never computes values</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="detail-panel" class="detail-panel">
+    <div id="detail-title" class="detail-title"></div>
+    <div id="detail-body" class="detail-body"></div>
+  </div>
+</div>
+
+<!-- AGENTS TAB -->
+<div id="tab-agents" class="panel">
+  <div class="agents-grid">
+
+    <div class="agent-card">
+      <div class="agent-name">1 · Orchestrator Agent</div>
+      <div class="agent-role">Master coordinator. Dispatches sub-agents, assembles results, emits job status events. Never reads documents directly.</div>
+      <div class="agent-rules">
+        <div class="rule allow"><span class="rule-icon">✓</span> Dispatch pipeline stages</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Return structured JSON status</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Read raw documents</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Make compliance judgments</div>
+      </div>
+    </div>
+
+    <div class="agent-card">
+      <div class="agent-name">2 · Parser Agent</div>
+      <div class="agent-role">Converts Docling output to clean structured nodes. Removes all noise (TOC, headers, footers, pagination). Logs everything ignored.</div>
+      <div class="agent-rules">
+        <div class="rule allow"><span class="rule-icon">✓</span> Normalize and clean text</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Generate stable semantic node IDs</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Log all ignored items</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Use page number as identity</div>
+      </div>
+    </div>
+
+    <div class="agent-card">
+      <div class="agent-name">3 · Ontology Mapping Agent</div>
+      <div class="agent-role">Classifies each node into the universal compliance ontology. Confidence &lt;0.70 → flagged for human review. Every call is audit-logged.</div>
+      <div class="agent-rules">
+        <div class="rule allow"><span class="rule-icon">✓</span> Classify into ontology types</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Output confidence scores</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Flag uncertain mappings</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Decide compliance</div>
+      </div>
+    </div>
+
+    <div class="agent-card">
+      <div class="agent-name">4 · Semantic Alignment Agent</div>
+      <div class="agent-role">Matches Doc A nodes to Doc B nodes using embedding scores. Handles renamed/moved sections. Returns SAME / MODIFIED / NEW / DELETED / AMBIGUOUS.</div>
+      <div class="agent-rules">
+        <div class="rule allow"><span class="rule-icon">✓</span> Align nodes across documents</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Handle renames and moves</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Merge nodes of different types</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Make compliance judgments</div>
+      </div>
+    </div>
+
+    <div class="agent-card">
+      <div class="agent-name">5 · Evidence Extraction Agent</div>
+      <div class="agent-role">Given a MODIFIED_NODE pair, extracts only meaningful compliance-relevant changes. Ignores whitespace, formatting, and reordered rows.</div>
+      <div class="agent-rules">
+        <div class="rule allow"><span class="rule-icon">✓</span> Identify numeric value changes</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Detect status changes (PASS→FAIL)</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Report formatting changes</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Produce compliance verdicts</div>
+      </div>
+    </div>
+
+    <div class="agent-card">
+      <div class="agent-name">6 · Explanation Agent</div>
+      <div class="agent-role">The ONLY agent that produces free-form text. Writes 2–4 sentence explanations of findings for auditors. Never speculates or recommends remediation.</div>
+      <div class="agent-rules">
+        <div class="rule allow"><span class="rule-icon">✓</span> Explain findings in plain English</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Reference standard + clause + values</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Recommend remediation</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Make compliance determinations</div>
+      </div>
+    </div>
+
+    <div class="agent-card">
+      <div class="agent-name">7 · Report Generation Agent</div>
+      <div class="agent-role">Assembles all findings into a structured audit report. Executive summary → critical findings → warnings → ignored changes (mandatory). Every finding has source traceability.</div>
+      <div class="agent-rules">
+        <div class="rule allow"><span class="rule-icon">✓</span> Assemble full audit report</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Include ignored_changes panel</div>
+        <div class="rule allow"><span class="rule-icon">✓</span> Cite doc + page + clause per finding</div>
+        <div class="rule deny"><span class="rule-icon">✗</span> Omit any finding</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ONTOLOGY TAB -->
+<div id="tab-ontology" class="panel">
+  <div class="onto-grid">
+    <div class="onto-section">
+      <div class="onto-title">Core Ontology Classes</div>
+      <div class="onto-node"><div class="onto-node-name">Requirement</div><div class="onto-node-desc">Normative clause from a standard (CISPR, ISO, etc.)</div></div>
+      <div class="onto-node"><div class="onto-node-name">Observation</div><div class="onto-node-desc">Recorded test result or inspection finding</div></div>
+      <div class="onto-node"><div class="onto-node-name">Measurement</div><div class="onto-node-desc">Specific numeric value with unit and frequency</div></div>
+      <div class="onto-node"><div class="onto-node-name">Threshold</div><div class="onto-node-desc">Limit line or acceptance criterion</div></div>
+      <div class="onto-node"><div class="onto-node-name">Control</div><div class="onto-node-desc">Test setup, procedure, or mitigation measure</div></div>
+      <div class="onto-node"><div class="onto-node-name">Evidence</div><div class="onto-node-desc">Certificate or supporting artifact</div></div>
+      <div class="onto-node"><div class="onto-node-name">Deviation</div><div class="onto-node-desc">Non-conformance, failure, or exceedance</div></div>
+      <div class="onto-node"><div class="onto-node-name">Risk</div><div class="onto-node-desc">Assessed risk level derived from deviations</div></div>
+    </div>
+
+    <div class="onto-section">
+      <div class="onto-title">Core Relationships (Neo4j)</div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:11px;line-height:2;color:var(--text-muted);">
+        <span style="color:var(--accent)">Document</span> -[:CONTAINS]→ <span style="color:var(--accent)">Section</span><br>
+        <span style="color:var(--accent)">Section</span> -[:IMPLEMENTS]→ <span style="color:var(--accent)">Requirement</span><br>
+        <span style="color:var(--accent)">Observation</span> -[:EVIDENCE_FOR]→ <span style="color:var(--accent)">Requirement</span><br>
+        <span style="color:var(--accent)">Observation</span> -[:EVALUATED_AGAINST]→ <span style="color:var(--accent)">Threshold</span><br>
+        <span style="color:var(--accent)">Observation</span> -[:RESULTS_IN]→ <span style="color:var(--accent)">Deviation</span><br>
+        <span style="color:var(--accent)">Deviation</span> -[:MITIGATED_BY]→ <span style="color:var(--accent)">Control</span><br>
+        <span style="color:var(--accent)">Requirement</span> -[:PART_OF]→ <span style="color:var(--accent)">Standard</span><br>
+        <span style="color:var(--accent)">Risk</span> -[:DERIVED_FROM]→ <span style="color:var(--accent)">Deviation</span>
+      </div>
+    </div>
+
+    <div class="onto-section" style="grid-column:1/-1">
+      <div class="onto-title">Domain Mappings — Same Ontology, Different Projections</div>
+      <div class="domain-map">
+        <div class="domain-header">Ontology → Domain Meaning</div>
+        <table class="mapping-table">
+          <thead>
+            <tr>
+              <th>Ontology</th>
+              <th class="emc">EMC / EMV</th>
+              <th class="safe">Safety</th>
+              <th class="env">Environmental</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td class="onto">Requirement</td><td class="emc">CISPR 25 limit clause</td><td class="safe">ISO 45001 clause</td><td class="env">ISO 14001 / permit condition</td></tr>
+            <tr><td class="onto">Observation</td><td class="emc">Measurement result</td><td class="safe">Incident / inspection</td><td class="env">Emission measurement</td></tr>
+            <tr><td class="onto">Threshold</td><td class="emc">Emission limit (dBµV/m)</td><td class="safe">Acceptable risk level</td><td class="env">Regulatory limit</td></tr>
+            <tr><td class="onto">Deviation</td><td class="emc">Failed test</td><td class="safe">Unsafe condition</td><td class="env">Exceedance</td></tr>
+            <tr><td class="onto">Control</td><td class="emc">Test setup configuration</td><td class="safe">PPE / procedure</td><td class="env">Mitigation measure</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SCOPE TAB -->
+<div id="tab-scope" class="panel">
+  <div class="scope-grid">
+    <div class="scope-box scope-in">
+      <div class="scope-label">✓ In Scope</div>
+      <div class="scope-item">EMV / EMC compliance comparison (CISPR 25, FCC, CE)</div>
+      <div class="scope-item">EHS / ISO audit diffing (ISO 45001, ISO 14001)</div>
+      <div class="scope-item">Structured evidence extraction from PDF reports</div>
+      <div class="scope-item">Deterministic compliance checking with audit trail</div>
+      <div class="scope-item">Semantic section alignment (renamed / moved)</div>
+      <div class="scope-item">Cross-domain unified audit reporting</div>
+      <div class="scope-item">Ignored changes panel (audit trust)</div>
+      <div class="scope-item">Offline deployment (no cloud dependency)</div>
+    </div>
+    <div class="scope-box scope-out">
+      <div class="scope-label">✗ Out of Scope</div>
+      <div class="scope-item">Replacing certified EMC engineers</div>
+      <div class="scope-item">Final regulatory certification decisions</div>
+      <div class="scope-item">Fully autonomous compliance approval</div>
+      <div class="scope-item">Perfect OCR for all scanned reports</div>
+      <div class="scope-item">Complex nested / handwritten tables</div>
+      <div class="scope-item">Real-time measurement instrumentation</div>
+      <div class="scope-item">Legal compliance guarantees</div>
+    </div>
+  </div>
+
+  <div class="hw-grid">
+    <div class="hw-card">
+      <div class="hw-label">GPU (Embedding + LLM)</div>
+      <div class="hw-value">16 GB</div>
+      <div class="hw-sub">RTX 5070 Ti · BGE-M3 (4GB) + Qwen3-32B Q4 (12GB)</div>
+    </div>
+    <div class="hw-card">
+      <div class="hw-label">System RAM</div>
+      <div class="hw-value">64 GB</div>
+      <div class="hw-sub">Neo4j 16GB · Qdrant 8GB · PG 4GB · App 4GB</div>
+    </div>
+    <div class="hw-card">
+      <div class="hw-label">Daily Throughput</div>
+      <div class="hw-value">50k</div>
+      <div class="hw-sub">pages/day · 2–3 concurrent comparisons</div>
+    </div>
+    <div class="hw-card">
+      <div class="hw-label">Measurement Points</div>
+      <div class="hw-value">500k</div>
+      <div class="hw-sub">per index · Qdrant vector store</div>
+    </div>
+    <div class="hw-card">
+      <div class="hw-label">Cached Diff Latency</div>
+      <div class="hw-value">&lt;5s</div>
+      <div class="hw-sub">3-tier cache · doc fingerprint + node + result</div>
+    </div>
+    <div class="hw-card">
+      <div class="hw-label">Build Phases</div>
+      <div class="hw-value">5 wk</div>
+      <div class="hw-sub">P0 core → P1 intelligence → P2 UI</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const details = {
+  frontend: {
+    title: "Frontend UI — React / Next.js",
+    body: `<strong>3-layer UX model designed for auditors:</strong><br><br>
+<strong>Layer 1 — Executive Summary:</strong> counts of critical failures, warnings, matched tests.<br>
+<strong>Layer 2 — Change Intelligence:</strong> Section 4.2 → MOVED (0.91), Section 6.1 → MODIFIED, List of Figures → IGNORED.<br>
+<strong>Layer 3 — Evidence Diff:</strong> Frequency 300 MHz: Doc A PASS +5dB → Doc B FAIL -1dB.<br><br>
+<strong>Key UX invariant:</strong> The "Ignored Changes" panel is mandatory and always visible. It explicitly lists every excluded item (TOC, pagination, formatting). This builds auditor trust by showing the system is conservative, not silently dropping information.`
+  },
+  gateway: {
+    title: "API Gateway — FastAPI + Celery",
+    body: `<strong>REST endpoints:</strong> POST /upload → POST /compare → GET /status → GET /result<br>
+<strong>WebSocket:</strong> /ws/compare/{id} streams stage-by-stage progress events<br>
+<strong>Celery:</strong> All processing runs as async background jobs — uploads return immediately with a job ID<br>
+<strong>Auth:</strong> JWT with domain-scoped permissions (EMC engineer cannot read EHS audit data)<br>
+<strong>Audit log:</strong> Every API call logged with actor, timestamp, input hash, output hash — immutable (PostgreSQL append-only table)`
+  },
+  pipeline: {
+    title: "Processing Pipeline — The 'Normalize Before Compare' Stage",
+    body: `<strong>This is the most critical layer.</strong> 70–90% of apparent differences between compliance documents are noise, not real changes.<br><br>
+<strong>Docling:</strong> Structure extraction, table detection, hierarchy reconstruction from raw PDF/DOCX.<br>
+<strong>Noise Filter:</strong> Removes TOC, figures lists, page headers/footers, revision logs, pagination. All removed items logged in ignored[].<br>
+<strong>Text normalization:</strong> Collapse whitespace, fix hyphenation, reconstruct split sentences, normalize bullets.<br>
+<strong>Table extraction:</strong> Classify tables as measurement/configuration/reference/noise, convert measurement tables to structured EMV objects, sort by frequency for stable diff.<br>
+<strong>Key rule:</strong> Node identity is a semantic hash of (content + title + parent context), never a page number.`
+  },
+  'agents-layer': {
+    title: "Claude Agent Layer — 7 Specialized Agents",
+    body: `<strong>Critical separation of concerns:</strong> No agent makes compliance decisions. Agents classify, align, extract evidence, and explain — the deterministic rules engine decides PASS/FAIL.<br><br>
+<strong>Agents:</strong> Orchestrator · Parser · Ontology Mapper · Semantic Alignment · Evidence Extraction · Explanation · Report Generation<br><br>
+<strong>Confidence gating:</strong> Any ontology classification below 0.70 confidence is flagged for human review.<br>
+<strong>Audit logging:</strong> Every agent call records model version + input hash + output hash + timestamp.<br>
+<strong>Schema validation:</strong> Agent outputs are validated against JSON schema before passing downstream — hallucinated fields are rejected, not propagated.`
+  },
+  data: {
+    title: "Data Layer — PostgreSQL + Neo4j + Qdrant + Redis",
+    body: `<strong>PostgreSQL:</strong> Measurements, job state, audit log (append-only), comparison results, user accounts.<br>
+<strong>Neo4j:</strong> Ontology graph with all compliance relationships. The "universal truth layer" — EMC, Safety, and EHS all use the same graph schema.<br>
+<strong>Qdrant:</strong> BGE-M3 embedding vectors for all document nodes. Powers semantic alignment and section matching.<br>
+<strong>Redis:</strong> Celery job queue + 3-tier document cache (fingerprint / node-level / diff result).<br><br>
+<strong>Cache strategy:</strong> Document fingerprint cache prevents re-parsing identical docs. Node cache prevents re-embedding. Diff cache serves repeated comparisons in <2s.`
+  },
+  compare: {
+    title: "Comparison Engine — The Only System That Decides Compliance",
+    body: `<strong>3-level diff, not text diff:</strong><br><br>
+<strong>Level 1 — Structural diff:</strong> Detect added/removed/moved sections. No semantic judgment.<br>
+<strong>Level 2 — Semantic alignment:</strong> Match renamed and merged sections using BGE-M3 composite score (semantic 50% + structural 30% + measurement overlap 20%).<br>
+<strong>Level 3 — Content diff (EMV-aware):</strong> Compare only measurements, limits, setups, and clauses. Never formatting.<br><br>
+<strong>Rules engine:</strong> Deterministic. margin = limit - measured. PASS if ≥ 0dB, FAIL if < 0dB. Severity: HIGH (≤ -3dB), MEDIUM (-3 to 0), LOW (marginal). No LLM involved in this computation.`
+  },
+  llm: {
+    title: "LLM Layer — Explanation Only, Never Decision",
+    body: `<strong>Qwen3 32B (Ollama, local)</strong> or <strong>claude-sonnet-4</strong> depending on deployment mode.<br><br>
+<strong>Permitted uses:</strong> Natural language explanation of findings, audit report narrative, ontology classification of ambiguous nodes.<br>
+<strong>Forbidden uses:</strong> Compliance decisions, measurement computation, threshold evaluation, resolving ambiguous alignments.<br><br>
+<strong>Why this matters:</strong> "If a human auditor challenges the result, you must be able to point to the exact clause + measurement + rule that produced it." LLM explanations support that narrative; they never produce it.`
+  }
+};
+
+function showDetail(key) {
+  const panel = document.getElementById('detail-panel');
+  const title = document.getElementById('detail-title');
+  const body = document.getElementById('detail-body');
+  const d = details[key];
+  if (!d) return;
+
+  document.querySelectorAll('.layer').forEach(l => l.classList.remove('selected'));
+  event.currentTarget.classList.add('selected');
+
+  title.textContent = d.title;
+  body.innerHTML = d.body;
+  panel.classList.add('visible');
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+</script>
+</body>
+</html>

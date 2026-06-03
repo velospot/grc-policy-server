@@ -155,7 +155,7 @@ class BaseLLM(ABC):
         """Yield tokens for a markdown diff summary.
 
         Default: awaits the full response and yields it as a single token.
-        VllmClient overrides with true SSE token streaming.
+        OllamaClient overrides with true NDJSON token streaming.
         """
         result = await self.generate_markdown_diff_summary(
             node_type=node_type,

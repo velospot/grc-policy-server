@@ -1,3 +1,30 @@
+# ── GRC Policy Server — GPU Image ──────────────────────────────────────────
+# CUDA-accelerated build for NVIDIA GPUs.
+#
+# GPU acceleration is used for:
+#   - Docling OCR layout detection  (PyTorch/CUDA via --extra cuda)
+#   - BGE-M3 sentence embeddings    (sentence-transformers auto-detects CUDA)
+#   - flash-attn for Docling        (compiled against CUDA headers)
+#
+# Ollama (chat + text embeddings) runs as a SEPARATE container / host process,
+# not inside this image — it manages its own VRAM allocation independently.
+#
+# Hardware target:
+#   NVIDIA GPU with ≥ 8 GB VRAM (e.g. RTX 5070 Ti 16 GB)
+#   CUDA 12.4+ driver on host
+#
+# Build:
+#   docker build -f Dockerfile.gpu -t grc-policy-server:gpu .
+#
+# Optional: bake BGE-M3 model into the image (eliminates first-run download):
+#   docker build -f Dockerfile.gpu --build-arg PREFETCH_BGE_M3=1 -t grc-policy-server:gpu .
+#
+# Run (exposes GPU to container):
+#   docker run --gpus all -p 8500:8500 grc-policy-server:gpu
+
+# ── Base image: CUDA devel (required for flash-attn compilation) ────────────
+# Use the devel variant so CUDA headers are available for flash-attn build.
+# Switch to runtime variant after flash-attn is pre-compiled if image size matters.
 FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 
 ENV PYTHONUNBUFFERED=1 \
@@ -5,33 +32,94 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:/root/.local/bin:$PATH" \
     DEBIAN_FRONTEND=noninteractive
 
+# Optional dependency groups in addition to --extra cuda.
+ARG EXTRAS=""
+
+# Set to "1" to download BAAI/bge-m3 during build for offline environments.
+ARG PREFETCH_BGE_M3=""
+
 WORKDIR /app
 
-# Python 3.13 is not in Ubuntu 24.04 default repos — use deadsnakes PPA
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# System packages:
+#   python3.13 — Ubuntu 24.04 ships 3.12; use deadsnakes for 3.13
+#   ghostscript — PDF rendering for Docling
+#   curl        — uv installer
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
         software-properties-common curl ghostscript && \
     add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get update && apt-get install -y --no-install-recommends \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
         python3.13 python3.13-dev python3.13-venv && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
+# ── Python dependencies ─────────────────────────────────────────────────────
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project --python python3.13
 
+# Install base + cuda extras (includes torch, flash-attn declared deps).
+# torch from PyPI defaults to CPU; we upgrade it to the CUDA variant below.
+RUN uv sync --frozen --no-dev --no-install-project \
+        --extra cuda ${EXTRAS:+--extra $EXTRAS} \
+        --python python3.13
+
+# Upgrade torch to CUDA 12.4 variant (overrides the CPU wheel from PyPI).
+# This must happen BEFORE flash-attn compilation so it links against CUDA torch.
+RUN uv run pip install \
+        --index-url https://download.pytorch.org/whl/cu124 \
+        --extra-index-url https://pypi.org/simple \
+        "torch>=2.0.0" \
+        --no-deps \
+        --upgrade
+
+# Compile flash-attn against the CUDA headers in this devel image.
+# --no-build-isolation so it sees the already-installed CUDA torch.
+RUN uv run pip install flash-attn --no-build-isolation
+
+# Install application source
 COPY src/ src/
-RUN uv sync --frozen --no-dev --python python3.13
+RUN uv sync --frozen --no-dev \
+        --extra cuda ${EXTRAS:+--extra $EXTRAS} \
+        --python python3.13
 
-# flash-attn must compile against CUDA headers present in this devel image.
-# It is installed separately because uv.lock cannot be generated on non-CUDA machines.
-RUN pip install flash-attn --no-build-isolation
+# Optional: pre-cache BGE-M3 model (GPU inference — uses CUDA torch if available).
+RUN if [ -n "$PREFETCH_BGE_M3" ]; then \
+        uv run python3.13 -c \
+          "from sentence_transformers import SentenceTransformer; \
+           SentenceTransformer('BAAI/bge-m3', cache_folder='/app/.cache/huggingface')"; \
+    fi
 
-EXPOSE 8500
+# ── Runtime defaults ────────────────────────────────────────────────────────
+ENV PORT=8500 \
+    HOST=0.0.0.0 \
+    UPLOAD_ROOT=/app/data/uploads \
+    # CUDA: make all GPUs visible (docker run --gpus all required)
+    CUDA_VISIBLE_DEVICES=all \
+    # HuggingFace / sentence-transformers cache
+    SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface \
+    HF_HOME=/app/.cache/huggingface \
+    # Docling: use CUDA with flash-attn for layout detection and OCR
+    DOCLING_ACCELERATOR_DEVICE=cuda \
+    DOCLING_CUDA_USE_FLASH_ATTENTION2=true \
+    # Comparison engine
+    COMPARISON_BACKEND=auto \
+    OFFLINE_FALLBACK=true \
+    # Audit + agent defaults
+    AUDIT_LOG_ENABLED=true \
+    EXPLANATION_AGENT_ENABLED=true \
+    MAX_EXPLANATION_TOKENS=80 \
+    EXPLANATION_BATCH_SIZE=10 \
+    # Circuit breaker
+    CIRCUIT_BREAKER_THRESHOLD=3 \
+    CIRCUIT_BREAKER_TIMEOUT_S=60
 
-ENV DOCLING_CUDA_USE_FLASH_ATTENTION2=true
+EXPOSE ${PORT}
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python3.13 -c "import os,urllib.request; urllib.request.urlopen(f\"http://localhost:{os.environ.get('PORT','8500')}/health\")" || exit 1
+    CMD python3.13 -c \
+      "import os,urllib.request; \
+       urllib.request.urlopen(f\"http://localhost:{os.environ.get('PORT','8500')}/health\")" \
+    || exit 1
 
 CMD ["python3.13", "-m", "grc_policy_server.main"]

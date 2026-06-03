@@ -84,6 +84,7 @@ class ComparisonAccuracyMetrics(BaseModel):
     overall_confidence: float
     confidence_breakdown: dict[str, int]
     section_metrics: List[SectionAccuracyMetrics]
+    language_breakdown: Optional[dict[str, int]] = None
 
 
 class ComparisonResult(BaseModel):

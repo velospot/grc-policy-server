@@ -190,6 +190,27 @@ async def _correlate_camelot_tables(
 
 
 
+def _apply_ontology_to_chunks(
+    chunks: list[ParsedChunk],
+    classifications: list,
+) -> list[ParsedChunk]:
+    """Return a new list of ParsedChunks with ontology_type/confidence in metadata.
+
+    Uses dataclasses.replace() because ParsedChunk is frozen.
+    """
+    result = []
+    for chunk, cls in zip(chunks, classifications):
+        new_meta = {
+            **chunk.metadata,
+            "ontology_type": cls.ontology_type,
+            "ontology_confidence": cls.confidence,
+        }
+        result.append(replace(chunk, metadata=new_meta))
+    # Preserve any trailing chunks if lists are unequal length (defensive).
+    result.extend(chunks[len(classifications):])
+    return result
+
+
 @dataclass(frozen=True)
 class UploadIngestionResult:
     """Identifiers returned after a document is successfully ingested."""
@@ -210,6 +231,8 @@ class DocumentIngestionService:
         llm: BaseLLM,
         upload_root: Path,
         canonical_store: CanonicalDocumentStore | None = None,
+        ontology_classifier=None,   # OntologyClassifier | None
+        human_review_queue=None,    # HumanReviewQueue | None
     ):
         self.docling_adapter = docling_adapter
         self.weaviate = weaviate
@@ -217,6 +240,8 @@ class DocumentIngestionService:
         self.llm = llm
         self.upload_root = upload_root
         self.canonical_store = canonical_store
+        self._ontology_classifier = ontology_classifier
+        self._human_review_queue = human_review_queue
 
     async def ingest_upload(
         self,
@@ -237,6 +262,10 @@ class DocumentIngestionService:
         self._log_extraction_score(filename, parsed_chunks)
         parsed_chunks = preprocess_parsed_chunks(parsed_chunks)
         parsed_chunks = ChunkEnricher().enrich(parsed_chunks, docling_language=docling_language)
+        parsed_chunks = await self._run_ontology_classification(
+            document_id=document_id,
+            chunks=parsed_chunks,
+        )
 
         hierarchy = build_document_hierarchy(
             document_id=document_id,
@@ -326,6 +355,38 @@ class DocumentIngestionService:
             document_id=document_id,
             chunks_stored=len(vector_records),
         )
+
+    async def _run_ontology_classification(
+        self,
+        *,
+        document_id: str,
+        chunks: list[ParsedChunk],
+    ) -> list[ParsedChunk]:
+        """Classify chunks into the 10-type universal ontology (opt-in, async only).
+
+        Skipped when `settings.ontology_classification_enabled` is False or no
+        classifier is configured.  Errors per-chunk fall back to type="Section".
+        """
+        if not settings.ontology_classification_enabled:
+            return chunks
+        if self._ontology_classifier is None:
+            return chunks
+        try:
+            classifications = await self._ontology_classifier.classify_batch(chunks)
+            chunks = _apply_ontology_to_chunks(chunks, classifications)
+            if self._human_review_queue is not None:
+                self._human_review_queue.enqueue_batch(
+                    document_id=document_id,
+                    chunks=chunks,
+                    classifications=classifications,
+                )
+        except Exception:
+            logger.warning(
+                "ontology classification failed for document_id=%s — continuing without it",
+                document_id,
+                exc_info=True,
+            )
+        return chunks
 
     @staticmethod
     def _log_extraction_score(filename: str, chunks: list[ParsedChunk]) -> None:

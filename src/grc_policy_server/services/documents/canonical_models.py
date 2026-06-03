@@ -59,6 +59,9 @@ class CanonicalNode:
     has_native_text: bool = True
     source_extractor: str = ""  # "docling"|"pytesseract"
     reading_order: int = -1
+    # Universal 10-type ontology classification (Phase 3 — populated during async ingestion)
+    ontology_type: str | None = None
+    ontology_confidence: float | None = None
 
     @classmethod
     def from_hierarchy_record(
@@ -125,6 +128,10 @@ class CanonicalNode:
             has_native_text=bool(metadata.get("has_native_text", True)),
             source_extractor=str(metadata.get("source_extractor") or record.get("source_extractor") or ""),
             reading_order=int(metadata.get("reading_order") or record.get("reading_order") or -1),
+            ontology_type=metadata.get("ontology_type") or record.get("ontology_type") or None,
+            ontology_confidence=_coerce_float(
+                metadata.get("ontology_confidence") or record.get("ontology_confidence")
+            ),
         )
 
     @classmethod
@@ -154,6 +161,8 @@ class CanonicalNode:
             has_native_text=bool(payload.get("has_native_text", True)),
             source_extractor=str(payload.get("source_extractor") or ""),
             reading_order=int(payload.get("reading_order") or -1),
+            ontology_type=payload.get("ontology_type") or None,
+            ontology_confidence=_coerce_float(payload.get("ontology_confidence")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -182,6 +191,8 @@ class CanonicalNode:
             "has_native_text": self.has_native_text,
             "source_extractor": self.source_extractor,
             "reading_order": self.reading_order,
+            "ontology_type": self.ontology_type,
+            "ontology_confidence": self.ontology_confidence,
         }
 
     def to_comparison_record(self) -> dict[str, Any]:
@@ -239,6 +250,7 @@ class CanonicalNode:
             "pure_text_hash": _pure_text_hash(self.raw_text or ""),
             "formula_latex": str(metadata.get("formula_latex") or ""),
             "node_type_hint": str(metadata.get("node_type_hint") or ""),
+            "ontology_type": self.ontology_type,
         }
 
 
@@ -464,5 +476,14 @@ def _coerce_int(value: Any) -> int | None:
         return None
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None

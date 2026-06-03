@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 
 from grc_policy_server.core.config import settings
 from grc_policy_server.models.schemas import ComparisonResult, CompareV2JobStatusResponse
 from grc_policy_server.services.comparison.compare_v2_models import CompareTaskPayload
 from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
+
+logger = logging.getLogger(__name__)
 
 
 class CeleryNotAvailableError(RuntimeError):
@@ -24,10 +28,28 @@ class CompareV2Dispatcher:
     task_name = "grc_policy_server.tasks.compare_v2"
 
     def __init__(self, *, upload_root: Path):
+        self.upload_root = upload_root
         self.cache_store = ComparisonCacheStore(upload_root=upload_root)
-        self._celery = self._build_celery_app()
+        if settings.comparison_backend == "offline":
+            self._celery = None
+        else:
+            try:
+                self._celery = self._build_celery_app()
+            except CeleryNotAvailableError:
+                if settings.offline_fallback:
+                    logger.warning(
+                        "Celery not available — offline_fallback=True; "
+                        "compare v2 will run synchronously"
+                    )
+                    self._celery = None
+                else:
+                    raise
 
     def enqueue_compare(self, payload: CompareTaskPayload) -> str:
+        # Always use offline path when configured, or when Celery init failed.
+        if settings.comparison_backend == "offline" or self._celery is None:
+            return self._enqueue_offline(payload)
+
         celery_app = self._celery
         if settings.celery_enforce_worker_ping:
             self._assert_worker_available(celery_app)
@@ -39,11 +61,63 @@ class CompareV2Dispatcher:
                 queue=settings.celery_default_queue,
             )
         except Exception as exc:
+            if settings.offline_fallback:
+                logger.warning(
+                    "Celery dispatch failed — falling back to offline sync comparison: %s",
+                    _format_exception(exc),
+                )
+                return self._enqueue_offline(payload)
             raise CeleryTaskFailureError(
                 f"Failed to dispatch compare task to Celery: {_format_exception(exc)}"
             ) from exc
 
         return str(async_result.id)
+
+    def _enqueue_offline(self, payload: CompareTaskPayload) -> str:
+        """Run comparison synchronously (no Celery) and cache the result immediately.
+
+        Returns a job_id in the ``cached-{key}`` format so get_compare_status()
+        resolves it from the filesystem cache without touching Celery.
+        Safe to call from FastAPI sync handlers because FastAPI executes them
+        in a thread-pool worker that has no running event loop.
+        """
+        from grc_policy_server.services.comparison.comparison_trace import (
+            ComparisonTraceStore,
+        )
+        from grc_policy_server.services.comparison.offline_diff_engine import (
+            OfflineDiffEngine,
+        )
+        from grc_policy_server.services.documents.canonical_store import (
+            CanonicalDocumentStore,
+        )
+
+        canonical_store = CanonicalDocumentStore(upload_root=self.upload_root)
+        trace_store = ComparisonTraceStore(upload_root=self.upload_root)
+        engine = OfflineDiffEngine(
+            canonical_store=canonical_store,
+            trace_store=trace_store,
+        )
+
+        result: ComparisonResult = asyncio.run(
+            engine.compare(
+                doc1=payload.doc1,
+                doc2=payload.doc2,
+                force_re_extract=payload.force_re_extract,
+                audit_mode=payload.audit_mode,
+                save_to_db=False,
+            )
+        )
+
+        cache_key = payload.cache_key
+        self.cache_store.save_for_key(
+            key=cache_key,
+            doc1_id=payload.doc1.id,
+            doc2_id=payload.doc2.id,
+            result=result,
+        )
+        # Return a "cached-" prefixed job_id so get_compare_status() resolves
+        # it via load_for_cached_job() without any Celery lookup.
+        return f"{self.cache_store.cached_job_prefix}{cache_key}"
 
     def get_compare_status(self, *, job_id: str) -> CompareV2JobStatusResponse:
         if self.cache_store.is_cached_job_id(job_id):
@@ -64,9 +138,17 @@ class CompareV2Dispatcher:
                 cacheHit=True,
             )
 
+        if self._celery is None:
+            raise CeleryNotAvailableError(
+                "Celery is not available in offline mode. "
+                "Offline jobs use cached-prefixed job IDs resolvable without Celery."
+            )
+
         try:
             async_result = self._celery.AsyncResult(job_id)
             state = str(async_result.state or "PENDING").upper()
+        except CeleryNotAvailableError:
+            raise
         except Exception as exc:
             raise CeleryTaskFailureError(
                 f"Failed to fetch compare task status from Celery: {_format_exception(exc)}"

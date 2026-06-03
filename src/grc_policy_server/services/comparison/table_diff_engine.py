@@ -107,18 +107,44 @@ def _extract_bare_range_hz(cell_text: str, unit: str) -> str | None:
 # German thousands-separator: "1.000 MHz" → "1000 MHz" (period before exactly 3 digits)
 _DE_THOUSANDS_RE = _re.compile(r"(\d)\.(\d{3})(?=[^\d]|$)")
 
+# French thousands-separator: thin-space (U+202F), non-breaking space (U+00A0), or
+# regular space between digit groups — e.g. "30 000 Hz" or "30 000 Hz"
+_FR_THOUSANDS_RE = _re.compile(r"(\d)[   ](\d{3})(?=[^\d]|$)")
+
+# French / German decimal comma in a pure numeric context: "1,5" → "1.5"
+# Matches only when surrounded by digits, not inside abbreviations like "Nr,".
+_DECIMAL_COMMA_RE = _re.compile(r"(\d),(\d)")
+
 
 def _preprocess_for_language(text: str, language: str) -> str:
-    """Strip German thousands-separator periods for de/de-* documents."""
-    if not language.startswith("de"):
-        return text
-    result = text
-    while True:
-        new = _DE_THOUSANDS_RE.sub(r"\1\2", result)
-        if new == result:
-            break
-        result = new
-    return result
+    """Normalise locale-specific numeric punctuation for accurate fact extraction.
+
+    - German (de): strip period-as-thousands-separator, convert decimal comma
+    - French (fr): strip space-as-thousands-separator, convert decimal comma
+    """
+    lang = (language or "").split("-")[0].lower()
+
+    if lang == "de":
+        result = text
+        while True:
+            new = _DE_THOUSANDS_RE.sub(r"\1\2", result)
+            if new == result:
+                break
+            result = new
+        result = _DECIMAL_COMMA_RE.sub(r"\1.\2", result)
+        return result
+
+    if lang == "fr":
+        result = text
+        while True:
+            new = _FR_THOUSANDS_RE.sub(r"\1\2", result)
+            if new == result:
+                break
+            result = new
+        result = _DECIMAL_COMMA_RE.sub(r"\1.\2", result)
+        return result
+
+    return text
 
 
 logger = logging.getLogger(__name__)
