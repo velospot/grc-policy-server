@@ -1085,6 +1085,9 @@ def test_compare_v2_enqueue_returns_cached_result():
             "comparisonMode": "auditor_grade",
             "requireHumanReview": False,
             "hiddenDiffsCount": 0,
+            "warnings": [],
+            "suppressedDiffsCount": 0,
+            "skippedSections": [],
         },
     }
     assert dispatcher.enqueue_calls == []
@@ -1127,6 +1130,9 @@ def test_compare_v2_response_by_path_param():
             "comparisonMode": "auditor_grade",
             "requireHumanReview": False,
             "hiddenDiffsCount": 0,
+            "warnings": [],
+            "suppressedDiffsCount": 0,
+            "skippedSections": [],
         },
         "error": None,
         "cacheHit": False,

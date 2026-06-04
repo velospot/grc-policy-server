@@ -1,0 +1,40 @@
+{
+  "pairs": [
+    {
+      "name": "TL-81000 p003 (2018→2021)",
+      "family": "TL-81000",
+      "doc1_filename": "TL_81000_2018-03_p003-012.pdf",
+      "doc2_filename": "TL_81000_2021-09_GER_p003-012.pdf",
+      "testing_department": "Safety"
+    },
+    {
+      "name": "TL-81000 p013 (2018→2021)",
+      "family": "TL-81000",
+      "doc1_filename": "TL_81000_2018-03_p013-022.pdf",
+      "doc2_filename": "TL_81000_2021-09_GER_p013-022.pdf",
+      "testing_department": "Safety"
+    },
+    {
+      "name": "DNVGL p013 (Nov2016→Dec2019)",
+      "family": "DNVGL-CG-0339",
+      "doc1_filename": "DNVGL-CG-0339_Nov_2016_p013-022.pdf",
+      "doc2_filename": "DNVGL-CG-0339_Dez_2019_p013-022.pdf",
+      "testing_department": "Safety"
+    },
+    {
+      "name": "DNVGL p023 (Nov2016→Dec2019)",
+      "family": "DNVGL-CG-0339",
+      "doc1_filename": "DNVGL-CG-0339_Nov_2016_p023-032.pdf",
+      "doc2_filename": "DNVGL-CG-0339_Dez_2019_p023-032.pdf",
+      "testing_department": "Safety"
+    },
+    {
+      "name": "DIN 60068-2 (incompatible pair)",
+      "family": "DIN-EN-60068-2",
+      "doc1_filename": "DIN EN 60068-2-64_2020.pdf",
+      "doc2_filename": "DIN EN 60068-2-38_2022.pdf",
+      "testing_department": "EMC",
+      "expected_incompatible": true
+    }
+  ]
+}

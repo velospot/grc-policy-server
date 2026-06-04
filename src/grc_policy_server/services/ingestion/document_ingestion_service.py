@@ -87,6 +87,100 @@ def _candidate_to_table_dict(candidate: Any, *, caption: str = "", section_path:
     }
 
 
+def _score_table_extraction_quality(
+    cells: list[dict],
+    num_rows: int,
+    num_cols: int,
+    headers: list[str],
+) -> float:
+    """Score table extraction quality from 0.0 (empty) to 1.0 (perfect).
+
+    Weights: 40% cell fill, 30% numeric density, 20% header quality, 10% dimensions.
+    Used to choose between Docling and Camelot extractions rather than relying on
+    raw cell count alone (which favours empty Docling grids over richer Camelot output).
+    """
+    total_cells = num_rows * num_cols
+    if total_cells == 0:
+        return 0.0
+    non_empty = sum(1 for c in cells if str(c.get("text", "")).strip())
+    numeric_cells = sum(
+        1 for c in cells if any(ch.isdigit() for ch in str(c.get("text", "")))
+    )
+    fill_score = non_empty / total_cells
+    numeric_density = numeric_cells / max(1, non_empty) if non_empty else 0.0
+    header_quality = (
+        0.0
+        if not headers
+        else sum(1 for h in headers if h and not h.startswith("column_")) / len(headers)
+    )
+    dimension_score = 1.0 if 2 <= num_rows <= 200 and 2 <= num_cols <= 20 else 0.5
+    return (
+        0.40 * fill_score
+        + 0.30 * numeric_density
+        + 0.20 * header_quality
+        + 0.10 * dimension_score
+    )
+
+
+def _merge_table_extractions(docling_chunk: Any, camelot_cand: Any) -> dict:
+    """Merge cell data from Docling and Camelot when quality scores are tied.
+
+    Strategy: keep Docling's section hierarchy / title context; for each (row, col)
+    position take the non-empty cell text from whichever backend has it, preferring
+    Camelot when both have content (Camelot grid extraction is usually cleaner).
+
+    Returns a canonical_table dict suitable for chunk.metadata["canonical_table"].
+    """
+    import uuid
+
+    docling_cells_raw = (docling_chunk.metadata.get("table_structure") or {}).get("cells") or []
+    camelot_cells_raw = list(camelot_cand.cells)
+
+    # Index both by (row, col)
+    docling_by_pos: dict[tuple[int, int], str] = {
+        (int(c.get("row", 0)), int(c.get("col", 0))): str(c.get("text", "")).strip()
+        for c in docling_cells_raw
+    }
+    camelot_by_pos: dict[tuple[int, int], str] = {
+        (int(c.get("row", 0)), int(c.get("col", 0))): str(c.get("text", "")).strip()
+        for c in camelot_cells_raw
+    }
+
+    # Union of positions
+    all_positions = set(docling_by_pos) | set(camelot_by_pos)
+    merged_cells = []
+    for row, col in sorted(all_positions):
+        camelot_text = camelot_by_pos.get((row, col), "")
+        docling_text = docling_by_pos.get((row, col), "")
+        text = camelot_text if camelot_text else docling_text
+        merged_cells.append({"row": row, "col": col, "text": text, "is_header": row == 0})
+
+    nr = camelot_cand.num_rows
+    nc = camelot_cand.num_cols
+    caption = docling_chunk.metadata.get("normalized_caption") or docling_chunk.title or ""
+    section_path = list(docling_chunk.section_path or [])
+
+    return {
+        "table_uid": str(uuid.uuid4()),
+        "caption_original": caption,
+        "caption_normalized": caption.lower().strip(),
+        "section_path": section_path,
+        "pages": [camelot_cand.page_number],
+        "columns": [
+            {"index": i, "name": h, "normalized": h.lower().strip()}
+            for i, h in enumerate(camelot_cand.headers)
+        ],
+        "rows": [],
+        "num_rows": nr,
+        "num_cols": nc,
+        "extraction_backend": "ensemble",
+        "confidence": (camelot_cand.confidence + 0.80) / 2,
+        "headers": camelot_cand.headers,
+        "source_extractor": "ensemble",
+        "merged_cells": merged_cells,
+    }
+
+
 async def _correlate_camelot_tables(
     pdf_bytes: bytes,
     chunks: list[Any],
@@ -95,9 +189,10 @@ async def _correlate_camelot_tables(
 ) -> list[Any]:
     """Run camelot on pages that have docling table chunks and update metadata.
 
-    For each docling table chunk:
-    - If a camelot candidate overlaps (IoU > iou_threshold) AND has more cells → use camelot
-    - Otherwise keep docling, mark table_source = "docling"
+    Selection strategy (quality-score based, not raw cell count):
+    - If camelot quality score > docling quality + 0.05 → use Camelot
+    - If scores are within 0.05 and IoU ≥ 0.25 → merge both (ensemble)
+    - Otherwise keep Docling
 
     Requires camelot to be installed (optional dependency). Silently skips if not available.
     """
@@ -152,34 +247,87 @@ async def _correlate_camelot_tables(
             r = bbox_refs[0]
             docling_bbox = {"x0": r.get("l", 0), "y0": r.get("b", 0), "x1": r.get("r", 0), "y1": r.get("t", 0)}
 
+        # Compute Docling extraction quality
+        docling_ts = chunk.metadata.get("table_structure") or {}
+        docling_struct_cells = docling_ts.get("cells") or []
+        docling_nr = docling_ts.get("num_rows") or 0
+        docling_nc = docling_ts.get("num_cols") or 0
+        docling_headers = chunk.metadata.get("table_headers") or []
+        docling_quality = _score_table_extraction_quality(
+            docling_struct_cells, docling_nr, docling_nc, docling_headers
+        )
+
+        # Find best Camelot candidate (lowest IoU threshold for quality evaluation)
+        _EVAL_IOU = 0.25   # threshold for quality comparison / merge
         best_cand = None
-        best_iou = iou_threshold
+        best_iou = _EVAL_IOU
+        best_quality = 0.0
         for cand in by_page.get(page, []):
             if docling_bbox:
                 iou = _bbox_iou(docling_bbox, cand.bbox)
             else:
-                iou = iou_threshold + 0.01  # no bbox → accept any same-page candidate
-            if iou >= best_iou:
-                cand_cell_count = cand.num_rows * cand.num_cols
-                if cand_cell_count >= docling_cell_count:
+                iou = _EVAL_IOU + 0.01  # no bbox → accept any same-page candidate
+            if iou >= _EVAL_IOU:
+                cq = _score_table_extraction_quality(
+                    list(cand.cells), cand.num_rows, cand.num_cols, cand.headers
+                )
+                if cq > best_quality or (cq == best_quality and iou > best_iou):
+                    best_quality = cq
                     best_iou = iou
                     best_cand = cand
 
+        from dataclasses import replace as dc_replace
         if best_cand is not None:
             caption = chunk.metadata.get("normalized_caption") or chunk.title or ""
             section_path = list(chunk.section_path or [])
-            table_dict = _candidate_to_table_dict(best_cand, caption=caption, section_path=section_path)
-            new_meta = {**chunk.metadata, "canonical_table": table_dict, "table_source": best_cand.backend_name}
-            from dataclasses import replace as dc_replace
-            updated[i] = dc_replace(chunk, metadata=new_meta)
-            logger.debug(
-                "camelot upgraded table chunk page=%d iou=%.2f rows=%d→%d",
-                page, best_iou,
-                (chunk.metadata.get("table_structure") or {}).get("num_rows", 0),
-                best_cand.num_rows,
-            )
+            quality_gap = best_quality - docling_quality
+
+            if quality_gap > 0.05:
+                # Camelot clearly better → use Camelot exclusively
+                table_dict = _candidate_to_table_dict(
+                    best_cand, caption=caption, section_path=section_path
+                )
+                new_meta = {
+                    **chunk.metadata,
+                    "canonical_table": table_dict,
+                    "table_source": best_cand.backend_name,
+                    "extraction_quality_score": round(best_quality, 3),
+                }
+                updated[i] = dc_replace(chunk, metadata=new_meta)
+                logger.debug(
+                    "camelot won table page=%d iou=%.2f quality %.2f→%.2f",
+                    page, best_iou, docling_quality, best_quality,
+                )
+            elif abs(quality_gap) <= 0.05 and best_iou >= _EVAL_IOU:
+                # Tied → ensemble merge
+                table_dict = _merge_table_extractions(chunk, best_cand)
+                new_meta = {
+                    **chunk.metadata,
+                    "canonical_table": table_dict,
+                    "table_source": "ensemble",
+                    "extraction_quality_score": round(
+                        (docling_quality + best_quality) / 2, 3
+                    ),
+                }
+                updated[i] = dc_replace(chunk, metadata=new_meta)
+                logger.debug(
+                    "ensemble merged table page=%d iou=%.2f docling=%.2f camelot=%.2f",
+                    page, best_iou, docling_quality, best_quality,
+                )
+            else:
+                # Docling better → keep Docling, still record quality
+                new_meta = {
+                    **chunk.metadata,
+                    "table_source": "docling",
+                    "extraction_quality_score": round(docling_quality, 3),
+                }
+                updated[i] = dc_replace(chunk, metadata=new_meta)
         else:
-            new_meta = {**chunk.metadata, "table_source": chunk.metadata.get("table_source", "docling")}
+            new_meta = {
+                **chunk.metadata,
+                "table_source": chunk.metadata.get("table_source", "docling"),
+                "extraction_quality_score": round(docling_quality, 3),
+            }
             from dataclasses import replace as dc_replace
             updated[i] = dc_replace(chunk, metadata=new_meta)
 

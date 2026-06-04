@@ -1,0 +1,1214 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>EMC Compliance Platform — Architecture v2</title>
+        <style>
+            :root {
+                --bg: #0d1117;
+                --surface: #161b22;
+                --surface2: #1e2630;
+                --border: #30363d;
+                --accent: #58a6ff;
+                --accent2: #3fb950;
+                --warn: #d29922;
+                --danger: #f85149;
+                --text: #c9d1d9;
+                --muted: #8b949e;
+                --agent: #7c3aed;
+                --agent-l: #a78bfa;
+                --det: #0ea5e9;
+            }
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+            body {
+                background: var(--bg);
+                color: var(--text);
+                font-family: "Segoe UI", system-ui, sans-serif;
+                padding: 28px;
+                min-height: 100vh;
+            }
+            h1 {
+                font-size: 18px;
+                font-weight: 700;
+                color: var(--accent);
+                margin-bottom: 3px;
+            }
+            .subtitle {
+                font-size: 11px;
+                color: var(--muted);
+                margin-bottom: 22px;
+            }
+            .tabs {
+                display: flex;
+                margin-bottom: 18px;
+                border-bottom: 1px solid var(--border);
+            }
+            .tab {
+                padding: 7px 14px;
+                font-size: 12px;
+                color: var(--muted);
+                cursor: pointer;
+                border-bottom: 2px solid transparent;
+                transition: all 0.15s;
+                font-weight: 500;
+            }
+            .tab:hover {
+                color: var(--text);
+            }
+            .tab.active {
+                color: var(--accent);
+                border-bottom-color: var(--accent);
+            }
+            .panel {
+                display: none;
+            }
+            .panel.active {
+                display: block;
+            }
+
+            /* PIPELINE */
+            .pipeline {
+                display: flex;
+                gap: 14px;
+                max-width: 1100px;
+            }
+            .pipe-col {
+                flex: 1;
+                min-width: 0;
+            }
+            .pipe-title {
+                font-size: 10px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                color: var(--muted);
+                margin-bottom: 8px;
+                padding-bottom: 5px;
+                border-bottom: 1px solid var(--border);
+            }
+            .stage {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-left: 3px solid transparent;
+                border-radius: 5px;
+                padding: 8px 10px;
+                margin-bottom: 4px;
+                cursor: pointer;
+                transition:
+                    border-color 0.15s,
+                    background 0.15s;
+            }
+            .stage:hover,
+            .stage.sel {
+                border-color: var(--accent);
+                background: var(--surface2);
+            }
+            .stage.det {
+                border-left-color: var(--det);
+            }
+            .stage.hyb {
+                border-left-color: var(--warn);
+            }
+            .stage.agt {
+                border-left-color: var(--agent-l);
+            }
+            .sn {
+                font-size: 9px;
+                color: var(--muted);
+                font-family: monospace;
+            }
+            .st {
+                font-size: 11px;
+                font-weight: 600;
+                color: var(--text);
+                margin: 2px 0;
+            }
+            .sw {
+                font-size: 10px;
+                color: var(--muted);
+            }
+            .badge {
+                display: inline-block;
+                font-size: 9px;
+                padding: 1px 5px;
+                border-radius: 3px;
+                margin-top: 3px;
+            }
+            .bd {
+                background: #0ea5e918;
+                color: var(--det);
+                border: 1px solid #0ea5e940;
+            }
+            .bh {
+                background: #d2992218;
+                color: var(--warn);
+                border: 1px solid #d2992240;
+            }
+            .ba {
+                background: #7c3aed18;
+                color: var(--agent-l);
+                border: 1px solid #7c3aed40;
+            }
+            .policy {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                padding: 12px;
+                font-size: 10px;
+                line-height: 1.9;
+                color: var(--muted);
+            }
+            .det-panel {
+                margin-top: 14px;
+                max-width: 1100px;
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 16px;
+                display: none;
+            }
+            .det-panel.vis {
+                display: block;
+            }
+            .det-title {
+                font-size: 13px;
+                font-weight: 700;
+                color: var(--accent);
+                margin-bottom: 8px;
+            }
+            .det-body {
+                font-size: 11px;
+                line-height: 1.8;
+                color: var(--muted);
+            }
+            .det-body strong {
+                color: var(--text);
+            }
+            .leg {
+                display: flex;
+                gap: 16px;
+                margin-bottom: 10px;
+            }
+            .li {
+                display: flex;
+                align-items: center;
+                gap: 5px;
+                font-size: 10px;
+                color: var(--muted);
+            }
+            .ld {
+                width: 10px;
+                height: 10px;
+                border-radius: 2px;
+                flex-shrink: 0;
+            }
+
+            /* AGENTS */
+            .agrid {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+                gap: 10px;
+                max-width: 1100px;
+            }
+            .ac {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-top: 3px solid var(--agent);
+                border-radius: 8px;
+                padding: 13px;
+            }
+            .aid {
+                font-size: 10px;
+                color: var(--agent-l);
+                font-family: monospace;
+                margin-bottom: 3px;
+            }
+            .an {
+                font-size: 12px;
+                font-weight: 700;
+                color: var(--text);
+                margin-bottom: 4px;
+            }
+            .atrig {
+                font-size: 10px;
+                color: var(--warn);
+                margin-bottom: 5px;
+            }
+            .ad {
+                font-size: 11px;
+                color: var(--muted);
+                line-height: 1.5;
+                margin-bottom: 8px;
+            }
+            .ar {
+                border-top: 1px solid var(--border);
+                padding-top: 8px;
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+            }
+            .ar-item {
+                font-size: 10px;
+                color: var(--muted);
+                display: flex;
+                gap: 5px;
+            }
+            .ok {
+                color: var(--accent2);
+            }
+            .no {
+                color: var(--danger);
+            }
+
+            /* INVARIANTS */
+            .inv-list {
+                max-width: 860px;
+            }
+            .inv {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                padding: 11px 13px;
+                margin-bottom: 5px;
+                display: flex;
+                gap: 12px;
+            }
+            .in {
+                font-family: monospace;
+                font-size: 11px;
+                color: var(--accent);
+                flex-shrink: 0;
+                padding-top: 2px;
+            }
+            .it {
+                font-size: 12px;
+                font-weight: 700;
+                color: var(--text);
+                margin-bottom: 2px;
+            }
+            .id {
+                font-size: 11px;
+                color: var(--muted);
+                line-height: 1.5;
+            }
+
+            /* SCOPE */
+            .sc-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 14px;
+                max-width: 860px;
+                margin-bottom: 18px;
+            }
+            .sc-box {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 13px;
+            }
+            .sc-label {
+                font-size: 10px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                margin-bottom: 8px;
+            }
+            .sc-in .sc-label {
+                color: var(--accent2);
+            }
+            .sc-out .sc-label {
+                color: var(--danger);
+            }
+            .si {
+                font-size: 11px;
+                color: var(--muted);
+                padding: 3px 0;
+                display: flex;
+                gap: 6px;
+                line-height: 1.4;
+            }
+            .si::before {
+                content: "•";
+                flex-shrink: 0;
+                margin-top: 1px;
+            }
+            .sc-in .si::before {
+                color: var(--accent2);
+            }
+            .sc-out .si::before {
+                color: var(--danger);
+            }
+            .hw-row {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 8px;
+                max-width: 860px;
+            }
+            .hw {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                padding: 10px;
+                text-align: center;
+            }
+            .hwl {
+                font-size: 9px;
+                color: var(--muted);
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                margin-bottom: 3px;
+            }
+            .hwv {
+                font-size: 20px;
+                font-weight: 700;
+                color: var(--accent);
+            }
+            .hws {
+                font-size: 9px;
+                color: var(--muted);
+                margin-top: 2px;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>EMC / EMV Compliance Platform</h1>
+        <p class="subtitle">
+            18-stage deterministic state machine &middot; 8 probabilistic agents
+            &middot; Compliance evidence reconciliation engine
+        </p>
+
+        <div class="tabs">
+            <div class="tab active" onclick="sw('pipeline', this)">
+                Pipeline
+            </div>
+            <div class="tab" onclick="sw('agents', this)">
+                Agents (A1&ndash;A8)
+            </div>
+            <div class="tab" onclick="sw('invariants', this)">Invariants</div>
+            <div class="tab" onclick="sw('scope', this)">
+                Scope &amp; Hardware
+            </div>
+        </div>
+
+        <div id="tab-pipeline" class="panel active">
+            <div class="leg">
+                <div class="li">
+                    <div class="ld" style="background: var(--det)"></div>
+                    Deterministic
+                </div>
+                <div class="li">
+                    <div class="ld" style="background: var(--warn)"></div>
+                    Hybrid (det-first, agent for ambiguity)
+                </div>
+                <div class="li">
+                    <div class="ld" style="background: var(--agent-l)"></div>
+                    Agent-assisted
+                </div>
+            </div>
+            <div class="pipeline">
+                <div class="pipe-col">
+                    <div class="pipe-title">
+                        Ingestion Pipeline (Stages 0&ndash;12)
+                    </div>
+                    <div class="stage det" onclick="sd('s0', this)">
+                        <div class="sn">STAGE 0</div>
+                        <div class="st">Job Intake</div>
+                        <div class="sw">
+                            FastAPI Gateway &middot; Celery &middot; Redis
+                        </div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s1', this)">
+                        <div class="sn">STAGE 1</div>
+                        <div class="st">Document Quality Gate</div>
+                        <div class="sw">DocumentQualityGate</div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s2', this)">
+                        <div class="sn">STAGE 2</div>
+                        <div class="st">Structural Parsing</div>
+                        <div class="sw">DoclingParser</div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s3', this)">
+                        <div class="sn">STAGE 3</div>
+                        <div class="st">DoclingGraph Object Extract</div>
+                        <div class="sw">
+                            DoclingGraphAdapter + CanonicalObjectValidator
+                        </div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s4', this)">
+                        <div class="sn">STAGE 4</div>
+                        <div class="st">Noise Filter + Canonicalize</div>
+                        <div class="sw">
+                            NoiseFilter &middot; CanonicalTextNormalizer
+                            &middot; IgnoredChangeLogger
+                        </div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s5', this)">
+                        <div class="sn">STAGE 5</div>
+                        <div class="st">
+                            Table Classification + Normalization
+                        </div>
+                        <div class="sw">
+                            TableClassifier &middot; MeasurementTableExtractor
+                            &middot; UnitNormalizer &middot;
+                            MeasurementValidator
+                        </div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage hyb" onclick="sd('s6', this)">
+                        <div class="sn">STAGE 6</div>
+                        <div class="st">Standard Registry Resolution</div>
+                        <div class="sw">
+                            StandardRegistryService + Agent A5 (unresolved
+                            versions)
+                        </div>
+                        <span class="badge bh">Hybrid</span>
+                    </div>
+                    <div class="stage hyb" onclick="sd('s7', this)">
+                        <div class="sn">STAGE 7</div>
+                        <div class="st">Ontology Mapping</div>
+                        <div class="sw">
+                            KeywordClassifier + Agent A1 +
+                            OntologySchemaValidator
+                        </div>
+                        <span class="badge bh">Hybrid</span>
+                    </div>
+                    <div class="stage hyb" onclick="sd('s8', this)">
+                        <div class="sn">STAGE 8</div>
+                        <div class="st">Stable Identity Resolution</div>
+                        <div class="sw">
+                            StableIdentityResolver + Agent (low-confidence
+                            fallback)
+                        </div>
+                        <span class="badge bh">Hybrid</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s9', this)">
+                        <div class="sn">STAGE 9</div>
+                        <div class="st">Tri-layer Graph Build</div>
+                        <div class="sw">
+                            MetaGraph &middot; LayoutGraph &middot;
+                            ComplianceGraph &middot; Neo4jWriter
+                        </div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage hyb" onclick="sd('s10', this)">
+                        <div class="sn">STAGE 10</div>
+                        <div class="st">Relationship Building (4 Layers)</div>
+                        <div class="sw">
+                            RelationshipBuilder A/B/C + Agent A2 (Layer D)
+                        </div>
+                        <span class="badge bh">Hybrid</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s11', this)">
+                        <div class="sn">STAGE 11</div>
+                        <div class="st">Evidence Chain Validation</div>
+                        <div class="sw">
+                            EvidenceChainValidator &middot; ReviewQueueWriter
+                        </div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s12', this)">
+                        <div class="sn">STAGE 12</div>
+                        <div class="st">Embedding + Vector Index</div>
+                        <div class="sw">
+                            BGE-M3 (GPU) &middot; QdrantIndexer &middot;
+                            EmbeddingCache
+                        </div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                </div>
+                <div class="pipe-col">
+                    <div class="pipe-title">
+                        Comparison Pipeline (Stages 13&ndash;18)
+                    </div>
+                    <div class="stage hyb" onclick="sd('s13', this)">
+                        <div class="sn">STAGE 13</div>
+                        <div class="st">Semantic Alignment</div>
+                        <div class="sw">
+                            SemanticAlignmentEngine &middot; Qdrant + Agent A3
+                            (AMBIGUOUS only)
+                        </div>
+                        <span class="badge bh">Hybrid</span>
+                    </div>
+                    <div class="stage hyb" onclick="sd('s14', this)">
+                        <div class="sn">STAGE 14</div>
+                        <div class="st">Split / Merge Alignment</div>
+                        <div class="sw">SplitMergeDetector + Agent A4</div>
+                        <span class="badge bh">Hybrid</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s15', this)">
+                        <div class="sn">STAGE 15</div>
+                        <div class="st">Graph Diff</div>
+                        <div class="sw">
+                            GraphDiffEngine &middot; Neo4jSubgraphReader
+                        </div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage det" onclick="sd('s16', this)">
+                        <div class="sn">STAGE 16</div>
+                        <div class="st">Deterministic Rules Engine</div>
+                        <div class="sw">
+                            DeterministicRulesEngine &middot; RuleRegistry
+                            &middot; UncertaintyModel
+                        </div>
+                        <span class="badge bd">Deterministic</span>
+                    </div>
+                    <div class="stage hyb" onclick="sd('s17', this)">
+                        <div class="sn">STAGE 17</div>
+                        <div class="st">Review Queue Triage</div>
+                        <div class="sw">
+                            ReviewQueueWriter + Agent A6 (grouping + priority)
+                        </div>
+                        <span class="badge bh">Hybrid</span>
+                    </div>
+                    <div class="stage agt" onclick="sd('s18', this)">
+                        <div class="sn">STAGE 18</div>
+                        <div class="st">Explanation + Report Generation</div>
+                        <div class="sw">
+                            Agent A7 (Explanation) &middot; Agent A8 (Report)
+                        </div>
+                        <span class="badge ba">Agent-assisted</span>
+                    </div>
+                </div>
+                <div class="pipe-col" style="max-width: 200px">
+                    <div class="pipe-title">Execution Policy</div>
+                    <div class="policy">
+                        <strong style="color: var(--text)"
+                            >Deterministic-First</strong
+                        ><br />
+                        1. Run det. tool<br />2. Agent only if ambiguous<br />3.
+                        Validate output (Pydantic)<br />4. Confidence-gate<br />5.
+                        Audit event<br />6. Continue or review<br /><br />
+                        <strong style="color: var(--text)">Agent Failure</strong
+                        ><br />
+                        &rarr; Route to review<br />&rarr; Pipeline continues<br />&rarr;
+                        review_required=true<br /><br />
+                        <strong style="color: var(--text)">Det. Failure</strong
+                        ><br />
+                        &rarr; Halt pipeline<br />&rarr; Write failure
+                        artifact<br />&rarr; Set resume_from<br />&rarr; Job
+                        restarts here<br /><br />
+                        <strong style="color: var(--danger)">Hard Rule</strong
+                        ><br />
+                        Rules engine runs with<br />zero LLM available
+                    </div>
+                </div>
+            </div>
+            <div id="dpanel" class="det-panel">
+                <div id="dp-t" class="det-title"></div>
+                <div id="dp-b" class="det-body"></div>
+            </div>
+        </div>
+
+        <div id="tab-agents" class="panel">
+            <div class="agrid">
+                <div class="ac">
+                    <div class="aid">A1 &middot; Stage 7 &middot; Ontology</div>
+                    <div class="an">Ontology Classification Agent</div>
+                    <div class="atrig">
+                        Triggered: keyword classifier confidence &lt; 0.70
+                    </div>
+                    <div class="ad">
+                        Classifies document nodes into the universal compliance
+                        ontology (Requirement, Measurement, Threshold,
+                        Deviation...). Always runs after deterministic keyword
+                        classifier. Output Pydantic-validated before graph
+                        write.
+                    </div>
+                    <div class="ar">
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Classify into
+                            ontology types
+                        </div>
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Return confidence +
+                            review_flag
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Compute PASS/FAIL
+                            or margin
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Write to graph
+                            without schema validation
+                        </div>
+                    </div>
+                </div>
+                <div class="ac">
+                    <div class="aid">
+                        A2 &middot; Stage 10 &middot; Relationships
+                    </div>
+                    <div class="an">Relationship Resolution Agent</div>
+                    <div class="atrig">
+                        Triggered: deterministic layers A/B/C produce no match
+                        (Layer D only)
+                    </div>
+                    <div class="ad">
+                        Proposes semantic relationships between compliance
+                        entities when explicit ID references are absent. All
+                        Layer D edges carry review_flag=true. Cannot bypass
+                        RelationshipValidator.
+                    </div>
+                    <div class="ar">
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Propose typed
+                            relationships
+                        </div>
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Provide textual
+                            basis for proposal
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Write edges without
+                            RelationshipValidator
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Layer D edges
+                            become COMPLETED findings
+                        </div>
+                    </div>
+                </div>
+                <div class="ac">
+                    <div class="aid">
+                        A3 &middot; Stage 13 &middot; Alignment
+                    </div>
+                    <div class="an">Alignment Adjudication Agent</div>
+                    <div class="atrig">
+                        Triggered: top-2 candidate scores within 0.05 (AMBIGUOUS
+                        state)
+                    </div>
+                    <div class="ad">
+                        Resolves ambiguous node alignment between Doc A and Doc
+                        B. Uses standard refs, clause IDs, and measurement
+                        values. Returns SAME_NODE, MODIFIED_NODE, or
+                        AMBIGUOUS_UNRESOLVABLE (conservative fallback: split
+                        into DELETED + NEW).
+                    </div>
+                    <div class="ar">
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Adjudicate close
+                            alignment candidates
+                        </div>
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Use standard refs +
+                            clause IDs as signals
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Use page numbers or
+                            positions
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Merge nodes of
+                            different ontology_type
+                        </div>
+                    </div>
+                </div>
+                <div class="ac">
+                    <div class="aid">
+                        A4 &middot; Stage 14 &middot; Split/Merge
+                    </div>
+                    <div class="an">Split/Merge Alignment Agent</div>
+                    <div class="atrig">
+                        Triggered: SplitMergeDetector signals 1:N or N:1 pattern
+                    </div>
+                    <div class="ad">
+                        Determines whether a section was split into multiple
+                        sections (SPLIT) or multiple were merged (MERGE).
+                        Prevents false-positive DELETED_NODE + NEW_NODE findings
+                        from document reorganizations.
+                    </div>
+                    <div class="ar">
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Confirm SPLIT /
+                            MERGE / NOT_SPLIT_MERGE
+                        </div>
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Report missing
+                            sub-requirements
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Approve partial
+                            coverage without flagging
+                        </div>
+                    </div>
+                </div>
+                <div class="ac">
+                    <div class="aid">
+                        A5 &middot; Stage 6 &middot; Standards
+                    </div>
+                    <div class="an">Standard Version Resolver Agent</div>
+                    <div class="atrig">
+                        Triggered: StandardRegistryService cannot resolve
+                        version deterministically
+                    </div>
+                    <div class="ad">
+                        Resolves ambiguous standard references to a known
+                        standard_id and version. Cross-version comparisons are
+                        always flagged. Never invents a standard that does not
+                        exist.
+                    </div>
+                    <div class="ar">
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Resolve version
+                            from context clues
+                        </div>
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Flag cross-version
+                            comparison risk
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Infer version
+                            silently
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Invent non-existent
+                            standards
+                        </div>
+                    </div>
+                </div>
+                <div class="ac">
+                    <div class="aid">
+                        A6 &middot; Stage 17 &middot; Review Triage
+                    </div>
+                    <div class="an">Human Review Triage Agent</div>
+                    <div class="atrig">
+                        Triggered: once per job after all prior stages complete
+                    </div>
+                    <div class="ad">
+                        Groups and prioritizes all flagged review items across
+                        the pipeline. Writes explanations of why each group
+                        needs human attention. Never resolves items &mdash; only
+                        organizes them.
+                    </div>
+                    <div class="ar">
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Group items by
+                            category and priority
+                        </div>
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Write plain-English
+                            explanation per group
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Resolve review
+                            items
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Mark comparison
+                            COMPLETED
+                        </div>
+                    </div>
+                </div>
+                <div class="ac">
+                    <div class="aid">
+                        A7 &middot; Stage 18 &middot; Explanation
+                    </div>
+                    <div class="an">Explanation Agent</div>
+                    <div class="atrig">
+                        Triggered: after all findings finalized by rules engine
+                    </div>
+                    <div class="ad">
+                        Writes 2&ndash;4 sentence professional explanations for
+                        each deterministic finding. References standard, clause,
+                        frequency, and measurement values. Never recommends
+                        remediation or makes compliance determinations.
+                    </div>
+                    <div class="ar">
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Explain WHAT
+                            changed + WHERE + WHY it matters
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Recommend
+                            remediation
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Create new findings
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Alter severity or
+                            result
+                        </div>
+                    </div>
+                </div>
+                <div class="ac">
+                    <div class="aid">A8 &middot; Stage 18 &middot; Report</div>
+                    <div class="an">Report Generation Agent</div>
+                    <div class="atrig">
+                        Triggered: after A7 explanations complete
+                    </div>
+                    <div class="ad">
+                        Assembles the full audit report: executive summary,
+                        findings by severity, pending review items, ignored
+                        changes panel (mandatory), traceability table. Report
+                        without ignored_changes is incomplete.
+                    </div>
+                    <div class="ar">
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Assemble complete
+                            audit report
+                        </div>
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Include
+                            ignored_changes panel (mandatory)
+                        </div>
+                        <div class="ar-item">
+                            <span class="ok">&#10003;</span> Every finding cites
+                            doc+page+clause+rule_id
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Assign severity
+                            (comes from rules engine only)
+                        </div>
+                        <div class="ar-item">
+                            <span class="no">&#10007;</span> Mark FINAL with
+                            unresolved review items
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-invariants" class="panel">
+            <div class="inv-list">
+                <div class="inv">
+                    <div class="in">01</div>
+                    <div>
+                        <div class="it">
+                            Orchestrator is a state machine, not an LLM
+                        </div>
+                        <div class="id">
+                            ComplianceIngestionOrchestrator and
+                            ComplianceComparisonOrchestrator are Python state
+                            machines. No agent controls pipeline routing or
+                            stage transitions.
+                        </div>
+                    </div>
+                </div>
+                <div class="inv">
+                    <div class="in">02</div>
+                    <div>
+                        <div class="it">Deterministic-first execution</div>
+                        <div class="id">
+                            For every stage, a deterministic tool runs first.
+                            Agents are called only when deterministic confidence
+                            is insufficient. Agent output is always
+                            schema-validated before use.
+                        </div>
+                    </div>
+                </div>
+                <div class="inv">
+                    <div class="in">03</div>
+                    <div>
+                        <div class="it">Rules engine runs without any LLM</div>
+                        <div class="id">
+                            PASS/FAIL, margin, and severity are computed by
+                            DeterministicRulesEngine. This must function with
+                            OLLAMA_BASE_URL unset and all Claude agents offline.
+                        </div>
+                    </div>
+                </div>
+                <div class="inv">
+                    <div class="in">04</div>
+                    <div>
+                        <div class="it">No position-based identity</div>
+                        <div class="id">
+                            Page numbers are never used as node identifiers.
+                            Stable IDs are derived from standard_ref + clause +
+                            semantic_title_hash. This enables correct diffing
+                            across document versions.
+                        </div>
+                    </div>
+                </div>
+                <div class="inv">
+                    <div class="in">05</div>
+                    <div>
+                        <div class="it">Ignored changes always surfaced</div>
+                        <div class="id">
+                            Every artifact removed by NoiseFilter is logged in
+                            ignored_changes[]. No artifact disappears silently.
+                            The ignored changes panel is mandatory in every
+                            audit report.
+                        </div>
+                    </div>
+                </div>
+                <div class="inv">
+                    <div class="in">06</div>
+                    <div>
+                        <div class="it">Tri-layer graph separation</div>
+                        <div class="id">
+                            MetaGraph (provenance), LayoutGraph (structure),
+                            ComplianceGraph (semantics) are kept separate. TOC
+                            nodes, headers, and pagination never enter
+                            ComplianceGraph.
+                        </div>
+                    </div>
+                </div>
+                <div class="inv">
+                    <div class="in">07</div>
+                    <div>
+                        <div class="it">Evidence chain is mandatory</div>
+                        <div class="id">
+                            No finding reaches auditors without a complete
+                            evidence chain: Measurement &rarr; Threshold &rarr;
+                            Requirement &rarr; Standard &rarr; SourceLocation.
+                            Incomplete chains are routed to review.
+                        </div>
+                    </div>
+                </div>
+                <div class="inv">
+                    <div class="in">08</div>
+                    <div>
+                        <div class="it">Ontology version is immutable</div>
+                        <div class="id">
+                            Every graph node, edge, and finding is tagged with
+                            ontology_version. Changes require a version bump and
+                            migration. Breaking changes increment the major
+                            version.
+                        </div>
+                    </div>
+                </div>
+                <div class="inv">
+                    <div class="in">09</div>
+                    <div>
+                        <div class="it">Agent outputs are schema-validated</div>
+                        <div class="id">
+                            Every agent output is validated against a Pydantic
+                            schema before passing downstream. Schema validation
+                            failure is treated as confidence=0.0 and routed to
+                            review.
+                        </div>
+                    </div>
+                </div>
+                <div class="inv">
+                    <div class="in">10</div>
+                    <div>
+                        <div class="it">
+                            Every stage produces a typed artifact
+                        </div>
+                        <div class="id">
+                            No loose text passes between stages. Every
+                            inter-stage artifact conforms to a Pydantic contract
+                            defined in services/contracts/. This enables
+                            resume-from-failure and independent testing.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-scope" class="panel">
+            <div class="sc-grid">
+                <div class="sc-box sc-in">
+                    <div class="sc-label">&#10003; In Scope</div>
+                    <div class="si">
+                        EMV / EMC compliance comparison (CISPR 25, 32; FCC Part
+                        15; EN 55032)
+                    </div>
+                    <div class="si">
+                        EHS / Safety audit diffing (ISO 45001, ISO 14001)
+                    </div>
+                    <div class="si">
+                        ISO quality audit comparison (ISO 9001, ISO/IEC 17025)
+                    </div>
+                    <div class="si">
+                        Structured evidence extraction from PDF and DOCX reports
+                    </div>
+                    <div class="si">
+                        Deterministic PASS/FAIL with full audit trail
+                    </div>
+                    <div class="si">
+                        Semantic section alignment (renamed, moved, split,
+                        merged)
+                    </div>
+                    <div class="si">
+                        Cross-domain unified ontology and reporting
+                    </div>
+                    <div class="si">
+                        Offline deployment (no cloud dependency)
+                    </div>
+                    <div class="si">Job resume from mid-pipeline failure</div>
+                </div>
+                <div class="sc-box sc-out">
+                    <div class="sc-label">&#10007; Out of Scope</div>
+                    <div class="si">
+                        Replacing certified EMC engineers or regulatory
+                        certifiers
+                    </div>
+                    <div class="si">
+                        Final regulatory certification decisions
+                    </div>
+                    <div class="si">Fully autonomous compliance approval</div>
+                    <div class="si">Perfect OCR for all scanned reports</div>
+                    <div class="si">Complex nested or handwritten tables</div>
+                    <div class="si">
+                        Real-time measurement instrumentation integration
+                    </div>
+                    <div class="si">Legal compliance guarantees</div>
+                    <div class="si">
+                        GraphRAG / corpus chat (read-only, outside core
+                        comparison path)
+                    </div>
+                </div>
+            </div>
+            <div class="hw-row">
+                <div class="hw">
+                    <div class="hwl">GPU</div>
+                    <div class="hwv">16GB</div>
+                    <div class="hws">
+                        RTX 5070 Ti &middot; BGE-M3 (4GB) + Qwen3-32B Q4 (12GB)
+                    </div>
+                </div>
+                <div class="hw">
+                    <div class="hwl">System RAM</div>
+                    <div class="hwv">64GB</div>
+                    <div class="hws">
+                        Neo4j 16GB &middot; Qdrant 8GB &middot; PG 4GB &middot;
+                        Redis 4GB &middot; App 4GB
+                    </div>
+                </div>
+                <div class="hw">
+                    <div class="hwl">Ingestion</div>
+                    <div class="hwv">50k</div>
+                    <div class="hws">
+                        pages/day &middot; 2&ndash;3 concurrent comparisons
+                    </div>
+                </div>
+                <div class="hw">
+                    <div class="hwl">Measurements</div>
+                    <div class="hwv">500k</div>
+                    <div class="hws">indexed in Qdrant per deployment</div>
+                </div>
+                <div class="hw">
+                    <div class="hwl">Cached diff</div>
+                    <div class="hwv">&lt;5s</div>
+                    <div class="hws">
+                        3-tier cache: fingerprint &rarr; node &rarr; result
+                    </div>
+                </div>
+                <div class="hw">
+                    <div class="hwl">Build Timeline</div>
+                    <div class="hwv">6wk</div>
+                    <div class="hws">
+                        Phase 0 (fsm) &rarr; Phase 1 (pipeline) &rarr; Phase 2
+                        (comparison) &rarr; Phase 3 (UI)
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            const D = {
+                s0: {
+                    t: "Stage 0 — Job Intake",
+                    b: "<strong>Tool:</strong> FastAPI Gateway. <strong>Type:</strong> Deterministic.<br><br>Accepts document upload, computes raw SHA-256 hash, deduplicates (same hash = skip). Stores raw file to object storage. Creates job record in PostgreSQL. Writes <code>DOCUMENT_UPLOADED</code> audit event. Pushes to Celery queue.<br><br><strong>Do not:</strong> Parse synchronously. Call any agent. Create compliance findings.",
+                },
+                s1: {
+                    t: "Stage 1 — Document Quality Gate",
+                    b: "<strong>Tool:</strong> DocumentQualityGate. <strong>Type:</strong> Deterministic.<br><br>Detects native PDF vs scanned (OCR required). Estimates table density and numeric density using block layout heuristics. Classifies extraction risk as LOW / MEDIUM / HIGH.<br><br><strong>Critical rule:</strong> If OCR is used on measurement-heavy pages, all downstream measurements carry <code>extraction_confidence</code> and may require <code>review_required=true</code>. This is where OCR risk is surfaced, not downstream.",
+                },
+                s2: {
+                    t: "Stage 2 — Structural Parsing",
+                    b: "<strong>Tool:</strong> DoclingParser. <strong>Type:</strong> Deterministic.<br><br>Extracts sections, headings, tables, figures from raw document. Preserves page references and bounding boxes for every element. Output is raw structure — no classification or filtering at this stage.<br><br><strong>Do not:</strong> Decide what is compliance-relevant. Drop content silently. Convert measurements.",
+                },
+                s3: {
+                    t: "Stage 3 — DoclingGraph Object Extraction",
+                    b: "<strong>Tool:</strong> DoclingGraphAdapter. <strong>Type:</strong> Deterministic (schema-validated output).<br><br>Converts Docling structure into typed candidate objects: <code>CandidateMeasurementTable</code>, <code>CandidateClause</code>, <code>CandidateSection</code>, <code>CandidateTestSetup</code>, <code>CandidateNoise</code>.<br><br><strong>Critical:</strong> DoclingGraph output is NOT trusted until it passes CanonicalObjectValidator. Candidate objects are not yet ontology entities.",
+                },
+                s4: {
+                    t: "Stage 4 — Noise Filter + Canonicalization",
+                    b: "<strong>Tools:</strong> NoiseFilter, CanonicalTextNormalizer, IgnoredChangeLogger. <strong>Type:</strong> Deterministic.<br><br><strong>Removed:</strong> TOC, list of figures/tables, page headers/footers, metadata blocks, pagination artifacts.<br><strong>Normalized:</strong> whitespace collapsed, hyphenation fixed, bullets normalized, sentences reconstructed.<br><br><strong>Hard rule:</strong> Every removed artifact is logged in <code>ignored_changes[]</code> with type, source_page, and reason. Nothing disappears silently.",
+                },
+                s5: {
+                    t: "Stage 5 — Table Classification + Measurement Normalization",
+                    b: "<strong>Tools:</strong> TableClassifier, MeasurementTableExtractor, UnitNormalizer, MeasurementValidator. <strong>Type:</strong> Deterministic (agent optional for ambiguous table type).<br><br>Classifies tables: <code>measurement_table | configuration_table | reference_table | noise_table</code>. Converts all frequencies to Hz, all levels to dBµV/m. Computes margin if absent. Validates: monotonic frequency check, plausible dB range (-20 to +120). Canonical sort: frequency &rarr; test_case_id.<br><br><strong>Hard rule:</strong> OCR/low-confidence cell values carry <code>extraction_confidence</code>.",
+                },
+                s6: {
+                    t: "Stage 6 — Standard Registry Resolution",
+                    b: "<strong>Tool:</strong> StandardRegistryService (deterministic lookup). <strong>Agent:</strong> A5 for unresolved versions only.<br><br>Normalizes standard aliases (CISPR25 &rarr; cispr_25). Detects missing or ambiguous versions. Flags cross-version comparisons (e.g. CISPR 25:2016 vs 2021).<br><br><strong>Hard rule:</strong> Never infer a missing standard version silently. Missing version = <code>version: 'unknown'</code>, <code>review_flag: true</code>.",
+                },
+                s7: {
+                    t: "Stage 7 — Ontology Mapping",
+                    b: "<strong>Tools:</strong> KeywordClassifier (runs first), OntologySchemaValidator, OntologyRegistry. <strong>Agent:</strong> A1 (only when keyword classifier confidence < 0.70).<br><br>Keyword classifier uses regex patterns for each ontology type. Agent A1 called only for ambiguous cases. All outputs validated against OntologySchema before graph write.<br><br><strong>Hard rule:</strong> confidence < 0.70 &rarr; review_flag=true. Every classification writes an audit log entry with model_version + confidence + timestamp.",
+                },
+                s8: {
+                    t: "Stage 8 — Stable Identity Resolution",
+                    b: "<strong>Tool:</strong> StableIdentityResolver. <strong>Type:</strong> Hybrid.<br><br>Builds stable IDs in priority order: (1) standard_ref + clause + title_slug, (2) standard_ref + content_hash, (3) parent_context + title_slug, (4) content_hash only (review_flag).<br><br><strong>Hard rule:</strong> Page numbers are NEVER used as identity. Stable IDs must be deterministic given the same input content.",
+                },
+                s9: {
+                    t: "Stage 9 — Tri-layer Graph Construction",
+                    b: "<strong>Tools:</strong> MetaGraphBuilder, LayoutGraphBuilder, ComplianceGraphBuilder, Neo4jWriter. <strong>Type:</strong> Deterministic.<br><br><strong>MetaGraph:</strong> Document, Source, Standard, Version, UploadMetadata.<br><strong>LayoutGraph:</strong> Page, Section, Heading, Table, Row, Cell, BBox &mdash; preserves source traceability.<br><strong>ComplianceGraph:</strong> Requirement, Observation, Measurement, Threshold, Control, Evidence, Deviation, Risk.<br><br><strong>Hard rule:</strong> TOC never enters ComplianceGraph. Every ComplianceNode has a SOURCED_FROM link to its LayoutGraph source. Graph writes are idempotent (upsert by stable_id).",
+                },
+                s10: {
+                    t: "Stage 10 — Relationship Building (4 Layers)",
+                    b: "<strong>Tools:</strong> RelationshipBuilder A/B/C (deterministic), RelationshipValidator, Neo4jWriter. <strong>Agent:</strong> A2 for Layer D only.<br><br><strong>Layer A:</strong> Structural (CONTAINS, BELONGS_TO). <strong>Layer B:</strong> Ontology rules (EVIDENCE_FOR, EVALUATED_AGAINST, RESULTS_IN...). <strong>Layer C:</strong> Explicit ID cross-references in document text. <strong>Layer D:</strong> Agent A2 for semantic relationships without explicit IDs &mdash; all Layer D edges carry review_flag=true.<br><br><strong>Hard rule:</strong> Agent-proposed edges cannot bypass RelationshipValidator.",
+                },
+                s11: {
+                    t: "Stage 11 — Evidence Chain Validation",
+                    b: "<strong>Tool:</strong> EvidenceChainValidator (deterministic). ReviewQueueWriter for failures.<br><br>For every finding candidate, verifies: Measurement &rarr; Threshold &rarr; Requirement &rarr; Standard &rarr; SourceLocation. Returns COMPLETE | PARTIAL | INCOMPLETE.<br><br><strong>Hard rule:</strong> No auditor-facing finding without complete source traceability. INCOMPLETE chains are routed to review and blocked from the report until resolved.",
+                },
+                s12: {
+                    t: "Stage 12 — Embedding + Vector Indexing",
+                    b: "<strong>Tool:</strong> BGE-M3 (BAAI/bge-m3, local GPU). QdrantIndexer. EmbeddingCache.<br><br>Generates 3-level embedding per node: content_embedding, parent_context_embedding, child_aggregation_embedding. Indexed in Qdrant by doc_id + ontology_type + domain.<br><br>Cache key: sha256(normalized_content + ontology_type + parent_context). Prevents redundant GPU inference for unchanged nodes across document versions.",
+                },
+                s13: {
+                    t: "Stage 13 — Semantic Alignment",
+                    b: "<strong>Tools:</strong> SemanticAlignmentEngine, QdrantSimilaritySearch. <strong>Agent:</strong> A3 for AMBIGUOUS cases only (top-2 within 0.05).<br><br>Composite score = semantic_similarity×0.50 + structural_similarity×0.30 + measurement_overlap×0.20.<br><br>Decisions: >0.85 &rarr; SAME_NODE; 0.60&ndash;0.85 &rarr; MODIFIED_NODE; top-2 within 0.05 &rarr; A3 adjudicates; <0.60 &rarr; NEW/DELETED. Never merges different ontology_types.",
+                },
+                s14: {
+                    t: "Stage 14 — Split/Merge Alignment",
+                    b: "<strong>Tool:</strong> SplitMergeDetector (deterministic signals). <strong>Agent:</strong> A4 for confirmation.<br><br>Detects 1:N section splits and N:1 merges. Purpose: prevent document reorganizations from generating false DELETED_NODE + NEW_NODE findings that would be reported as compliance additions/removals.<br><br>A4 confirms SPLIT | MERGE | NOT_SPLIT_MERGE and reports any missing sub-requirements.",
+                },
+                s15: {
+                    t: "Stage 15 — Graph Diff",
+                    b: "<strong>Tool:</strong> GraphDiffEngine + Neo4jSubgraphReader. <strong>Type:</strong> Deterministic.<br><br>Diff types: NODE_ADDED, NODE_REMOVED, NODE_MODIFIED, EDGE_ADDED, EDGE_REMOVED, EDGE_RETARGETED, MEASUREMENT_CHANGED, THRESHOLD_CHANGED, STANDARD_VERSION_CHANGED, EVIDENCE_CHAIN_CHANGED.<br><br><strong>Hard rule:</strong> GraphDiffEngine detects changes only. It does NOT assign compliance severity. Severity is assigned by the rules engine in Stage 16.",
+                },
+                s16: {
+                    t: "Stage 16 — Deterministic Rules Engine",
+                    b: "<strong>Tool:</strong> DeterministicRulesEngine + RuleRegistry. <strong>Type:</strong> Fully deterministic &mdash; zero LLM calls.<br><br>margin = limit_dBµV/m - measured_dBµV/m. Severity: ≥+3dB=INFO, 0&ndash;+3=LOW (MARGINAL), -3&ndash;0=MEDIUM (FAIL), <-3=HIGH (FAIL). Optional k=2 uncertainty model (95% CI).<br><br>Every finding includes: rule_id, rule_version, source_doc, page, bbox, clause, standard_id, evidence_chain_id, extraction_confidence.<br><br><strong>Hard rule:</strong> This must run with no LLM available.",
+                },
+                s17: {
+                    t: "Stage 17 — Review Queue Triage",
+                    b: "<strong>Tool:</strong> ReviewQueueWriter. <strong>Agent:</strong> A6 (grouping + priority + explanation).<br><br>Collects all items flagged across stages 1&ndash;16: low-confidence classifications, ambiguous alignments, incomplete evidence chains, OCR-risk measurements, unresolved standard versions, Layer D relationship proposals.<br><br>A6 groups by category and priority. Writes plain-English explanations.<br><br><strong>Hard rule:</strong> Comparison cannot be marked COMPLETED unless review_required=false OR all review items are resolved by human.",
+                },
+                s18: {
+                    t: "Stage 18 — Explanation + Report Generation",
+                    b: "<strong>Agents:</strong> A7 (Explanation), A8 (Report Generation).<br><br>A7 writes 2&ndash;4 sentence explanations per finding. A8 assembles: Executive Summary, Critical Findings (HIGH), Warnings (MEDIUM), Informational (LOW/INFO), Pending Review Items, Ignored Changes Panel (mandatory), Traceability Table.<br><br><strong>Hard rule:</strong> A7 and A8 describe deterministic findings &mdash; they cannot create new ones. Severity and result values come from Stage 16 only.",
+                },
+            };
+
+            function sd(key, el) {
+                document
+                    .querySelectorAll(".stage")
+                    .forEach((s) => s.classList.remove("sel"));
+                el.classList.add("sel");
+                const p = document.getElementById("dpanel");
+                const d = D[key];
+                if (!d) return;
+                document.getElementById("dp-t").textContent = d.t;
+                document.getElementById("dp-b").innerHTML = d.b;
+                p.classList.add("vis");
+            }
+
+            function sw(name, el) {
+                document
+                    .querySelectorAll(".tab")
+                    .forEach((t) => t.classList.remove("active"));
+                document
+                    .querySelectorAll(".panel")
+                    .forEach((p) => p.classList.remove("active"));
+                el.classList.add("active");
+                document.getElementById("tab-" + name).classList.add("active");
+            }
+        </script>
+    </body>
+</html>

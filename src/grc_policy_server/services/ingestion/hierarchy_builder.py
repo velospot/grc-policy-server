@@ -20,6 +20,62 @@ _TOC_TITLES = {
     "index",
     "document index",
 }
+
+# Non-compliance section detection — expanded beyond TOC to cover all editorial/metadata
+# sections that do not contain testable compliance requirements.  Applied at ingestion time
+# so these nodes are never indexed and never surface in comparison output.
+_NON_COMPLIANCE_RE = re.compile(
+    r"""(?xi)
+    (?:
+        # Forewords and prefaces (EN/DE/FR/fused)
+        \b(?:vorwort|nationalesvorwort|nationaler\s+vorwort|national\s+foreword
+            |europaisches\s+vorwort|europ[aä]isches\s+vorwort|foreword|preface
+            |avant.propos|danksagung|acknowledgements?)\b
+        # Copyright / reproduction notices (including OCR-fused variants)
+        | \bvervielf[aä]ltigung\b
+        | vervielfaltigung.auchfur          # fused OCR: "Vervielfaltigung-auchfur..."
+        | \bnachdruck\b | \bcopyright\b | \burheberrecht\b | \bimpressum\b
+        | \breproduction\b | \bintellectual\s+property\b
+        | \blegal\s+notice\b | \bdisclaimer\b
+        # Effective date / application date
+        | \banwendungsbeginn\b | \beffective\s+date\b | \bdate\s+of\s+application\b
+        | \bg[uü]ltigkeitsbeginn\b
+        # Amendment / revision / previous editions
+        | \b[aä]nderungen\b | \b[aä]nderungsverzeichnis\b
+        | \bfr[uü]here\s+ausgaben\b | \bfruhereausgaben\b  # fused OCR
+        | \bamendment\b | \brevision\s+history\b | \bchange\s+log\b
+        | \brevisionshistorie\b | \bdokument\s+history\b | \bchange\s+record\b
+        # Relationship sections and cross-reference metadata
+        | \bzusammenhang\s+mit\b | zusammenhangmit   # fused OCR
+        | \brelationship\s+with\b
+        | \bnormative\s+verweisungen\b
+        # European/international standard metadata headers
+        | \beurop[aä]ische\s+norm\b | \beuropean\s+standard\b
+        | \bnorme\s+europ[eé]enne\b
+        # TOC / figure lists (in addition to _TOC_TITLES)
+        | \binhaltsverzeichnis\b | \babbildungsverzeichnis\b | \btabellenverzeichnis\b
+        | \btable\s+of\s+contents\b | \blist\s+of\s+(?:figures|tables)\b
+        # Blank pages
+        | \bblank\s+page\b | \bintentionally\s+left\s+blank\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Terms to match after stripping all non-alphanumeric characters (catches fused OCR text)
+_NON_COMPLIANCE_FUSED_TERMS = frozenset({
+    "nationalesvorwort",
+    "europaischesvorwort",
+    "europaischenorm",
+    "vervielfaltigung",
+    "anwendungsbeginn",
+    "fruhereausgaben",
+    "anderungen",
+    "revisionshistorie",
+    "zusammenhangmit",
+    "anderungsverzeichnis",
+})
+
 _TOC_LINE_RE = re.compile(
     r"^\s*(?:[A-Za-z0-9][A-Za-z0-9 .,'()\-/]{2,}?)(?:\.{2,}|\s{2,})(?:[A-Za-z]?\d+[A-Za-z]?)\s*$"
 )
@@ -31,6 +87,15 @@ _VERSION_SUFFIX_RE = re.compile(
     r"(?i)(?:[-_ ](?:v(?:ersion)?[-_ ]?)?\d+(?:\.\d+)*)$"
 )
 _MAX_SECTION_TEXT = 5000
+
+# Section number hierarchy expansion -------------------------------------------
+# Matches titles that start with a multi-level dotted numeric prefix:
+#   "5.1.2.2 Durchfuhrung" → prefix="5.1.2.2", rest="Durchfuhrung"
+#   "10.4"                 → prefix="10.4",     rest=""
+_SEC_NUM_PREFIX_RE = re.compile(r"^(\d+(?:\.\d+)+)\s*(.*)")
+# Detects OCR fusion where a number and a word are run together without a space:
+#   "5.1.3.2Durchfuhrung" → "5.1.3.2 Durchfuhrung"
+_SEC_FUSION_RE = re.compile(r"(\d+(?:\.\d+)+)([A-Za-zÄÖÜäöüß])")
 
 # Header/footer suppression -----------------------------------------------
 # Patterns that identify page headers and footers to exclude from hierarchy.
@@ -375,12 +440,54 @@ def document_family_from_filename(filename: str) -> str:
     return slugify_text(simplified) or "document"
 
 
+def _repair_section_title_fusion(title: str) -> str:
+    """Insert a space where a numeric section prefix is fused with the next word.
+
+    Example: "5.1.3.2Durchfuhrung" → "5.1.3.2 Durchfuhrung"
+    """
+    return _SEC_FUSION_RE.sub(r"\1 \2", title)
+
+
+def _expand_numeric_section_path(titles: tuple[str, ...]) -> tuple[str, ...]:
+    """Expand a single-element flat path with a multi-level section number into ancestors.
+
+    When Docling emits all section headers as body siblings (flat parse tree), the
+    section hierarchy implied by the dotted number is lost.  This function reconstructs
+    it so that "5.1.2.2 Durchfuhrung" becomes ("5", "5.1", "5.1.2", "5.1.2.2 Durchfuhrung").
+
+    Only applied when the input tuple has exactly one element (Docling flat case).
+    Multi-element tuples are returned unchanged (Docling already nested them correctly).
+    """
+    if len(titles) != 1:
+        return titles
+
+    raw = _repair_section_title_fusion(titles[0])
+    m = _SEC_NUM_PREFIX_RE.match(raw)
+    if not m:
+        # Non-numeric heading (e.g. "Legende", "Foreword") — return repaired string only
+        return (raw,) if raw != titles[0] else titles
+
+    num_part = m.group(1)   # "5.1.2.2"
+    rest = m.group(2).strip()  # "Durchfuhrung"
+    components = num_part.split(".")
+
+    if len(components) <= 1:
+        # Single-level like "5" — no ancestor expansion needed
+        return (raw,)
+
+    # Build intermediate ancestors: ("5", "5.1", "5.1.2") + full title
+    ancestors = tuple(".".join(components[:i]) for i in range(1, len(components)))
+    full_title = f"{num_part} {rest}".strip() if rest else num_part
+    return ancestors + (full_title,)
+
+
 def _normalize_section_titles(chunk: ParsedChunk) -> tuple[str, ...]:
     titles = tuple(title.strip() for title in chunk.section_path if title and title.strip())
     if titles:
-        return titles
+        return _expand_numeric_section_path(titles)
     if chunk.chunk_type == "heading" and chunk.title:
-        return (chunk.title.strip(),)
+        t = chunk.title.strip()
+        return _expand_numeric_section_path((t,))
     return ()
 
 
@@ -404,6 +511,23 @@ def _anchor_text(chunk: ParsedChunk) -> str:
     return chunk.chunk_type
 
 
+def _is_non_compliance_title(title: str) -> bool:
+    """Return True when a section title is non-compliance content (foreword, copyright, etc.).
+
+    Uses two strategies:
+    1. Regex matching on normalized title (handles spaced text)
+    2. Fused-term matching after stripping all non-alphanumeric chars (handles OCR artifacts)
+    """
+    if not title:
+        return False
+    norm = normalize_text(title)
+    if _NON_COMPLIANCE_RE.search(norm):
+        return True
+    # Fused/OCR variant: strip all non-alphanumeric and check against known fused terms
+    stripped = re.sub(r"[^a-zA-Z0-9]", "", norm).lower()
+    return any(term in stripped for term in _NON_COMPLIANCE_FUSED_TERMS)
+
+
 def _classify_toc_block(
     *,
     title: str | None,
@@ -419,6 +543,14 @@ def _classify_toc_block(
         return "document_index"
     if normalized_title in _TOC_TITLES or normalized_sections & _TOC_TITLES:
         return "table_of_contents"
+
+    # Non-compliance editorial sections: foreword, copyright, dates, amendments, etc.
+    # Check the section title and all ancestor section titles.
+    if _is_non_compliance_title(title or ""):
+        return "non_compliance_section"
+    for part in section_titles:
+        if _is_non_compliance_title(part):
+            return "non_compliance_section"
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) < 3:

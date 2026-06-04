@@ -11,7 +11,7 @@ wheels/
 localconf/*
 neo4j*
 weaviate_data/*
-data/uploads
+data/*
 todo
 .claude
 

@@ -57,6 +57,7 @@ class KeyDifference(BaseModel):
     markdownDiffSummary: Optional[str] = None  # LLM-generated markdown diff summary
     requiresHumanReview: bool = False
     severityConfidence: Optional[float] = None
+    complianceExplanation: Optional[str] = None  # deterministic compliance-semantic narrative
 
 
 class ActionItem(BaseModel):
@@ -96,6 +97,9 @@ class ComparisonResult(BaseModel):
     comparisonMode: Literal["auditor_grade", "simple"] = "auditor_grade"
     requireHumanReview: bool = False
     hiddenDiffsCount: int = 0
+    warnings: List[str] = Field(default_factory=list)
+    suppressedDiffsCount: int = 0  # LOW-severity diffs excluded from keyDifferences
+    skippedSections: List[str] = Field(default_factory=list)  # sections with no semantic change
 
 
 class CompareRequest(BaseModel):

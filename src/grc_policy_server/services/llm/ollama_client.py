@@ -376,7 +376,7 @@ FOLLOWUP_PROMPTS = {
 }
 
 PROMPT_MARKDOWN_DIFF_CLAUSE = """
-You are an EMC compliance auditor. Produce a brief semantic diff in markdown. Change type: {change_type}.
+You are an EMC compliance auditor. Produce a brief semantic difference. Change type: {change_type}.
 
 {source_block}
 
@@ -388,18 +388,12 @@ Rules — follow strictly:
 - No explanations, commentary, or notes about what is or is not applicable.
 - Write in the same language as the source text.
 
-Output EXACTLY ONE of the following formats — never combine them:
 
 Format A — inline bullets (word/phrase-level changes):
 - Removed: <span style="color:red">~~phrase~~</span>
 - Added: <span style="color:green">**phrase**</span>
 - Modified: <span style="color:red">~~old~~</span> → <span style="color:green">**new**</span>
 
-Format B — fenced diff block (sentence/line-level changes):
-```diff
-- removed sentence or line
-+ added sentence or line
-```
 """.strip()
 
 PROMPT_MARKDOWN_DIFF_TABLE = """
@@ -958,7 +952,9 @@ class OllamaClient(BaseLLM):
         }
         accumulated: list[str] = []
         try:
-            async with self._async_client.stream("POST", "/api/generate", json=payload) as resp:
+            async with self._async_client.stream(
+                "POST", "/api/generate", json=payload
+            ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line.strip():
@@ -996,7 +992,10 @@ class OllamaClient(BaseLLM):
 
         if not changed_cells and not old_markdown and not new_markdown:
             return ""
-        lang_display = self._language_hint(language).strip() or "the same language as the source text"
+        lang_display = (
+            self._language_hint(language).strip()
+            or "the same language as the source text"
+        )
         prompt = PROMPT_TABLE_STRUCTURED_DIFF.format(
             change_type=change_type,
             changed_cells_json=_json.dumps(changed_cells, ensure_ascii=False, indent=2),
@@ -1043,7 +1042,7 @@ class OllamaClient(BaseLLM):
         last_exc: Exception | None = None
         for attempt in range(self.settings.max_retries + 1):
             if attempt > 0:
-                backoff = min(2.0 ** attempt, 30.0)
+                backoff = min(2.0**attempt, 30.0)
                 await asyncio.sleep(random.uniform(backoff * 0.75, backoff * 1.25))
             try:
                 r = await self._async_client.post(path, json=payload)
@@ -1143,7 +1142,11 @@ class OllamaClient(BaseLLM):
             max_questions=max_questions,
         )
 
-    _LANGUAGE_NAMES = {"en": "English", "de": "German (Deutsch)", "fr": "French (Français)"}
+    _LANGUAGE_NAMES = {
+        "en": "English",
+        "de": "German (Deutsch)",
+        "fr": "French (Français)",
+    }
 
     def _prompt_markdown_diff_summary(
         self,
@@ -1314,9 +1317,7 @@ class OllamaClient(BaseLLM):
                     "changeSeverity": d.changeSeverity,
                     "doc1Content": d.doc1Content,
                     "doc2Content": d.doc2Content,
-                    "changes": [
-                        change.model_dump(mode="json") for change in d.changes
-                    ],
+                    "changes": [change.model_dump(mode="json") for change in d.changes],
                     "doc1Citation": (
                         d.doc1Reference.model_dump(mode="json")
                         if d.doc1Reference

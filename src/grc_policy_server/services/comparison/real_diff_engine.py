@@ -337,6 +337,12 @@ class RealDiffEngine:
         left_nodes = self._stitch_page_fragments(left_nodes)
         right_nodes = self._stitch_page_fragments(right_nodes)
 
+        compatibility_warning = self._check_document_compatibility(
+            left_nodes, right_nodes, doc1, doc2
+        )
+        if compatibility_warning:
+            logger.warning("document compatibility warning: %s", compatibility_warning)
+
         # Detect language from first document's text for better LLM accuracy
         language = await self._detect_document_language(left_nodes)
         logger.info("detected document language=%s", language or "unknown")
@@ -519,11 +525,49 @@ class RealDiffEngine:
             follow_up_questions=follow_up_questions,
         )
 
+        # Suppress LOW-severity diffs that are purely cosmetic/formatting/label changes.
+        # Structural LOW changes (split, merge, moved sections) are retained even when LOW
+        # because auditors need to trace section reorganisations.
+        def _is_suppressable_low(d: KeyDifference) -> bool:
+            if d.changeSeverity != "low":
+                return False
+            # Keep structural changes (split, merge, moved, section_renamed)
+            for change in (d.changes or []):
+                if change.location in ("structure", "section"):
+                    return False
+                if any(kw in change.text.lower() for kw in ("split", "merge", "moved", "renamed")):
+                    return False
+            # Keep diffs with compliance explanation that mentions obligation/numeric changes
+            explanation = d.complianceExplanation or ""
+            if any(kw in explanation.lower() for kw in ("obligation", "parameter changed", "removed:", "added:")):
+                return False
+            return True
+
+        suppressed_low = [d for d in diffs if _is_suppressable_low(d)]
+        active_diffs = [d for d in diffs if not _is_suppressable_low(d)]
+        suppressed_count = len(suppressed_low)
+        diffs = active_diffs
+
         hidden_diffs_count = 0
         if not audit_mode:
             visible_diffs = [d for d in diffs if d.changeSeverity != "low"]
             hidden_diffs_count = len(diffs) - len(visible_diffs)
             diffs = visible_diffs
+
+        # Collect sections that were matched but had no semantic change (skipped sections).
+        skipped_sections: list[str] = []
+        for match in matching.matches:
+            if match.distance is not None and match.distance < 0.15:
+                section = str(
+                    (match.left or match.right or {}).get("section_path")
+                    or (match.left or match.right or {}).get("section_path")
+                    or ""
+                )
+                if section and section not in ("Unknown Section", "Unsectioned"):
+                    skipped_sections.append(section)
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        skipped_sections = [s for s in skipped_sections if not (s in seen or seen.add(s))]  # type: ignore[func-returns-value]
 
         require_human_review = any(d.requiresHumanReview for d in diffs)
 
@@ -536,6 +580,9 @@ class RealDiffEngine:
             comparisonMode="auditor_grade" if audit_mode else "simple",
             requireHumanReview=require_human_review,
             hiddenDiffsCount=hidden_diffs_count,
+            warnings=[compatibility_warning] if compatibility_warning else [],
+            suppressedDiffsCount=suppressed_count,
+            skippedSections=skipped_sections[:20],  # cap for payload size
         )
 
         if save_to_db:
@@ -1106,10 +1153,128 @@ class RealDiffEngine:
             ) and starts_with_lowercase(curr_text)
         return False
 
+    def _check_document_compatibility(
+        self,
+        left_nodes: list[dict],
+        right_nodes: list[dict],
+        doc1: "Document",
+        doc2: "Document",
+    ) -> str | None:
+        """Warn when two documents are likely different standards rather than versions.
+
+        Uses two complementary signals:
+
+        Signal 1 — section title word Jaccard: low overlap (<15%) after stripping
+        boilerplate words common to all German/EU standards.
+
+        Signal 2 — normative section number divergence: extracts multi-level numeric
+        section labels (e.g. "5.3.2") and checks whether both documents share a
+        meaningful set of them.  Documents that are different test methods (60068-2-64
+        vs 60068-2-38) will have very different clause numbering.
+
+        Returns a human-readable warning string or None when documents appear compatible.
+        """
+        # Boilerplate words shared by all DIN/IEC standards regardless of content
+        _BOILERPLATE = {
+            "nationalesvorwort", "vervielfaltigung", "auchfurinnerbetrieblichezwecke",
+            "nichtgestattet", "anwendungsbeginn", "europaisches", "vorwort", "anhang",
+            "normative", "informative", "verweisungen", "bibliographie", "literaturhinweise",
+            "begriffe", "definitionen", "allgemein", "allgemeines", "einleitung",
+            "scope", "terms", "definitions", "references", "foreword", "introduction",
+            "annex", "bibliography",
+        }
+
+        def _section_word_set(nodes: list[dict]) -> set[str]:
+            words: set[str] = set()
+            for node in nodes:
+                path: list = node.get("section_titles") or node.get("heading_path") or []
+                title = str(path[-1] if path else "").lower()
+                title = re.sub(r"^\d+(?:\.\d+)*\s*", "", title)
+                for w in re.findall(r"[a-zäöüß]{4,}", title):
+                    if w not in _BOILERPLATE:
+                        words.add(w)
+            return words
+
+        def _section_number_set(nodes: list[dict]) -> set[str]:
+            nums: set[str] = set()
+            for node in nodes:
+                path: list = node.get("section_titles") or node.get("heading_path") or []
+                for part in path:
+                    m = re.match(r"^(\d+(?:\.\d+)+)", str(part).strip())
+                    if m:
+                        nums.add(m.group(1))
+            return nums
+
+        left_words = _section_word_set(left_nodes)
+        right_words = _section_word_set(right_nodes)
+
+        word_jaccard = 0.0
+        if left_words and right_words:
+            union = left_words | right_words
+            word_jaccard = len(left_words & right_words) / len(union)
+
+        left_nums = _section_number_set(left_nodes)
+        right_nums = _section_number_set(right_nodes)
+        num_jaccard = 0.0
+        if left_nums and right_nums:
+            union_n = left_nums | right_nums
+            num_jaccard = len(left_nums & right_nums) / len(union_n)
+
+        # Both signals low → incompatible
+        if word_jaccard < 0.15 and num_jaccard < 0.15:
+            return (
+                f"Low section-title overlap ({word_jaccard:.0%}) and low section-number "
+                f"overlap ({num_jaccard:.0%}) between '{doc1.name}' and '{doc2.name}'. "
+                f"These documents may be different standards rather than versions of the "
+                f"same standard. Comparison results may be unreliable."
+            )
+
+        # If word Jaccard is low but section numbers match well, probably fine (different language versions)
+        if word_jaccard < 0.10 and num_jaccard < 0.20:
+            return (
+                f"Low content overlap ({word_jaccard:.0%} title, {num_jaccard:.0%} section numbers) "
+                f"between '{doc1.name}' and '{doc2.name}'. "
+                f"Documents may be different standards. Review comparison results carefully."
+            )
+
+        return None
+
+    # Fused OCR terms for non-compliance heading detection (no word boundaries available)
+    _FUSED_SKIP_TERMS = frozenset({
+        "nationalesvorwort",
+        "europaischesvorwort",
+        "europaischenorm",
+        "vervielfaltigung",
+        "anwendungsbeginn",
+        "fruhereausgaben",
+        "anderungen",
+        "revisionshistorie",
+        "zusammenhangmit",
+        "anderungsverzeichnis",
+        "normativeverweisungen",
+    })
+
+    def _is_skip_heading(self, heading: str) -> bool:
+        """Return True when a section heading is a non-compliance boilerplate section.
+
+        Checks both the word-boundary regex (for properly spaced text) and a
+        fused-term lookup (for OCR-corrupted headings like "NationalesVorwort").
+        """
+        if not heading:
+            return False
+        if _SKIP_HEADING_RE.match(heading):
+            return True
+        # Fused/OCR variant: strip non-alphanumeric and check against known terms
+        stripped = re.sub(r"[^a-zA-Z0-9]", "", heading).lower()
+        return any(term in stripped for term in self._FUSED_SKIP_TERMS)
+
     def _filter_non_compliance_nodes(self, nodes: list[dict]) -> list[dict]:
         """Remove nodes whose top-level heading is a non-compliance section
         (preface, ToC, revision history, copyright, etc.).
         Filtering happens before matching to avoid noise diffs.
+
+        Handles both word-spaced headings (e.g. "Nationales Vorwort") and
+        OCR-fused headings (e.g. "NationalesVorwort") which break word-boundary regex.
         """
         result = []
         skip_prefix: str | None = None
@@ -1117,7 +1282,7 @@ class RealDiffEngine:
             path: list = node.get("section_titles") or node.get("heading_path") or []
             top_heading = str(path[0]).strip() if path else ""
             path_str = " / ".join(str(p) for p in path).lower()
-            if top_heading and _SKIP_HEADING_RE.match(top_heading):
+            if top_heading and self._is_skip_heading(top_heading):
                 skip_prefix = top_heading.lower()
                 continue
             if skip_prefix and path_str.startswith(skip_prefix):
@@ -1202,6 +1367,12 @@ class RealDiffEngine:
         for left_node in matching.removed:
             if self._is_non_semantic_node(left_node):
                 continue
+            # Final backstop: suppress ADDED/REMOVED from non-compliance sections even
+            # if they slipped through ingestion or comparison-phase filtering.
+            node_path = left_node.get("section_titles") or left_node.get("heading_path") or []
+            node_top = str(node_path[0]).strip() if node_path else ""
+            if node_top and self._is_skip_heading(node_top):
+                continue
             records.append(
                 self._change_record_for_pair(
                     change_type="REMOVED",
@@ -1216,6 +1387,10 @@ class RealDiffEngine:
 
         for right_node in matching.added:
             if self._is_non_semantic_node(right_node):
+                continue
+            node_path = right_node.get("section_titles") or right_node.get("heading_path") or []
+            node_top = str(node_path[0]).strip() if node_path else ""
+            if node_top and self._is_skip_heading(node_top):
                 continue
             records.append(
                 self._change_record_for_pair(
@@ -1504,6 +1679,85 @@ class RealDiffEngine:
                 )
         return changes
 
+    def _generate_compliance_explanation(self, record: ChangeRecord) -> str:
+        """Generate a deterministic compliance-semantic explanation for a change record.
+
+        Produces human-readable compliance impact text using the already-extracted
+        fields (obligation change, numeric changes, alignment type).  No LLM required.
+        """
+        ct = record.change_type
+        vc = record.requirement_verb_change or {}
+        nc = record.numeric_changes or []
+        at = record.alignment_type
+
+        parts: list[str] = []
+
+        # 1. Structural/alignment context
+        if at in ("section_renamed", "moved"):
+            parts.append(
+                "Section restructured: content relocated (section numbering or title changed). "
+                "Verify compliance requirement traceability against the new section reference."
+            )
+
+        # 2. Obligation/verb change
+        if vc:
+            old_v = vc.get("old_verb") or vc.get("old") or ""
+            new_v = vc.get("new_verb") or vc.get("new") or ""
+            direction = vc.get("direction", "changed")
+            if old_v or new_v:
+                if direction == "weakened":
+                    parts.append(
+                        f"Obligation weakened: '{old_v}' → '{new_v}'. "
+                        "This relaxes the compliance requirement — verify if intentional and update test records."
+                    )
+                elif direction == "strengthened":
+                    parts.append(
+                        f"Obligation strengthened: '{old_v}' → '{new_v}'. "
+                        "This tightens the compliance requirement — additional test evidence may be required."
+                    )
+                elif direction == "inverted":
+                    parts.append(
+                        f"Obligation inverted: '{old_v}' → '{new_v}'. "
+                        "A prohibition may have become a permission or vice versa — critical review required."
+                    )
+                else:
+                    parts.append(f"Obligation changed: '{old_v}' → '{new_v}'.")
+
+        # 3. Numeric / test-parameter changes
+        for nc_item in (nc or [])[:3]:
+            old_val = nc_item.get("old") or nc_item.get("old_value")
+            new_val = nc_item.get("new") or nc_item.get("new_value")
+            change_t = nc_item.get("type", "modified")
+            if old_val and new_val and change_t == "modified":
+                parts.append(
+                    f"Test parameter changed: {old_val} → {new_val}. "
+                    "Review impact on pass/fail criteria and update test documentation."
+                )
+            elif change_t == "added" and new_val:
+                parts.append(f"New test parameter specified: {new_val}.")
+            elif change_t == "removed" and old_val:
+                parts.append(f"Test parameter removed: {old_val}. Verify whether a replacement exists.")
+
+        # 4. Fallback by change type
+        if not parts:
+            if ct == "ADDED":
+                parts.append(
+                    "New compliance requirement added. "
+                    "Review for additional obligations, test procedures, or documentation burden."
+                )
+            elif ct == "REMOVED":
+                parts.append(
+                    "Compliance requirement removed. "
+                    "Verify whether this is superseded by another section or intentionally deleted."
+                )
+            elif ct == "MODIFIED":
+                parts.append(
+                    "Compliance requirement modified. "
+                    "Review changed content for impact on test procedures, obligation level, or acceptance criteria."
+                )
+
+        return " ".join(parts) or "Compliance impact: review this change against current test procedures."
+
     def _key_difference_from_record(self, record: ChangeRecord) -> KeyDifference:
         return KeyDifference(
             changeType=record.change_type,
@@ -1517,6 +1771,7 @@ class RealDiffEngine:
             nodeType=record.node_type,
             changes=record.changes,
             requiresHumanReview=record.requires_human_review,
+            complianceExplanation=self._generate_compliance_explanation(record),
         )
 
     def _alignment_type(self, match: ClauseMatch) -> str:
@@ -1533,7 +1788,14 @@ class RealDiffEngine:
             return ""
         if node.get("node_type") == "table":
             return self._format_table_content(node)
-        return self._short(str(node.get("text") or ""))
+        # Fall through candidate fields so content is never silently empty
+        text = (
+            str(node.get("text") or "").strip()
+            or str(node.get("clean_text") or "").strip()
+            or str(node.get("canonical_text") or "").strip()
+            or str(node.get("comparison_text") or "").strip()
+        )
+        return self._short(text)
 
     def _source_text(self, node: dict | None) -> str:
         if not node:
@@ -2453,14 +2715,23 @@ class RealDiffEngine:
 
     def _reference_source_text(self, chunk: dict) -> str:
         if chunk.get("node_type") == "table":
-            # Return caption or section as sourceText — structured data goes in tableData
+            # Prefer markdown table content for audit citations; fall back to caption/title.
+            # Previously this returned only the caption, leaving reviewers with no evidence body.
+            markdown = str(chunk.get("markdown_text") or "").strip()
+            if markdown:
+                # Return first 8 lines — enough context without flooding the audit record
+                lines = markdown.split("\n")
+                return "\n".join(lines[:8]) + ("..." if len(lines) > 8 else "")
+            text = str(chunk.get("text") or "").strip()
+            if text and len(text) > 20:
+                return text
             caption = str(
                 chunk.get("table_normalized_caption")
                 or (chunk.get("canonical_metadata") or {}).get("normalized_caption")
                 or chunk.get("title")
                 or ""
             ).strip()
-            return caption or str(chunk.get("text") or "")
+            return caption or text
         if chunk.get("node_type") == "formula":
             latex = str(
                 (chunk.get("canonical_metadata") or {}).get("formula_latex") or ""

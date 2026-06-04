@@ -258,12 +258,32 @@ def _extract_numbers(text: str) -> list[str]:
     ]
 
 
+# Matches LaTeX subscript/superscript notation and inline math: u$_{n}$, $\alpha$
+_LATEX_INLINE_RE = re.compile(r'\$_\{([^}]+)\}\$|\$\^\{([^}]+)\}\$|\$([^$]+)\$')
+# Multiplication operator variants in formulas: ·, ×, x (when surrounded by digits/spaces)
+_MULT_OPERATOR_RE = re.compile(r'[·×]')
+
+
+def _strip_latex_and_math(text: str) -> str:
+    """Remove LaTeX subscript/superscript and normalise math operators to ASCII.
+
+    Ensures that typographic variants of the same formula compare equal:
+    "2 · u_{n} + 500" ≡ "2 * un + 500" ≡ "2 · u$_{n}$ + 500"
+    """
+    t = _LATEX_INLINE_RE.sub(lambda m: (m.group(1) or m.group(2) or m.group(3) or ""), text)
+    t = _MULT_OPERATOR_RE.sub("*", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def is_cosmetic_text_change(left_text: str | None, right_text: str | None) -> bool:
     left = (left_text or "").strip()
     right = (right_text or "").strip()
     if not left or not right or left == right:
         return False
     if _normalize_cosmetic_text(left) == _normalize_cosmetic_text(right):
+        return True
+    # LaTeX / math notation change (e.g. "un" vs "u$_{n}$", "·" vs "×")
+    if _strip_latex_and_math(left) == _strip_latex_and_math(right):
         return True
     # _compact_alnum fallback strips decimal points, making "3.5 V" ≡ "35 V".
     # Only apply when numeric sequences (with decimals) are identical.

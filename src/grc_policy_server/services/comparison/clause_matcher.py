@@ -84,6 +84,8 @@ class ClauseMatcher:
         self.thresholds = thresholds
         self.topk = topk
         self.language = language
+        if not self.__class__._FOLDED_SYNONYMS:
+            self.__class__._build_folded_synonyms()
 
     def match(
         self,
@@ -128,6 +130,33 @@ class ClauseMatcher:
             matched_right_ids=matched_right_ids,
         )
 
+        unmatched_left_nodes = [
+            node for node in left if str(node.get("chunk_id") or "") not in matched_left
+        ]
+        unmatched_right_nodes = [
+            node
+            for node in right
+            if str(node.get("chunk_id") or "") not in matched_right_ids
+        ]
+
+        # Detect section-level renaming: groups of REMOVED nodes whose aggregated
+        # content closely mirrors a group of ADDED nodes (cross-chapter renumbering).
+        renamed_pairs = self._detect_section_renaming(
+            unmatched_left_nodes, unmatched_right_nodes
+        )
+        for left_group, right_group in renamed_pairs:
+            for node in left_group:
+                nid = str(node.get("chunk_id") or "")
+                if nid and nid not in matched_left:
+                    matched_left[nid] = ClauseMatch(
+                        distance=0.15,
+                        matched_by="section_renamed",
+                        left=node,
+                        right=right_group[0] if right_group else node,
+                    )
+            for node in right_group:
+                matched_right_ids.add(str(node.get("chunk_id") or ""))
+
         removed = [
             node for node in left if str(node.get("chunk_id") or "") not in matched_left
         ]
@@ -142,6 +171,67 @@ class ClauseMatcher:
             added=added,
             section_matches=[(left, right) for left, right, _ in matched_section_keys],
         )
+
+    def _detect_section_renaming(
+        self,
+        unmatched_left: list[dict],
+        unmatched_right: list[dict],
+        min_overlap: float = 0.55,
+        min_group_size: int = 2,
+    ) -> list[tuple[list[dict], list[dict]]]:
+        """Detect when an entire section was renumbered between document versions.
+
+        Groups unmatched nodes by their top-level chapter key.  When a left chapter
+        group and a right chapter group have high token overlap (≥ min_overlap) and
+        contain at least min_group_size nodes, classify the pair as section_renamed
+        rather than independent REMOVED + ADDED records.
+
+        Returns a list of (left_group, right_group) node-list pairs.
+        """
+        def _group_by_chapter(nodes: list[dict]) -> dict[str, list[dict]]:
+            groups: dict[str, list[dict]] = defaultdict(list)
+            for node in nodes:
+                sp = str(node.get("section_path") or "")
+                groups[self._chapter_key(sp)].append(node)
+            return groups
+
+        def _agg_text(nodes: list[dict]) -> str:
+            return " ".join(
+                str(n.get("clean_text") or n.get("text") or "") for n in nodes
+            )
+
+        left_groups = _group_by_chapter(unmatched_left)
+        right_groups = _group_by_chapter(unmatched_right)
+
+        rename_edges: list[tuple[float, str, str]] = []
+        for lch, lnodes in left_groups.items():
+            if len(lnodes) < min_group_size:
+                continue
+            lagg = _agg_text(lnodes)
+            if not lagg:
+                continue
+            for rch, rnodes in right_groups.items():
+                if rch == lch or len(rnodes) < min_group_size:
+                    continue
+                ragg = _agg_text(rnodes)
+                if not ragg:
+                    continue
+                score = token_overlap(lagg, ragg, self.language)
+                if score >= min_overlap:
+                    rename_edges.append((score, lch, rch))
+
+        rename_edges.sort(key=lambda e: e[0], reverse=True)
+        pairs: list[tuple[list[dict], list[dict]]] = []
+        used_left: set[str] = set()
+        used_right: set[str] = set()
+        for _score, lch, rch in rename_edges:
+            if lch in used_left or rch in used_right:
+                continue
+            pairs.append((left_groups[lch], right_groups[rch]))
+            used_left.add(lch)
+            used_right.add(rch)
+
+        return pairs
 
     def _select_content_nodes(self, nodes: list[dict]) -> list[dict]:
         content_nodes = [
@@ -219,6 +309,78 @@ class ClauseMatcher:
             )
         return buckets
 
+    @staticmethod
+    def _chapter_key(section_path: str) -> str:
+        """Extract the top-level chapter identifier from a section path.
+
+        "14.4.3 Test results" → "14"
+        "8.3.7 Test result"   → "8"
+        "Foreword"            → "Foreword"
+        """
+        m = re.match(r"^(\d+)(?:\.\d+)*", section_path.strip())
+        return m.group(1) if m else section_path.strip()
+
+    def _match_chapters_by_content(
+        self,
+        left_sections: dict[str, _SectionBucket],
+        right_sections: dict[str, _SectionBucket],
+        matched_left: set[str],
+        matched_right: set[str],
+    ) -> dict[str, str]:
+        """Build a chapter-level correspondence map between left and right documents.
+
+        Groups all sections by their top-level chapter key, then scores chapter
+        pairs by aggregated content similarity.  Returns a mapping from left chapter
+        key to right chapter key for pairs whose content overlap exceeds 0.35.
+
+        This enables the section scorer to give a bonus to sections whose chapters
+        are already matched (e.g. chapter "14" in 2016 → chapter "8" in 2019).
+        """
+        def _agg(sections: dict[str, _SectionBucket], chapter: str) -> str:
+            parts = [
+                s.clean_text
+                for key, s in sections.items()
+                if self._chapter_key(key) == chapter
+            ]
+            return " ".join(p for p in parts if p)
+
+        # Gather distinct chapter keys for unmatched sections on each side
+        left_chapters: set[str] = set()
+        right_chapters: set[str] = set()
+        for key in left_sections:
+            if key not in matched_left:
+                left_chapters.add(self._chapter_key(key))
+        for key in right_sections:
+            if key not in matched_right:
+                right_chapters.add(self._chapter_key(key))
+
+        # Score all chapter pairs by aggregated content token overlap
+        chapter_edges: list[tuple[float, str, str]] = []
+        for lch in left_chapters:
+            lagg = _agg(left_sections, lch)
+            if not lagg:
+                continue
+            for rch in right_chapters:
+                ragg = _agg(right_sections, rch)
+                if not ragg:
+                    continue
+                score = token_overlap(lagg, ragg, self.language)
+                if score >= 0.35:
+                    chapter_edges.append((score, lch, rch))
+
+        chapter_edges.sort(key=lambda e: e[0], reverse=True)
+        chapter_map: dict[str, str] = {}
+        mapped_right: set[str] = set()
+        for score, lch, rch in chapter_edges:
+            if lch in chapter_map or rch in mapped_right:
+                continue
+            # Only record cross-chapter mappings (same numbers are handled by title score)
+            if lch != rch:
+                chapter_map[lch] = rch
+            mapped_right.add(rch)
+
+        return chapter_map
+
     def _match_sections(
         self,
         left_sections: dict[str, _SectionBucket],
@@ -248,14 +410,30 @@ class ClauseMatcher:
                 matched_left.add(left_key)
                 matched_right.add(right_key)
 
+        # Build chapter-level correspondence map so cross-chapter renumbering
+        # (e.g. DNVGL chapter 14 → chapter 8) can still yield section matches.
+        chapter_map = self._match_chapters_by_content(
+            left_sections, right_sections, matched_left, matched_right
+        )
+
         candidate_edges: list[tuple[float, str, str]] = []
         for left_key, left_section in left_sections.items():
             if left_key in matched_left:
                 continue
+            left_chapter = self._chapter_key(left_key)
             for right_key, right_section in right_sections.items():
                 if right_key in matched_right:
                     continue
+                right_chapter = self._chapter_key(right_key)
                 score = self._section_score(left_section, right_section)
+                chapter_is_mapped = chapter_map.get(left_chapter) == right_chapter
+                if chapter_is_mapped:
+                    # Bonus for sections in a pre-matched chapter pair (lifts renumbered sections).
+                    score = min(1.0, score + 0.20)
+                else:
+                    # Penalty for large chapter gap when chapters are NOT in the correspondence map:
+                    # prevents marginal false matches across unrelated chapters.
+                    score = max(0.0, score - self._chapter_divergence_penalty(left_key, right_key))
                 if score >= self.thresholds.min_section_score:
                     candidate_edges.append((score, left_key, right_key))
 
@@ -614,31 +792,110 @@ class ClauseMatcher:
         "schockprüfung": "shock test",
         "sicherheit": "safety",
         "schutzgrad": "protection degree",
+        # Additional German technical terms (post-accent-folding form)
+        "systemtest": "system test",
+        "systemprufung": "system test",       # after accent folding: Systemprüfung → systemprufung
+        "systemprüfung": "system test",
+        "ausfuehrung": "implementation",      # Ausführung
+        "ausfuhrung": "implementation",
+        "durchfuehrung": "procedure",         # Durchführung
+        "durchfuhrung": "procedure",
+        "pruefstand": "test bench",           # Prüfstand
+        "prüfstand": "test bench",
+        "auswertung": "evaluation",
+        "beurteilung": "assessment",
+        "ergebnis": "result",
+        "ergebnisse": "results",
+        "prüfergebnis": "test result",
+        "pruefergebnis": "test result",
+        "prüfbedingung": "test condition",
+        "pruefbedingung": "test condition",
+        "prüfkörper": "test specimen",
+        "pruefkoerper": "test specimen",
+        "grenzwert": "limit",
+        "grenzwerte": "limits",
+        "pegels": "level",
+        "prüfpegel": "test level",
+        "pruefpegel": "test level",
+        "schutzziele": "protection objectives",
+        "schutzmaßnahmen": "protective measures",
+        "schutzmasnahmen": "protective measures",
     }
+
+    # Pre-computed accent-folded version of HEADING_SYNONYMS for fast lookup.
+    # Built lazily as a class attribute so it's shared across all instances.
+    _FOLDED_SYNONYMS: dict[str, str] = {}
+
+    @classmethod
+    def _build_folded_synonyms(cls) -> None:
+        """Populate _FOLDED_SYNONYMS from HEADING_SYNONYMS with folded keys."""
+        fold_map = {"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss",
+                    "Ä": "ae", "Ö": "oe", "Ü": "ue"}
+
+        def _fold(s: str) -> str:
+            for src, dst in fold_map.items():
+                s = s.replace(src, dst)
+            return s.lower()
+
+        cls._FOLDED_SYNONYMS = {_fold(k): v for k, v in cls.HEADING_SYNONYMS.items()}
+
+    # Accent folding map: German umlauts → ASCII equivalents for comparison
+    _ACCENT_FOLD: dict[str, str] = {
+        "ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss",
+        "Ä": "ae", "Ö": "oe", "Ü": "ue",
+    }
+
+    def _fold_accents(self, text: str) -> str:
+        for src, dst in self._ACCENT_FOLD.items():
+            text = text.replace(src, dst)
+        return text
 
     def _normalize_section_title(self, title: str) -> str:
         """Strip leading section numbers/keywords and apply bilingual synonym mapping.
 
+        Improvements over baseline:
+        - Whitespace normalization (collapse, strip)
+        - Fused-word splitting (CamelCase and digit-letter boundaries)
+        - German accent folding (ä→ae, ö→oe, ü→ue, ß→ss) for cross-version comparison
+        - Extended bilingual HEADING_SYNONYMS including Systemtest/Systemprüfung etc.
+
         This enables SequenceMatcher to pair sections that were renamed
-        from German to English (or vice versa) across document versions.
+        from German to English (or vice versa), or where OCR fused words together.
         """
-        cleaned = self._SECTION_NUMBER_RE.sub('', title).strip()
+        # Step 0: Normalize whitespace; split fused words at CamelCase and digit-letter junctions
+        t = re.sub(r"\s+", " ", title).strip()
+        t = re.sub(r"([a-z])([A-Z])", r"\1 \2", t)      # "Testresult" → "Test result"
+        t = re.sub(r"(\d)([A-Za-z])", r"\1 \2", t)      # "6.2.5Testresult" → "6.2.5 Testresult"
+        t = re.sub(r"([A-Za-z])(\d)", r"\1 \2", t)      # "TestLevel3" → "Test Level 3"
+        # Step 1: Accent folding before lowercasing
+        t = self._fold_accents(t)
+        t = t.lower()
+        cleaned = self._SECTION_NUMBER_RE.sub('', t).strip()
         if not cleaned:
-            return title
-        # Apply synonym substitution token by token
+            return t
+        # Step 2: Synonym substitution token by token (bigrams first, then unigrams)
         tokens = cleaned.split()
         normalized_tokens = []
         i = 0
         while i < len(tokens):
-            # Try two-token phrases first, then single tokens
             if i + 1 < len(tokens):
                 bigram = f"{tokens[i]} {tokens[i + 1]}"
-                if bigram in self.HEADING_SYNONYMS:
-                    normalized_tokens.append(self.HEADING_SYNONYMS[bigram])
+                # Try both accent-folded form and original (dict may have either)
+                bigram_folded = self._fold_accents(bigram)
+                result = self.HEADING_SYNONYMS.get(bigram_folded) or self.HEADING_SYNONYMS.get(bigram)
+                if result:
+                    normalized_tokens.append(result)
                     i += 2
                     continue
             tok = tokens[i]
-            normalized_tokens.append(self.HEADING_SYNONYMS.get(tok, tok))
+            tok_folded = self._fold_accents(tok)
+            # Try: accent-folded, original, and with/without umlaut chars
+            normalized_tokens.append(
+                self.HEADING_SYNONYMS.get(tok_folded)
+                or self.HEADING_SYNONYMS.get(tok)
+                or self._FOLDED_SYNONYMS.get(tok_folded)
+                or tok
+            )
             i += 1
         return " ".join(normalized_tokens)
 
@@ -764,6 +1021,17 @@ class ClauseMatcher:
             + 0.10 * numeric_ov
         )
 
+    @staticmethod
+    def _chapter_divergence_penalty(left_key: str, right_key: str) -> float:
+        """Return a score penalty (0.0 or 0.10) when top-level chapter numbers diverge significantly."""
+        lm = re.match(r"^(\d+)", left_key.strip())
+        rm = re.match(r"^(\d+)", right_key.strip())
+        if lm and rm:
+            diff = abs(int(lm.group(1)) - int(rm.group(1)))
+            if diff > 3:
+                return 0.10
+        return 0.0
+
     def _clause_score(self, left: dict, right: dict) -> float:
         # Use table-specific scoring for tables
         if left.get("node_type") == "table" and right.get("node_type") == "table":
@@ -826,6 +1094,75 @@ class ClauseMatcher:
             return None
         return SequenceMatcher(None, left_title, right_title).ratio()
 
+    _LATEX_SUB_RE = re.compile(r'\$_\{([^}]+)\}\$|\$\^\{([^}]+)\}\$|\$([^$]+)\$')
+
+    @staticmethod
+    def _align_table_columns(
+        left_headers: list[str], right_headers: list[str]
+    ) -> dict[int, int]:
+        """Map left column indices to right column indices by header similarity.
+
+        Returns {left_col_idx: right_col_idx} for pairs whose SequenceMatcher
+        ratio ≥ 0.60.  Stub columns (_row_label_N, column_N) are excluded from
+        alignment so they don't distort the match.
+
+        When most columns can be aligned (≥ 60% coverage), the remapping is used
+        in cell scoring to handle column reordering between document versions.
+        """
+        from difflib import SequenceMatcher
+
+        def _sig(h: str) -> str:
+            return re.sub(r"\s+", " ", h.strip().lower())
+
+        left_sigs = [_sig(h) for h in left_headers]
+        right_sigs = [_sig(h) for h in right_headers]
+
+        # Exclude placeholder columns from alignment
+        def _is_stub(s: str) -> bool:
+            return s.startswith("_row_label_") or s.startswith("column_")
+
+        col_map: dict[int, int] = {}
+        used_right: set[int] = set()
+
+        edges: list[tuple[float, int, int]] = []
+        for li, ls in enumerate(left_sigs):
+            if _is_stub(ls):
+                continue
+            for ri, rs in enumerate(right_sigs):
+                if _is_stub(rs) or ri in used_right:
+                    continue
+                score = SequenceMatcher(None, ls, rs).ratio()
+                if score >= 0.60:
+                    edges.append((score, li, ri))
+
+        edges.sort(key=lambda e: e[0], reverse=True)
+        for _, li, ri in edges:
+            if li in col_map or ri in used_right:
+                continue
+            col_map[li] = ri
+            used_right.add(ri)
+
+        return col_map
+
+    @staticmethod
+    def _is_reliable_schema_signature(node: dict) -> bool:
+        """Return False when the schema signature may be based on placeholder headers.
+
+        Placeholder headers like "column_1" arise when row-0 cells are empty
+        (stub/row-label columns).  Treating such signatures as unreliable prevents
+        false schema mismatches across document versions of the same table.
+        """
+        schema = str(node.get("table_schema_signature") or "")
+        if not schema:
+            return False
+        cells = node.get("table_cells") or []
+        row0_cells = [c for c in cells if int(c.get("row", -1)) == 0]
+        has_placeholder = any(
+            str(c.get("text", "")).strip().lower().startswith("column_")
+            for c in row0_cells
+        )
+        return not has_placeholder
+
     def _table_score(self, left: dict, right: dict) -> float:
         """Compute similarity score for tables with lenient handling of structural changes.
 
@@ -861,6 +1198,9 @@ class ClauseMatcher:
 
         left_schema = str(left.get("table_schema_signature") or "")
         right_schema = str(right.get("table_schema_signature") or "")
+        # Only use schema signature for scoring when headers are reliable (no placeholder columns)
+        left_schema_reliable = self._is_reliable_schema_signature(left)
+        right_schema_reliable = self._is_reliable_schema_signature(right)
         left_row_fp = set(left.get("table_row_fingerprints") or [])
         right_row_fp = set(right.get("table_row_fingerprints") or [])
 
@@ -881,8 +1221,8 @@ class ClauseMatcher:
                 title_score = SequenceMatcher(None, lt, rt).ratio()
         has_title = title_score is not None
 
-        schema_score = 0.0
-        if left_schema and right_schema:
+        schema_score = 0.5  # neutral default when signatures are unreliable
+        if left_schema and right_schema and left_schema_reliable and right_schema_reliable:
             schema_score = 1.0 if left_schema == right_schema else 0.0
 
         row_fp_score = 0.0
@@ -929,8 +1269,14 @@ class ClauseMatcher:
         def _norm_cell(text: str) -> str:
             t = str(text).lower().strip()
             t = re.sub(r"\*{1,3}|_{1,3}", "", t)          # strip markdown bold/italic
+            # Normalize LaTeX subscript/superscript: "u$_{n}$" → "un"
+            t = self._LATEX_SUB_RE.sub(
+                lambda m: (m.group(1) or m.group(2) or m.group(3) or ""), t
+            )
             t = _EMC_UNIT_RE.sub(lambda m: m.group(1) + m.group(2).lower(), t)
             t = re.sub(r"\b(level|no\.?|class)\s+(\S)", lambda m: m.group(1) + " " + m.group(2), t)
+            # Normalize multiplication operators (·, ×, x) for formula comparison
+            t = t.replace("·", "*").replace("×", "*")
             t = re.sub(r"\s+", " ", t).strip()
             return t.rstrip(":.,;-")
 
@@ -945,20 +1291,44 @@ class ClauseMatcher:
             if not is_non_semantic_content(str(c.get("text", "")))
         }
 
-        all_positions = set(left_cell_map.keys()) | set(right_cell_map.keys())
+        # Apply column alignment to handle column reordering between versions.
+        # Extract column headers from row-0 cells of each table.
+        def _extract_col_headers(cells_norm: list[dict]) -> list[str]:
+            row0 = sorted(
+                [c for c in cells_norm if int(c.get("row", -1)) == 0],
+                key=lambda c: int(c.get("col", 0)),
+            )
+            return [str(c.get("text", "")).strip().lower() for c in row0]
+
+        left_headers_raw = _extract_col_headers(left_cells_norm)
+        right_headers_raw = _extract_col_headers(right_cells_norm)
+        col_map = self._align_table_columns(left_headers_raw, right_headers_raw)
+
+        # Remap right cell positions using column alignment when ≥50% of left
+        # columns are matched (otherwise position-based comparison is more stable).
+        alignment_coverage = len(col_map) / max(1, len(left_headers_raw))
+        if col_map and alignment_coverage >= 0.5:
+            right_cell_map_aligned = {
+                (row, col_map.get(col, col)): text
+                for (row, col), text in right_cell_map.items()
+            }
+        else:
+            right_cell_map_aligned = right_cell_map
+
+        all_positions = set(left_cell_map.keys()) | set(right_cell_map_aligned.keys())
         if not all_positions:
             cell_score = dim_score
         else:
             exact_matches = sum(
                 1
                 for pos in all_positions
-                if left_cell_map.get(pos) == right_cell_map.get(pos)
+                if left_cell_map.get(pos) == right_cell_map_aligned.get(pos)
                 and left_cell_map.get(pos)  # Non-empty match
             )
             partial_matches = 0.0
             for pos in all_positions:
                 left_val = left_cell_map.get(pos, "")
-                right_val = right_cell_map.get(pos, "")
+                right_val = right_cell_map_aligned.get(pos, "")
                 if left_val and right_val and left_val != right_val:
                     overlap = token_overlap(left_val, right_val, self.language)
                     if overlap > 0.5:

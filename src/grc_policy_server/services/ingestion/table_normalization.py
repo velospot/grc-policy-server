@@ -59,7 +59,18 @@ def normalize_table_headers(headers: list[str]) -> list[str]:
 
 
 def schema_signature(headers: list[str]) -> str:
-    canonical = " | ".join(normalize_table_headers(headers))
+    """SHA256 of normalized headers, skipping row-label stub columns.
+
+    Stub columns (empty header in row 0, used as row-label margin) are tagged
+    "_row_label_N" by extract_headers_from_cells().  Excluding them ensures that
+    the same logical table produces the same signature regardless of whether the
+    stub column is present or absent in a given PDF version.
+    """
+    stable = [
+        h for h in normalize_table_headers(headers)
+        if not h.startswith("_row_label_") and h != "column_1"
+    ]
+    canonical = " | ".join(stable)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -96,19 +107,80 @@ def normalize_table_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _detect_header_depth_by_content(cells: list[dict[str, Any]], num_cols: int) -> int:
+    """Infer header row count using content analysis when Docling flags are absent.
+
+    A row is treated as a header row when:
+    - All columns (or all-but-one) have non-empty text
+    - Average cell text length ≤ 35 characters
+    - Numeric token density < 0.25 (labels, not data values)
+
+    Returns 1, 2, or 3 (capped at 3 for GRC multi-level test matrices).
+    Stops at the first row that fails all three conditions.
+    """
+    rows_by_idx: dict[int, list[str]] = {}
+    for cell in cells:
+        r = int(cell.get("row") or 0)
+        rows_by_idx.setdefault(r, []).append(str(cell.get("text") or "").strip())
+
+    depth = 0
+    for row_idx in sorted(rows_by_idx)[:3]:  # check rows 0, 1, 2 only
+        texts = rows_by_idx[row_idx]
+        non_empty = [t for t in texts if t]
+        if not non_empty:
+            break
+        coverage = len(non_empty) / max(1, num_cols)
+        avg_len = sum(len(t) for t in non_empty) / len(non_empty)
+        numeric_count = sum(1 for t in non_empty if any(ch.isdigit() for ch in t))
+        numeric_density = numeric_count / len(non_empty)
+        is_header_row = coverage >= 0.7 and avg_len <= 35 and numeric_density < 0.25
+        if not is_header_row:
+            break
+        depth += 1
+
+    return max(1, depth)
+
+
 def extract_headers_from_cells(
     cells: list[dict[str, Any]], num_cols: int
 ) -> tuple[list[str], int]:
     """Extract column headers, handling multi-row (grouped) header tables.
 
-    Returns (headers, header_depth) where header_depth is 1 for single-row
-    headers and 2 when row 1 sub-headers were used to fill col_span gaps.
+    Detection priority:
+    1. Docling ``column_header`` / ``is_header`` flags (most reliable)
+    2. col_span > 1 in row 0 heuristic (original behaviour for spanned headers)
+    3. Content-based depth inference (fallback for GRC tables with no flags/spans)
+
+    Returns (headers, header_depth) where header_depth is 1, 2, or 3.
+    Empty stub columns (row 0 col N is blank while data rows have values) receive
+    a ``_row_label_N`` tag so schema_signature() can exclude them from hashing.
     """
     num_cols = max(0, int(num_cols or 0))
     if not cells or num_cols == 0:
         return [f"column_{c + 1}" for c in range(num_cols)], 1
 
-    # Row 0: expand col_span so every covered column position gets the group text
+    # Priority 1: use Docling column_header / is_header flags when available.
+    # These are set by granite-docling VLM or table structure model.
+    flagged_header_cells = [
+        c for c in cells
+        if c.get("column_header") or (c.get("is_header") and int(c.get("row") or 0) == 0)
+    ]
+    if flagged_header_cells:
+        header_rows: dict[int, dict[int, str]] = {}
+        for c in flagged_header_cells:
+            r, col = int(c.get("row") or 0), int(c.get("col") or 0)
+            header_rows.setdefault(r, {})[col] = str(c.get("text") or "").strip()
+        max_header_row = max(header_rows)
+        header_depth = max_header_row + 1
+        headers: list[str] = []
+        for col in range(num_cols):
+            parts = [header_rows.get(r, {}).get(col, "") for r in sorted(header_rows)]
+            parts = [p for p in parts if p]
+            combined = " ".join(parts) if parts else f"_row_label_{col}"
+            headers.append(normalize_header(combined))
+        return _fuse_hyphenated_headers(headers), header_depth
+
+    # Priority 2: col_span > 1 in row 0 → multi-row grouped header.
     row0_coverage: dict[int, str] = {}
     for cell in cells:
         if int(cell.get("row") or 0) != 0:
@@ -119,41 +191,82 @@ def extract_headers_from_cells(
         for c in range(col, col + col_span):
             row0_coverage[c] = text
 
-    # Detect multi-row header: row 0 has at least one cell with col_span > 1
     row0_has_spans = any(
         int(cell.get("col_span") or 1) > 1
         for cell in cells
         if int(cell.get("row") or 0) == 0
     )
-    # Collect row 1 sub-header texts (only when spans detected)
+
+    # Collect row 1 and row 2 sub-headers when spans are detected.
     row1_coverage: dict[int, str] = {}
+    row2_coverage: dict[int, str] = {}
     if row0_has_spans:
         for cell in cells:
-            if int(cell.get("row") or 0) != 1:
-                continue
+            row = int(cell.get("row") or 0)
             col = int(cell.get("col") or 0)
             text = str(cell.get("text") or "").strip()
-            if text:
+            if row == 1 and text:
                 row1_coverage[col] = text
+            elif row == 2 and text:
+                row2_coverage[col] = text
 
-    use_subheaders = bool(row1_coverage)
-    header_depth = 2 if use_subheaders else 1
+    # Priority 3: content-based depth when no spans found.
+    if not row0_has_spans:
+        content_depth = _detect_header_depth_by_content(cells, num_cols)
+        if content_depth >= 2:
+            # Re-collect row1 using content depth
+            for cell in cells:
+                if int(cell.get("row") or 0) == 1:
+                    col = int(cell.get("col") or 0)
+                    text = str(cell.get("text") or "").strip()
+                    if text:
+                        row1_coverage[col] = text
+            if content_depth >= 3:
+                for cell in cells:
+                    if int(cell.get("row") or 0) == 2:
+                        col = int(cell.get("col") or 0)
+                        text = str(cell.get("text") or "").strip()
+                        if text:
+                            row2_coverage[col] = text
 
-    headers: list[str] = []
+    has_row1 = bool(row1_coverage)
+    has_row2 = bool(row2_coverage)
+    header_depth = 1 + (1 if has_row1 else 0) + (1 if has_row2 else 0)
+
+    # Identify empty stub columns: row 0 is blank but data rows have content.
+    data_rows: dict[int, dict[int, str]] = {}
+    for cell in cells:
+        r = int(cell.get("row") or 0)
+        if r < header_depth:
+            continue
+        data_rows.setdefault(r, {})[int(cell.get("col") or 0)] = str(cell.get("text") or "").strip()
+    stub_cols: set[int] = set()
+    for col in range(num_cols):
+        if row0_coverage.get(col, "").strip():
+            continue
+        if any(data_rows.get(r, {}).get(col, "") for r in data_rows):
+            stub_cols.add(col)
+
+    headers = []
     for col in range(num_cols):
         row0_text = row0_coverage.get(col, "")
-        row1_text = row1_coverage.get(col, "") if use_subheaders else ""
+        row1_text = row1_coverage.get(col, "") if has_row1 else ""
+        row2_text = row2_coverage.get(col, "") if has_row2 else ""
 
-        if row0_text and row1_text and row0_text != row1_text:
-            combined = f"{row0_text} {row1_text}"
-        elif row1_text:
-            combined = row1_text
-        elif row0_text:
-            combined = row0_text
-        else:
-            combined = f"column_{col + 1}"
+        parts = [t for t in [row0_text, row1_text, row2_text] if t and t != row0_text or (t == row0_text and not row1_text and not row2_text)]
+        # Simpler: combine non-empty distinct parts
+        seen: list[str] = []
+        for t in [row0_text, row1_text, row2_text]:
+            if t and t not in seen:
+                seen.append(t)
+        combined = " ".join(seen) if seen else ""
+
+        if not combined:
+            # Stub column (empty row-0 cell used as row-label margin)
+            combined = f"_row_label_{col}" if col in stub_cols else f"column_{col + 1}"
 
         headers.append(normalize_header(combined))
+
     headers = _fuse_hyphenated_headers(headers)
     return headers, header_depth
 
@@ -171,6 +284,9 @@ def rows_from_cells(
         if row < header_depth:
             continue
         header = headers[col] if col < len(headers) else f"column_{col + 1}"
+        # Skip stub columns — they contain row-label text, not entity values
+        if header.startswith("_row_label_"):
+            continue
         text = str(cell.get("text") or "").strip()
         rows_data[row][header] = text
 
