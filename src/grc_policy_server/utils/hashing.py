@@ -12,6 +12,26 @@ _NON_WORD_RE = re.compile(r"[^a-z0-9]+")
 _DIGIT_SPACE_UNIT_RE = re.compile(r"(\d)\s+([a-zA-Z])(?!\w{3,})")
 # Pattern for trailing escape characters
 _TRAILING_ESCAPE_RE = re.compile(r"[\\\/]+$")
+
+# Subscript/superscript preservation maps.
+# Applied BEFORE unicodedata.normalize("NFKC") because NFKC converts these
+# Unicode characters to their ASCII base equivalents (e.g., ² → 2, ₂ → 2),
+# silently making m² == m³ and CO₂ == CO₃ — critical in EMC/safety thresholds.
+# We preserve them as ^N (superscript) and _N (subscript) ASCII marker notation.
+_SUPERSCRIPT_TO_ASCII: dict[str, str] = {
+    "⁰": "^0", "¹": "^1", "²": "^2", "³": "^3",
+    "⁴": "^4", "⁵": "^5", "⁶": "^6", "⁷": "^7",
+    "⁸": "^8", "⁹": "^9",
+    "²": "^2",  # ² U+00B2
+    "³": "^3",  # ³ U+00B3
+    "¹": "^1",  # ¹ U+00B9
+}
+_SUBSCRIPT_TO_ASCII: dict[str, str] = {
+    "₀": "_0", "₁": "_1", "₂": "_2", "₃": "_3",
+    "₄": "_4", "₅": "_5", "₆": "_6", "₇": "_7",
+    "₈": "_8", "₉": "_9",
+}
+_SUB_SUPER_TABLE = str.maketrans({**_SUPERSCRIPT_TO_ASCII, **_SUBSCRIPT_TO_ASCII})
 BULLET_RE = re.compile(
     r"^\s*([•●▪◦\-–—*]|[\(\[]?\d+[\)\].:]|[A-Za-z]\))\s+",
     re.M,
@@ -43,6 +63,9 @@ def normalize_for_comparison(value: str) -> str:
     text = _TRAILING_ESCAPE_RE.sub("", text)
     text = text.replace("­", "")  # soft hyphen
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Preserve subscript/superscript BEFORE NFKC strips them.
+    # e.g. m² → m^2, CO₂ → CO_2 so they remain distinguishable after normalisation.
+    text = text.translate(_SUB_SUPER_TABLE)
     text = unicodedata.normalize("NFKC", text or "")
     # Repair line-break hyphenation BEFORE collapsing whitespace so \n is still present
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)

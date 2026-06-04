@@ -6,8 +6,8 @@
       "doc1_filename": "TL_81000_2018-03_p003-012.pdf",
       "doc2_filename": "TL_81000_2021-09_GER_p003-012.pdf",
       "testing_department": "Safety",
-      "doc1_id": "fece8404-f30a-4761-9ade-a103c9c4eb65",
-      "doc2_id": "4107e6eb-30f3-403d-847c-2ade513fab8b"
+      "doc1_id": "d73b7cf4-5953-4391-8d3f-7789e4fa2d6d",
+      "doc2_id": "2065ae11-1b5d-464f-abcf-13537a4d90a6"
     },
     {
       "name": "TL-81000 p013 (2018\u21922021)",
@@ -15,8 +15,8 @@
       "doc1_filename": "TL_81000_2018-03_p013-022.pdf",
       "doc2_filename": "TL_81000_2021-09_GER_p013-022.pdf",
       "testing_department": "Safety",
-      "doc1_id": "ac0e1438-2636-4daa-adb2-08243c17ec7b",
-      "doc2_id": "9ff4e2a9-3bc0-4a01-bc69-a53f0fc6b8fe"
+      "doc1_id": "f7cc249d-08ae-4fc2-a3de-26a6158914dd",
+      "doc2_id": "9e30339c-6d2f-446b-93cd-57885f47b51f"
     },
     {
       "name": "DNVGL p013 (Nov2016\u2192Dec2019)",
@@ -24,8 +24,8 @@
       "doc1_filename": "DNVGL-CG-0339_Nov_2016_p013-022.pdf",
       "doc2_filename": "DNVGL-CG-0339_Dez_2019_p013-022.pdf",
       "testing_department": "Safety",
-      "doc1_id": "4693e1cf-8b9c-40eb-acb7-b0bf31037fdb",
-      "doc2_id": "2e22f992-339a-4ec4-af66-b4587df16b68"
+      "doc1_id": "44731432-fe36-496f-8b9a-8331ad5fe499",
+      "doc2_id": "340a7e67-233b-4d5a-a06e-b6a4728095a8"
     },
     {
       "name": "DNVGL p023 (Nov2016\u2192Dec2019)",
@@ -33,8 +33,8 @@
       "doc1_filename": "DNVGL-CG-0339_Nov_2016_p023-032.pdf",
       "doc2_filename": "DNVGL-CG-0339_Dez_2019_p023-032.pdf",
       "testing_department": "Safety",
-      "doc1_id": "1250836f-17a9-4339-b266-e50e2e10125e",
-      "doc2_id": "f875f0e2-e5b4-4f62-abf7-185017dcc9bd"
+      "doc1_id": "c0e94c2e-80f3-4a2d-919e-a04747b17d95",
+      "doc2_id": "108f54d5-65da-4f18-aedc-5851008fd158"
     },
     {
       "name": "DIN 60068-2 (incompatible pair)",
@@ -43,8 +43,8 @@
       "doc2_filename": "DIN EN 60068-2-38_2022.pdf",
       "testing_department": "EMC",
       "expected_incompatible": true,
-      "doc1_id": "b23e1f76-baee-43aa-95f1-26a62d3587f0",
-      "doc2_id": "789aaa48-a2d7-4886-8454-efdaf3486f0c"
+      "doc1_id": "fe98b936-ef8d-4f2c-92ec-902068348830",
+      "doc2_id": "14eaa103-5acb-4159-8691-7d3f850d9fc4"
     }
   ]
 }

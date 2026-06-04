@@ -306,22 +306,24 @@ _UNICODE_PUNCT_TRANSLATION = {
     0x2013: "-",  # en-dash
     0x2014: "-",  # em-dash
     0x2026: "...",  # ellipsis
-    # Unicode superscript digits and footnote symbols stripped so
-    # "10 V/m" compares equal whether or not a footnote marker is appended.
-    0x00B9: "",  # superscript 1
-    0x00B2: "",  # superscript 2
-    0x00B3: "",  # superscript 3
-    0x2074: "",  # superscript 4
-    0x2075: "",  # superscript 5
-    0x2076: "",  # superscript 6
-    0x2077: "",  # superscript 7
-    0x2078: "",  # superscript 8
-    0x2079: "",  # superscript 9
-    0x2070: "",  # superscript 0
-    0x2020: "",  # dagger footnote marker
-    0x2021: "",  # double dagger
-    0x00A7: "",  # section sign used as footnote marker
-    0x00B6: "",  # pilcrow
+    # Unicode superscript digits: converted to ^N notation (NOT stripped) so that
+    # m² ≠ m³ comparison is preserved — critical for EMC/safety unit thresholds.
+    # NFKC in hashing.py would otherwise silently collapse both to the same base char.
+    # Dagger/pilcrow/section-sign footnote markers are still stripped (no semantic value).
+    0x00B9: "^1",  # superscript 1
+    0x00B2: "^2",  # superscript 2
+    0x00B3: "^3",  # superscript 3
+    0x2074: "^4",  # superscript 4
+    0x2075: "^5",  # superscript 5
+    0x2076: "^6",  # superscript 6
+    0x2077: "^7",  # superscript 7
+    0x2078: "^8",  # superscript 8
+    0x2079: "^9",  # superscript 9
+    0x2070: "^0",  # superscript 0
+    0x2020: "",    # dagger footnote marker (strip — no semantic value)
+    0x2021: "",    # double dagger
+    0x00A7: "",    # section sign used as footnote marker
+    0x00B6: "",    # pilcrow
 }
 
 # Matches a leading footnote marker at start of a paragraph.

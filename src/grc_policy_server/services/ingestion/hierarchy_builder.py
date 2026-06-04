@@ -407,6 +407,8 @@ def build_document_hierarchy(
         section_node.metadata["summary_numbers"] = summary["numbers"]
         section_node.metadata["summary_sentences"] = summary["sentence_count"]
 
+    nodes = _merge_orphan_fragments(nodes)
+
     indexable_nodes = [
         node
         for node in nodes
@@ -430,6 +432,77 @@ def build_document_hierarchy(
             "ocr_nodes": sum(1 for node in nodes if node.source == "pytesseract"),
         },
     )
+
+
+def _merge_orphan_fragments(nodes: list[HierarchyNode]) -> list[HierarchyNode]:
+    """Merge very short clause/paragraph fragments into the preceding node.
+
+    Docling's HierarchicalChunker can split paragraphs that span a section boundary,
+    leaving a sentence-end fragment at the start of the next section.  These fragments
+    are too short to be useful comparison units and create false REMOVED+ADDED pairs.
+
+    A node is merged when ALL of these hold:
+    - It is a clause or paragraph (not table/figure/list_item)
+    - It is a fragment: either very short (< 15 chars) OR starts with a lowercase letter
+      or punctuation continuation (indicating a split sentence)
+    - The immediately preceding node is a content node in the same section_path
+    """
+    _MAX_FRAGMENT_LEN = 55   # upper bound on what we'll consider a fragment
+    _ALWAYS_MERGE_LEN = 15   # always merge if shorter than this regardless of case
+    result: list[HierarchyNode] = []
+
+    for node in nodes:
+        if (
+            node.node_type in {"clause", "paragraph"}
+            and node.indexable
+            and result
+        ):
+            text = (node.text or "").strip()
+            prev = result[-1]
+            starts_lowercase = bool(text) and text[0].islower()
+            starts_continuation = text.startswith((", ", ") ", "; ", "- "))
+            is_very_short = len(text) < _ALWAYS_MERGE_LEN
+            is_mid_sentence = len(text) < _MAX_FRAGMENT_LEN and (starts_lowercase or starts_continuation)
+            same_section = prev.section_path == node.section_path
+            prev_is_content = prev.node_type in {"clause", "paragraph"} and prev.indexable
+
+            if (is_very_short or is_mid_sentence) and same_section and prev_is_content:
+                # Merge into preceding node
+                sep = " " if (prev.text or "").endswith((" ", "\n")) else " "
+                merged_text = (prev.text or "").rstrip() + sep + text
+                merged_hash = sha256_hex(normalize_text(merged_text).encode("utf-8"))
+                # Replace last result entry with merged version
+                result[-1] = HierarchyNode(
+                    node_id=prev.node_id,
+                    stable_id=prev.stable_id,
+                    content_hash=merged_hash,
+                    document_id=prev.document_id,
+                    document_stable_id=prev.document_stable_id,
+                    node_type=prev.node_type,
+                    parent_id=prev.parent_id,
+                    title=prev.title,
+                    text=merged_text,
+                    section_path=prev.section_path,
+                    section_titles=prev.section_titles,
+                    page_number=prev.page_number,
+                    ordinal=prev.ordinal,
+                    indexable=prev.indexable,
+                    excluded_from_index=prev.excluded_from_index,
+                    exclusion_reason=prev.exclusion_reason,
+                    source=prev.source,
+                    lineage=prev.lineage,
+                    lineage_ids=prev.lineage_ids,
+                    metadata={
+                        **prev.metadata,
+                        "clean_text": merged_text,
+                        "anchor_text": prev.metadata.get("anchor_text", ""),
+                    },
+                )
+                continue
+
+        result.append(node)
+
+    return result
 
 
 def document_family_from_filename(filename: str) -> str:

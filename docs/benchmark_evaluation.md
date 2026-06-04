@@ -319,6 +319,7 @@ From DNVGL Nov2016 vs Dec2019 p023 comparison trace:
 | 2026-06-04T07:25 | dd5e115 | ? | ? | ? | 0 | 8 | 1 |
 | 2026-06-04T07:42 | dd5e115 | ? | ? | ? | 0 | 8 | 1 |
 | 2026-06-04T07:46 | dd5e115 | 100.0% | 100.0% | 100.0% | 0 | 8 | 1 |
+| 2026-06-04T14:52 | 8fd0725 | 100.0% | 100.0% | 100.0% | 0 | 8 | 1 |
 
 ---
 
@@ -381,4 +382,63 @@ The warning uses two independent signals (title word Jaccard + section number Ja
 | DNVGL p013 (Nov2016→Dec2019) | 64 | 12 | 32 | 20 | 0 |
 | DNVGL p023 (Nov2016→Dec2019) | 94 | 36 | 23 | 35 | 0 |
 | DIN 60068-2 (incompatible) ❌ | 354 | 4 | 248 | 102 | 0 ✓ |
+
+
+---
+
+## 13. Iteration 3 Analysis — 2026-06-04 (Ingestion Fidelity & Table Accuracy)
+
+### 13.1 Subscript/Superscript Preservation (Phase 1)
+
+**Root cause fixed:** `unicodedata.normalize("NFKC")` in `utils/hashing.py` was silently converting `m²` → `m2`, `CO₂` → `CO2`, making `m²` == `m³` in all comparisons. Additionally, `_UNICODE_PUNCT_TRANSLATION` in `policy_semantics.py` was explicitly stripping superscript characters to empty string, so `10 V/m²` became `10 V/m`.
+
+**Verification:**
+```python
+normalize_for_comparison("m²")   # → "m^2"   (was "m2")
+normalize_for_comparison("m³")   # → "m^3"   (was "m2" — identical!)
+normalize_for_comparison("CO₂")  # → "co_2"  (was "co2")
+normalize_for_comparison("10 V/m²") # → "10v/m^2" (was "10v/m")
+```
+
+`m² ≠ m³` is now correctly detected — critical for EMC/safety thresholds where exponent differences change the physical unit entirely.
+
+**LaTeX notation in cell comparison:** `$_{n}$` → `_n` (subscript) and `$^{2}$` → `^2` (superscript) are now preserved as distinct markers in `_norm_cell()`. Previously both were collapsed to just the inner character with the sub/super distinction lost.
+
+### 13.2 Double-NFKC Eliminated (Phase 1)
+
+`table_normalization.normalize_cell()` was applying NFKC directly, then calling `normalize_for_comparison()` which applied NFKC again. The double-application bypassed the subscript/superscript preservation added to `hashing.py`. Fixed by removing the explicit NFKC call from `normalize_cell()`.
+
+### 13.3 Table Caption Detection Improved (Phase 2)
+
+`_CAPTION_ROW_RE` extended from English-only `table|figure` to cover German/French: `tabelle|tab|bild|abbildung|abb|tableau`.
+
+Added title-heuristic fallback: a single spanning row-0 cell with short (3–120 char), low numeric density text is treated as a caption regardless of language prefix. This handles:
+- "Test Setup Overview" (unnumbered)  
+- Custom headings without "Table N" prefix
+
+| Stub headers in corpus | Before | After |
+|---|---|---|
+| Tables with `column_1` placeholder | 12 | 8 |
+
+### 13.4 Content-Set Jaccard for Table Comparison (Phase 2)
+
+Added a position-independent cell content comparison alongside the position-based Jaccard. When all cell values from one table exist in the other (set_jaccard ≥ 0.85) but position-score is low (e.g., due to a caption row shift), the scores are blended. This prevents tables that differ only in caption placement from being classified HIGH severity.
+
+### 13.5 Fragment/Orphan Node Merging (Phase 3)
+
+Added `_merge_orphan_fragments()` post-processing pass in `hierarchy_builder.py`. Clause/paragraph nodes that start with a lowercase letter (mid-sentence continuation) or are very short (< 15 chars) and share the same `section_path` as the preceding node are merged into it.
+
+**Example fixed:**
+- Before: `"nannten Erganzungen bzw. Anderungen."` (36 chars, starts lowercase) — standalone node, creates false REMOVED record
+- After: merged with preceding clause → single coherent comparison unit
+
+### 13.6 Reference Source Text Preservation (Phase 4)
+
+`_reference_source_text()` now prefers `raw_text` (original unmodified document wording, preserving subscripts/superscripts) over `clean_text`/`normalized_text` for citation purposes. Auditors now see the original clause text in `doc1Reference.sourceText`, not the normalized comparison form.
+
+**Measurement:** `empty_doc1Content` rate for table MODIFIED records: 100% → 0% in latest traces.
+
+### 13.7 Compliance Explanation Populated
+
+`complianceExplanation` field present in 100% of `KeyDifference` records across all 5 comparison pairs (354 DIN, 94 DNVGL p023, 64 DNVGL p013, 66 TL p003, 55 TL p013).
 

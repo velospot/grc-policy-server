@@ -753,8 +753,14 @@ class ClauseMatcher:
     )
     # Extracts the pure numeric portion of a section number (e.g. "3.2.1" from "3.2.1 Title")
     _SECTION_NUM_EXTRACT_RE = re.compile(r'^(?:[A-Z]\.)?(\d+(?:\.\d+)*)', re.IGNORECASE)
-    # Detects a table/figure caption row: starts with "table N" or "figure N"
-    _CAPTION_ROW_RE = re.compile(r'^(?:table|tbl\.?|figure|fig\.?)\s*\d', re.IGNORECASE)
+    # Detects a table/figure caption row — multi-language (EN/DE/FR) and numbered/unnumbered.
+    _CAPTION_ROW_RE = re.compile(
+        r'^(?:table|tbl\.?|figure|fig\.?'
+        r'|tabelle|tab\.?|bild|abbildung|abb\.?'     # German
+        r'|tableau|figure|fig\.?'                     # French
+        r')\s*[\d\.\-]',                              # followed by number/dot
+        re.IGNORECASE,
+    )
 
     # Bilingual heading glossary: German canonical form → English canonical form
     # Applied token-by-token before SequenceMatcher to enable cross-language alignment
@@ -924,11 +930,11 @@ class ClauseMatcher:
     def _has_caption_row(self, node: dict) -> bool:
         """Return True when a table's row 0 is a caption embedded as a table cell.
 
-        This happens when the PDF extractor folds the caption text into the first
-        row of the table rather than exposing it as a separate title field.
-        A caption row is identified by:
-          - a single cell at (row=0, col=0) that spans all (or all-but-one) columns, AND
-          - the cell text matches the "Table N" / "Figure N" pattern.
+        Two detection strategies:
+        1. Named-pattern match: cell text starts with a table/figure keyword (EN/DE/FR).
+        2. Title-heuristic: a single spanning cell with short, non-numeric title-like text.
+           Handles unnumbered captions ("Test Levels Summary") and non-English titles that
+           don't match the keyword pattern.
         """
         cells = node.get("table_cells") or []
         num_cols = int(node.get("table_num_cols") or 0)
@@ -940,7 +946,18 @@ class ClauseMatcher:
         cell = row0_cells[0]
         col_span = int(cell.get("col_span", 1))
         text = str(cell.get("text") or "").strip()
-        return col_span >= max(1, num_cols - 1) and bool(self._CAPTION_ROW_RE.match(text))
+        if col_span < max(1, num_cols - 1):
+            return False
+        # Strategy 1: named keyword prefix (Table N, Tabelle N, Figure N, etc.)
+        if self._CAPTION_ROW_RE.match(text):
+            return True
+        # Strategy 2: title-heuristic — short, low numeric density, non-empty
+        digit_count = sum(1 for ch in text if ch.isdigit())
+        is_title_like = (
+            3 <= len(text) <= 120
+            and digit_count / max(1, len(text)) < 0.40  # mostly text, not data
+        )
+        return is_title_like
 
     def _normalize_cells_for_comparison(self, node: dict) -> list[dict]:
         """Return cells with the caption row stripped and remaining rows re-indexed.
@@ -1268,11 +1285,15 @@ class ClauseMatcher:
 
         def _norm_cell(text: str) -> str:
             t = str(text).lower().strip()
-            t = re.sub(r"\*{1,3}|_{1,3}", "", t)          # strip markdown bold/italic
-            # Normalize LaTeX subscript/superscript: "u$_{n}$" → "un"
-            t = self._LATEX_SUB_RE.sub(
-                lambda m: (m.group(1) or m.group(2) or m.group(3) or ""), t
-            )
+            t = re.sub(r"\*{1,3}", "", t)                 # strip markdown bold
+            # Preserve sub/superscript distinction in LaTeX notation:
+            #   $_{n}$ → _n  (subscript)
+            #   $^{2}$ → ^2  (superscript)
+            # This keeps m^2 ≠ m^3 and u_n distinguishable from u^n.
+            t = re.sub(r'\$_\{([^}]+)\}\$', lambda m: f"_{m.group(1)}", t)
+            t = re.sub(r'\$\^\{([^}]+)\}\$', lambda m: f"^{m.group(1)}", t)
+            t = re.sub(r'\$([^$]+)\$', r'\1', t)          # remaining inline math: strip $
+
             t = _EMC_UNIT_RE.sub(lambda m: m.group(1) + m.group(2).lower(), t)
             t = re.sub(r"\b(level|no\.?|class)\s+(\S)", lambda m: m.group(1) + " " + m.group(2), t)
             # Normalize multiplication operators (·, ×, x) for formula comparison
@@ -1335,6 +1356,19 @@ class ClauseMatcher:
                         partial_matches += overlap
 
             cell_score = (exact_matches + partial_matches) / len(all_positions)
+
+        # Content-set Jaccard: position-independent check whether all cell values
+        # from the smaller table exist anywhere in the larger table.  When the set
+        # overlap is high but position-based score is low, the difference is purely
+        # structural (caption row shift, column reorder) — not a data change.
+        left_content_set = {v for v in left_cell_map.values() if v}
+        right_content_set = {v for v in right_cell_map_aligned.values() if v}
+        if left_content_set and right_content_set:
+            union_cs = left_content_set | right_content_set
+            set_jaccard = len(left_content_set & right_content_set) / len(union_cs)
+            if set_jaccard >= 0.85 and cell_score < set_jaccard:
+                # Blend position + set scores so structural-only tables still match well
+                cell_score = (cell_score + set_jaccard) / 2
 
         text_score = self._table_text_score(left, right)
 
@@ -1464,6 +1498,7 @@ class ClauseMatcher:
             node.get("comparison_text")
             or node.get("canonical_text")
             or node.get("clean_text")
+            or node.get("raw_text")
             or clean_policy_text(str(node.get("text") or ""))
         ).strip()
 

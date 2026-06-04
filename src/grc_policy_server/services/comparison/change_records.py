@@ -258,19 +258,27 @@ def _extract_numbers(text: str) -> list[str]:
     ]
 
 
-# Matches LaTeX subscript/superscript notation and inline math: u$_{n}$, $\alpha$
-_LATEX_INLINE_RE = re.compile(r'\$_\{([^}]+)\}\$|\$\^\{([^}]+)\}\$|\$([^$]+)\$')
-# Multiplication operator variants in formulas: ·, ×, x (when surrounded by digits/spaces)
+# LaTeX notation patterns — sub/super treated differently to preserve semantic distinction
+_LATEX_SUB_RE = re.compile(r'\$_\{([^}]+)\}\$')    # subscript: $_{n}$  → _n
+_LATEX_SUP_RE = re.compile(r'\$\^\{([^}]+)\}\$')   # superscript: $^{2}$ → ^2
+_LATEX_INLINE_RE = re.compile(r'\$([^$]+)\$')       # other inline math: strip $
+# Multiplication operator variants in formulas: ·, ×
 _MULT_OPERATOR_RE = re.compile(r'[·×]')
 
 
 def _strip_latex_and_math(text: str) -> str:
-    """Remove LaTeX subscript/superscript and normalise math operators to ASCII.
+    """Normalise LaTeX notation to ASCII marker form for cosmetic-change detection.
 
-    Ensures that typographic variants of the same formula compare equal:
-    "2 · u_{n} + 500" ≡ "2 * un + 500" ≡ "2 · u$_{n}$ + 500"
+    Converts:  u$_{n}$  → u_n   (subscript marker preserved)
+               V$^{2}$  → V^2   (superscript marker preserved)
+               2 · u    → 2 * u (multiplication normalised)
+
+    Used only to detect cosmetic formatting differences (e.g., "u_{n}" vs "u$_{n}$").
+    Preserves the _N vs ^N distinction so m^2 ≠ m^3 remains detectable.
     """
-    t = _LATEX_INLINE_RE.sub(lambda m: (m.group(1) or m.group(2) or m.group(3) or ""), text)
+    t = _LATEX_SUB_RE.sub(lambda m: f"_{m.group(1)}", text)
+    t = _LATEX_SUP_RE.sub(lambda m: f"^{m.group(1)}", t)
+    t = _LATEX_INLINE_RE.sub(r"\1", t)   # strip remaining $ wrappers
     t = _MULT_OPERATOR_RE.sub("*", t)
     return re.sub(r"\s+", " ", t).strip()
 

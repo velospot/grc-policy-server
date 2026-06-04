@@ -52,7 +52,6 @@ from grc_policy_server.services.comparison.policy_semantics import (
     is_non_semantic_content,
     starts_with_lowercase,
 )
-from grc_policy_server.services.ingestion.chunk_enricher import _detect_section_role
 from grc_policy_server.services.comparison.severity_classifier import (
     AuditDisposition,
     ClassificationContext,
@@ -63,6 +62,7 @@ from grc_policy_server.services.documents.canonical_models import (
 )
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
+from grc_policy_server.services.ingestion.chunk_enricher import _detect_section_role
 from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
 from grc_policy_server.utils.hashing import pure_text_hash as _pure_text_hash
@@ -176,8 +176,15 @@ def _normative_strength_change(
     }
 
 
-# Caption row: a table row 0 whose single spanning cell is "Table N …" / "Figure N …"
-_CAPTION_ROW_RE = re.compile(r"^(?:table|tbl\.?|figure|fig\.?)\s*\d", re.IGNORECASE)
+# Caption row: a table row 0 whose single spanning cell is a table/figure label.
+# Multi-language: English (Table/Figure), German (Tabelle/Bild/Abbildung), French (Tableau).
+_CAPTION_ROW_RE = re.compile(
+    r"^(?:table|tbl\.?|figure|fig\.?"
+    r"|tabelle|tab\.?|bild|abbildung|abb\.?"  # German
+    r"|tableau"  # French
+    r")\s*[\d\.\-]",
+    re.IGNORECASE,
+)
 # Reference-only tokens: table/figure/section numbers inline in text
 _REF_TOKEN_RE = re.compile(
     r"\b(?:table|tbl\.?|figure|fig\.?|section|sec\.?|clause|annex|appendix)\s*[\d][\d.\-]*\b",
@@ -283,8 +290,8 @@ class RealDiffEngine:
     max_diffs: int = 40
     severity_classifier: SeverityClassifier = field(default_factory=SeverityClassifier)
     # Phase 4: optional audit log and evidence extraction agent
-    audit_log: "Any | None" = field(default=None)     # AuditLogStore | None
-    evidence_agent: "Any | None" = field(default=None) # EvidenceExtractionAgent | None
+    audit_log: "Any | None" = field(default=None)  # AuditLogStore | None
+    evidence_agent: "Any | None" = field(default=None)  # EvidenceExtractionAgent | None
 
     def _weaviate_search_fn(self):
         """Return a search callable that silently falls back on any Weaviate error."""
@@ -326,11 +333,16 @@ class RealDiffEngine:
                     input_hash=_hashlib.sha256(
                         f"{doc1.id}:{doc2.id}".encode()
                     ).hexdigest(),
-                    payload={"doc1_name": doc1.name, "doc2_name": doc2.name,
-                             "audit_mode": audit_mode},
+                    payload={
+                        "doc1_name": doc1.name,
+                        "doc2_name": doc2.name,
+                        "audit_mode": audit_mode,
+                    },
                 )
             except Exception:
-                logger.warning("audit_log.log_event(comparison_started) failed", exc_info=True)
+                logger.warning(
+                    "audit_log.log_event(comparison_started) failed", exc_info=True
+                )
 
         left_nodes = self._load_comparison_nodes(doc1.id)
         right_nodes = self._load_comparison_nodes(doc2.id)
@@ -532,14 +544,20 @@ class RealDiffEngine:
             if d.changeSeverity != "low":
                 return False
             # Keep structural changes (split, merge, moved, section_renamed)
-            for change in (d.changes or []):
+            for change in d.changes or []:
                 if change.location in ("structure", "section"):
                     return False
-                if any(kw in change.text.lower() for kw in ("split", "merge", "moved", "renamed")):
+                if any(
+                    kw in change.text.lower()
+                    for kw in ("split", "merge", "moved", "renamed")
+                ):
                     return False
             # Keep diffs with compliance explanation that mentions obligation/numeric changes
             explanation = d.complianceExplanation or ""
-            if any(kw in explanation.lower() for kw in ("obligation", "parameter changed", "removed:", "added:")):
+            if any(
+                kw in explanation.lower()
+                for kw in ("obligation", "parameter changed", "removed:", "added:")
+            ):
                 return False
             return True
 
@@ -567,7 +585,9 @@ class RealDiffEngine:
                     skipped_sections.append(section)
         # Deduplicate while preserving order
         seen: set[str] = set()
-        skipped_sections = [s for s in skipped_sections if not (s in seen or seen.add(s))]  # type: ignore[func-returns-value]
+        skipped_sections = [
+            s for s in skipped_sections if not (s in seen or seen.add(s))
+        ]  # type: ignore[func-returns-value]
 
         require_human_review = any(d.requiresHumanReview for d in diffs)
 
@@ -592,6 +612,7 @@ class RealDiffEngine:
         if self.audit_log is not None:
             try:
                 import hashlib as _hashlib2
+
                 output_hash = _hashlib2.sha256(
                     result.model_dump_json().encode()
                 ).hexdigest()
@@ -610,13 +631,19 @@ class RealDiffEngine:
                         "doc2_id": doc2.id,
                         "total_diffs": len(result.keyDifferences),
                         "high": sum(
-                            1 for d in result.keyDifferences if d.changeSeverity == "high"
+                            1
+                            for d in result.keyDifferences
+                            if d.changeSeverity == "high"
                         ),
                         "medium": sum(
-                            1 for d in result.keyDifferences if d.changeSeverity == "medium"
+                            1
+                            for d in result.keyDifferences
+                            if d.changeSeverity == "medium"
                         ),
                         "low": sum(
-                            1 for d in result.keyDifferences if d.changeSeverity == "low"
+                            1
+                            for d in result.keyDifferences
+                            if d.changeSeverity == "low"
                         ),
                         "requires_human_review": result.requireHumanReview,
                         "hidden_diffs_count": result.hiddenDiffsCount,
@@ -1176,18 +1203,40 @@ class RealDiffEngine:
         """
         # Boilerplate words shared by all DIN/IEC standards regardless of content
         _BOILERPLATE = {
-            "nationalesvorwort", "vervielfaltigung", "auchfurinnerbetrieblichezwecke",
-            "nichtgestattet", "anwendungsbeginn", "europaisches", "vorwort", "anhang",
-            "normative", "informative", "verweisungen", "bibliographie", "literaturhinweise",
-            "begriffe", "definitionen", "allgemein", "allgemeines", "einleitung",
-            "scope", "terms", "definitions", "references", "foreword", "introduction",
-            "annex", "bibliography",
+            "nationalesvorwort",
+            "vervielfaltigung",
+            "auchfurinnerbetrieblichezwecke",
+            "nichtgestattet",
+            "anwendungsbeginn",
+            "europaisches",
+            "vorwort",
+            "anhang",
+            "normative",
+            "informative",
+            "verweisungen",
+            "bibliographie",
+            "literaturhinweise",
+            "begriffe",
+            "definitionen",
+            "allgemein",
+            "allgemeines",
+            "einleitung",
+            "scope",
+            "terms",
+            "definitions",
+            "references",
+            "foreword",
+            "introduction",
+            "annex",
+            "bibliography",
         }
 
         def _section_word_set(nodes: list[dict]) -> set[str]:
             words: set[str] = set()
             for node in nodes:
-                path: list = node.get("section_titles") or node.get("heading_path") or []
+                path: list = (
+                    node.get("section_titles") or node.get("heading_path") or []
+                )
                 title = str(path[-1] if path else "").lower()
                 title = re.sub(r"^\d+(?:\.\d+)*\s*", "", title)
                 for w in re.findall(r"[a-zäöüß]{4,}", title):
@@ -1198,7 +1247,9 @@ class RealDiffEngine:
         def _section_number_set(nodes: list[dict]) -> set[str]:
             nums: set[str] = set()
             for node in nodes:
-                path: list = node.get("section_titles") or node.get("heading_path") or []
+                path: list = (
+                    node.get("section_titles") or node.get("heading_path") or []
+                )
                 for part in path:
                     m = re.match(r"^(\d+(?:\.\d+)+)", str(part).strip())
                     if m:
@@ -1240,19 +1291,21 @@ class RealDiffEngine:
         return None
 
     # Fused OCR terms for non-compliance heading detection (no word boundaries available)
-    _FUSED_SKIP_TERMS = frozenset({
-        "nationalesvorwort",
-        "europaischesvorwort",
-        "europaischenorm",
-        "vervielfaltigung",
-        "anwendungsbeginn",
-        "fruhereausgaben",
-        "anderungen",
-        "revisionshistorie",
-        "zusammenhangmit",
-        "anderungsverzeichnis",
-        "normativeverweisungen",
-    })
+    _FUSED_SKIP_TERMS = frozenset(
+        {
+            "nationalesvorwort",
+            "europaischesvorwort",
+            "europaischenorm",
+            "vervielfaltigung",
+            "anwendungsbeginn",
+            "fruhereausgaben",
+            "anderungen",
+            "revisionshistorie",
+            "zusammenhangmit",
+            "anderungsverzeichnis",
+            "normativeverweisungen",
+        }
+    )
 
     def _is_skip_heading(self, heading: str) -> bool:
         """Return True when a section heading is a non-compliance boilerplate section.
@@ -1369,7 +1422,9 @@ class RealDiffEngine:
                 continue
             # Final backstop: suppress ADDED/REMOVED from non-compliance sections even
             # if they slipped through ingestion or comparison-phase filtering.
-            node_path = left_node.get("section_titles") or left_node.get("heading_path") or []
+            node_path = (
+                left_node.get("section_titles") or left_node.get("heading_path") or []
+            )
             node_top = str(node_path[0]).strip() if node_path else ""
             if node_top and self._is_skip_heading(node_top):
                 continue
@@ -1388,7 +1443,9 @@ class RealDiffEngine:
         for right_node in matching.added:
             if self._is_non_semantic_node(right_node):
                 continue
-            node_path = right_node.get("section_titles") or right_node.get("heading_path") or []
+            node_path = (
+                right_node.get("section_titles") or right_node.get("heading_path") or []
+            )
             node_top = str(node_path[0]).strip() if node_path else ""
             if node_top and self._is_skip_heading(node_top):
                 continue
@@ -1565,7 +1622,12 @@ class RealDiffEngine:
                 testing_department=testing_department,
                 section_role=_section_role,
                 obligation_strength=_obligation_strength,
-                ontology_type=str((left or {}).get("ontology_type") or (right or {}).get("ontology_type") or "") or None,
+                ontology_type=str(
+                    (left or {}).get("ontology_type")
+                    or (right or {}).get("ontology_type")
+                    or ""
+                )
+                or None,
             )
         )
         significance = classification.severity
@@ -1736,7 +1798,9 @@ class RealDiffEngine:
             elif change_t == "added" and new_val:
                 parts.append(f"New test parameter specified: {new_val}.")
             elif change_t == "removed" and old_val:
-                parts.append(f"Test parameter removed: {old_val}. Verify whether a replacement exists.")
+                parts.append(
+                    f"Test parameter removed: {old_val}. Verify whether a replacement exists."
+                )
 
         # 4. Fallback by change type
         if not parts:
@@ -1756,7 +1820,10 @@ class RealDiffEngine:
                     "Review changed content for impact on test procedures, obligation level, or acceptance criteria."
                 )
 
-        return " ".join(parts) or "Compliance impact: review this change against current test procedures."
+        return (
+            " ".join(parts)
+            or "Compliance impact: review this change against current test procedures."
+        )
 
     def _key_difference_from_record(self, record: ChangeRecord) -> KeyDifference:
         return KeyDifference(
@@ -2655,9 +2722,12 @@ class RealDiffEngine:
             table_data = self._build_table_data(chunk)
         formula_latex = None
         if chunk.get("node_type") == "formula":
-            formula_latex = str(
-                (chunk.get("canonical_metadata") or {}).get("formula_latex") or ""
-            ).strip() or None
+            formula_latex = (
+                str(
+                    (chunk.get("canonical_metadata") or {}).get("formula_latex") or ""
+                ).strip()
+                or None
+            )
         return DocumentReference(
             section=section,
             page=int(page or 0),
@@ -2677,16 +2747,31 @@ class RealDiffEngine:
         canonical_table = meta.get("canonical_table")
         if canonical_table:
             return {
-                "caption": canonical_table.get("caption_original") or chunk.get("title") or "",
-                "headers": [c.get("name", "") for c in (canonical_table.get("columns") or [])],
+                "caption": canonical_table.get("caption_original")
+                or chunk.get("title")
+                or "",
+                "headers": [
+                    c.get("name", "") for c in (canonical_table.get("columns") or [])
+                ],
                 "rows": [
-                    [cell.get("text", "") for cell in sorted(r.get("cells", []), key=lambda c: c.get("col", 0))]
+                    [
+                        cell.get("text", "")
+                        for cell in sorted(
+                            r.get("cells", []), key=lambda c: c.get("col", 0)
+                        )
+                    ]
                     for r in (canonical_table.get("rows") or [])
                     if not all(cell.get("is_header") for cell in r.get("cells", []))
                 ],
-                "num_rows": canonical_table.get("num_rows") or chunk.get("table_num_rows") or 0,
-                "num_cols": canonical_table.get("num_cols") or chunk.get("table_num_cols") or 0,
-                "source_extractor": canonical_table.get("source_extractor") or meta.get("table_source") or "docling",
+                "num_rows": canonical_table.get("num_rows")
+                or chunk.get("table_num_rows")
+                or 0,
+                "num_cols": canonical_table.get("num_cols")
+                or chunk.get("table_num_cols")
+                or 0,
+                "source_extractor": canonical_table.get("source_extractor")
+                or meta.get("table_source")
+                or "docling",
             }
         # Fall back to table_structure cells
         cells = chunk.get("table_cells") or []
@@ -2696,12 +2781,18 @@ class RealDiffEngine:
             return None
         header_cells = [c for c in cells if c.get("is_header")]
         data_cells = [c for c in cells if not c.get("is_header")]
-        headers = [str(c.get("text", "")) for c in sorted(header_cells, key=lambda c: c.get("col", 0))]
+        headers = [
+            str(c.get("text", ""))
+            for c in sorted(header_cells, key=lambda c: c.get("col", 0))
+        ]
         rows_by_row: dict[int, list[dict]] = {}
         for c in data_cells:
             rows_by_row.setdefault(c.get("row", 0), []).append(c)
         rows = [
-            [str(c.get("text", "")) for c in sorted(rows_by_row[r], key=lambda c: c.get("col", 0))]
+            [
+                str(c.get("text", ""))
+                for c in sorted(rows_by_row[r], key=lambda c: c.get("col", 0))
+            ]
             for r in sorted(rows_by_row)
         ]
         return {
@@ -2738,14 +2829,28 @@ class RealDiffEngine:
             ).strip()
             if latex:
                 return f"$${latex}$$"
-        return str(chunk.get("text") or "")
+        # Prefer raw_text (original document wording, preserves subscripts/superscripts)
+        # over cleaned/normalized text — auditors should see the unmodified clause.
+        return (
+            str(chunk.get("raw_text") or "").strip()
+            or str(chunk.get("text") or "").strip()
+        )
 
     def _is_non_semantic_node(self, node: dict) -> bool:
         """Return True if the node's content has no semantic diff value."""
         # Formula nodes always have semantic value — never filter them out
-        if str(node.get("node_type_hint") or (node.get("canonical_metadata") or {}).get("node_type_hint") or "") == "formula":
+        if (
+            str(
+                node.get("node_type_hint")
+                or (node.get("canonical_metadata") or {}).get("node_type_hint")
+                or ""
+            )
+            == "formula"
+        ):
             return False
-        if str((node.get("canonical_metadata") or {}).get("formula_latex") or "").strip():
+        if str(
+            (node.get("canonical_metadata") or {}).get("formula_latex") or ""
+        ).strip():
             return False
         text = str(
             node.get("clean_text") or clean_policy_text(str(node.get("text") or ""))
@@ -2900,31 +3005,31 @@ class RealDiffEngine:
                 )
             else:
                 explanation = str(result or "").strip()
-            explanations.append(
-                {
-                    "changeType": diff.changeType,
-                    "section": diff.section,
-                    "nodeType": diff.nodeType,
-                    "impact": diff.impact,
-                    "changeSeverity": diff.changeSeverity,
-                    "changes": [
-                        change.model_dump(mode="json") for change in diff.changes
-                    ],
-                    "doc1Content": diff.doc1Content or "",
-                    "doc2Content": diff.doc2Content or "",
-                    "doc1Citation": (
-                        diff.doc1Reference.model_dump(mode="json")
-                        if diff.doc1Reference
-                        else None
-                    ),
-                    "doc2Citation": (
-                        diff.doc2Reference.model_dump(mode="json")
-                        if diff.doc2Reference
-                        else None
-                    ),
-                    "explanation": explanation,
-                }
-            )
+            # explanations.append(
+            #     {
+            #         "changeType": diff.changeType,
+            #         "section": diff.section,
+            #         "nodeType": diff.nodeType,
+            #         "impact": diff.impact,
+            #         "changeSeverity": diff.changeSeverity,
+            #         "changes": [
+            #             change.model_dump(mode="json") for change in diff.changes
+            #         ],
+            #         "doc1Content": diff.doc1Content or "",
+            #         "doc2Content": diff.doc2Content or "",
+            #         "doc1Citation": (
+            #             diff.doc1Reference.model_dump(mode="json")
+            #             if diff.doc1Reference
+            #             else None
+            #         ),
+            #         "doc2Citation": (
+            #             diff.doc2Reference.model_dump(mode="json")
+            #             if diff.doc2Reference
+            #             else None
+            #         ),
+            #         "explanation": explanation,
+            #     }
+            # )
         return explanations
 
     def _diff_text(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import unicodedata
 from collections import defaultdict
 from typing import Any
 
@@ -40,8 +39,11 @@ def normalize_cell(value: Any) -> str:
     if value is None:
         return ""
     text = str(value)
-    text = unicodedata.normalize("NFKC", text)
-    text = text.replace("\u00ad", "")
+    # Only strip soft-hyphen and normalize runs of whitespace here.
+    # Do NOT apply NFKC at this layer \u2014 normalize_for_comparison() (called below)
+    # already applies NFKC with the pre-NFKC subscript/superscript preservation step.
+    # Applying NFKC twice would bypass the preservation added in hashing.py.
+    text = text.replace("\u00ad", "")   # soft hyphen
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{2,}", "\n", text)
