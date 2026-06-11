@@ -224,10 +224,13 @@ def _normalize_table_caption(caption: str) -> str:
     """Return a normalized caption suitable for cross-document title matching.
 
     Strips markdown decoration, leading 'Table N:'/'Tabelle C -', etc. then
+    repairs OCR fusion (e.g. "Table16MinimumInsulation" → "Table 16 Minimum Insulation"),
     lowercases and collapses whitespace so captions like "Table 3: Risk Matrix"
     and "**Tabelle C – Risk Matrix**" compare as equal.
     """
+    from grc_policy_server.services.ingestion.hierarchy_builder import _repair_section_title_fusion
     clean = _MD_DECO_RE.sub("", caption)
+    clean = _repair_section_title_fusion(clean)
     stripped = _TABLE_PREFIX_RE.sub("", clean).strip()
     return " ".join((stripped or clean).lower().split())
 

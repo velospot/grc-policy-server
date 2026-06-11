@@ -3,17 +3,19 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import re
-
 from grc_policy_server.core.config import settings
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
+from grc_policy_server.services.graph.docling_graph_adapter import (
+    DoclingGraphAdapter,
+    DoclingGraphArtifact,
+)
 from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
 from grc_policy_server.services.ingestion.docling_chunker import (
     chunk_document,
@@ -33,9 +35,23 @@ from grc_policy_server.services.ingestion.table_quality_enhancer import (
 from grc_policy_server.services.ingestion.policy_preprocessor import (
     preprocess_parsed_chunks,
 )
+from grc_policy_server.services.ingestion.standards.standard_registry import (
+    StandardRegistry,
+    StandardResolution,
+)
 from grc_policy_server.services.llm.base import BaseLLM
+from grc_policy_server.services.orchestration.ingestion_orchestrator import (
+    ComplianceIngestionOrchestrator,
+    DeterministicFailure,
+    IngestionToolRegistry,
+)
+from grc_policy_server.services.orchestration.job_state import JobState
+from grc_policy_server.services.validation.evidence_chain_validator import (
+    EvidenceChainValidator,
+    MIN_COMPLIANCE_NODES,
+)
 from grc_policy_server.services.vector.weaviate_client import WeaviateClient
-from grc_policy_server.utils.hashing import sha256_hex
+from grc_policy_server.utils.hashing import sha256_hex, stable_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +79,6 @@ def _candidate_to_table_dict(candidate: Any, *, caption: str = "", section_path:
         cells_by_row.setdefault(r, []).append(cell)
     for r in sorted(cells_by_row):
         rows_text.append([str(c.get("text", "")).strip() for c in sorted(cells_by_row[r], key=lambda c: c.get("col", 0))])
-    headers = [candidate.headers] if candidate.headers else []
     return {
         "table_uid": str(uuid.uuid4()),
         "caption_original": caption,
@@ -237,8 +252,6 @@ async def _correlate_camelot_tables(
         if getattr(chunk, "chunk_type", "") != "table":
             continue
         page = chunk.page_number
-        docling_cells = (chunk.metadata.get("table_structure") or {}).get("num_rows", 0)
-        docling_cell_count = docling_cells * ((chunk.metadata.get("table_structure") or {}).get("num_cols", 0) or 1)
 
         # Docling bbox from bbox_refs
         docling_bbox = None
@@ -367,6 +380,24 @@ class UploadIngestionResult:
     chunks_stored: int
 
 
+@dataclass
+class _IngestionContext:
+    filename: str
+    content: bytes
+    content_type: str | None
+    document_id: str
+    content_hash: str
+    parsed_chunks: list[ParsedChunk] = field(default_factory=list)
+    ocr_metadata: dict[str, Any] = field(default_factory=dict)
+    doc_json: dict[str, Any] | None = None
+    docling_language: str = ""
+    normalized_tree: dict[str, Any] = field(default_factory=dict)
+    vector_records: list[dict[str, Any]] = field(default_factory=list)
+    docling_graph: DoclingGraphArtifact | None = None
+    chunks_stored: int = 0
+    resolved_standards: dict[str, StandardResolution] = field(default_factory=dict)
+
+
 class DocumentIngestionService:
     """Converts uploaded files into chunks and stores metadata/index entries."""
 
@@ -381,6 +412,7 @@ class DocumentIngestionService:
         canonical_store: CanonicalDocumentStore | None = None,
         ontology_classifier=None,   # OntologyClassifier | None
         human_review_queue=None,    # HumanReviewQueue | None
+        audit_log=None,             # AuditLogStore | None
     ):
         self.docling_adapter = docling_adapter
         self.weaviate = weaviate
@@ -390,6 +422,7 @@ class DocumentIngestionService:
         self.canonical_store = canonical_store
         self._ontology_classifier = ontology_classifier
         self._human_review_queue = human_review_queue
+        self._audit_log = audit_log
 
     async def ingest_upload(
         self,
@@ -401,108 +434,287 @@ class DocumentIngestionService:
         """Convert an uploaded document, store chunks, and persist upload metadata."""
         document_id = str(uuid4())
         content_hash = sha256_hex(content)
-
-        parsed_chunks, ocr_metadata, doc_json = await self._extract_parsed_chunks(
+        context = _IngestionContext(
             filename=filename,
             content=content,
-        )
-        docling_language = str(ocr_metadata.pop("_docling_language", "") or "")
-        self._log_extraction_score(filename, parsed_chunks)
-        parsed_chunks = preprocess_parsed_chunks(parsed_chunks)
-        parsed_chunks = ChunkEnricher().enrich(parsed_chunks, docling_language=docling_language)
-        parsed_chunks = await self._run_ontology_classification(
+            content_type=content_type,
             document_id=document_id,
-            chunks=parsed_chunks,
-        )
-
-        hierarchy = build_document_hierarchy(
-            document_id=document_id,
-            filename=filename,
-            parsed_chunks=parsed_chunks,
             content_hash=content_hash,
         )
-        normalized_tree = {
+        registry = self._build_ingestion_tool_registry()
+        orchestrator = ComplianceIngestionOrchestrator(
+            tool_registry=registry,
+            audit_log=self._audit_log,
+        )
+        try:
+            _, context = await orchestrator.run(
+                job=JobState(job_id=f"ingest-{document_id}", doc_id=document_id),
+                context=context,
+            )
+        except DeterministicFailure as exc:
+            if isinstance(exc.__cause__, ValueError):
+                raise exc.__cause__ from exc
+            raise
+
+        logger.info(
+            "ingested upload document_id=%s filename=%s indexed=%s",
+            document_id,
+            filename,
+            context.chunks_stored,
+        )
+        return UploadIngestionResult(
+            document_id=document_id,
+            chunks_stored=context.chunks_stored,
+        )
+
+    def _build_ingestion_tool_registry(self) -> IngestionToolRegistry:
+        registry = IngestionToolRegistry()
+        registry.register("quality_gate", self._stage_quality_gate)
+        registry.register("parse", self._stage_parse)
+        registry.register("extract_docling_graph", self._stage_extract_docling_graph)
+        registry.register("canonicalize", self._stage_canonicalize)
+        registry.register("normalize_tables", self._stage_normalize_tables)
+        registry.register("resolve_standards", self._stage_resolve_standards)
+        registry.register("map_ontology", self._stage_map_ontology)
+        registry.register("resolve_stable_identities", self._stage_resolve_stable_identities)
+        registry.register("build_graph", self._stage_build_graph)
+        registry.register("build_relationships", self._stage_build_relationships)
+        registry.register("validate_evidence_chains", self._stage_validate_evidence_chains)
+        registry.register("embed_nodes", self._stage_embed_nodes)
+        registry.register("mark_ready", self._stage_mark_ready)
+        return registry
+
+    async def _stage_quality_gate(self, context: _IngestionContext) -> _IngestionContext:
+        if not context.filename:
+            raise ValueError("Missing upload filename")
+        if not context.content:
+            raise ValueError("Uploaded file is empty")
+        return context
+
+    async def _stage_parse(self, context: _IngestionContext) -> _IngestionContext:
+        chunks, ocr_metadata, doc_json = await self._extract_parsed_chunks(
+            filename=context.filename,
+            content=context.content,
+        )
+        context.parsed_chunks = chunks
+        context.ocr_metadata = ocr_metadata
+        context.doc_json = doc_json
+        context.docling_language = str(context.ocr_metadata.pop("_docling_language", "") or "")
+        return context
+
+    async def _stage_extract_docling_graph(self, context: _IngestionContext) -> _IngestionContext:
+        self._log_extraction_score(context.filename, context.parsed_chunks)
+        return context
+
+    async def _stage_canonicalize(self, context: _IngestionContext) -> _IngestionContext:
+        chunks = preprocess_parsed_chunks(context.parsed_chunks)
+        context.parsed_chunks = ChunkEnricher().enrich(
+            chunks,
+            docling_language=context.docling_language,
+        )
+        return context
+
+    async def _stage_normalize_tables(self, context: _IngestionContext) -> _IngestionContext:
+        from dataclasses import replace as dc_replace
+        from grc_policy_server.services.ingestion.ontology.emc_ontology import EMCTestClassifier
+
+        classifier = EMCTestClassifier()
+        updated: list[ParsedChunk] = []
+        for chunk in context.parsed_chunks:
+            if chunk.chunk_type != "table":
+                updated.append(chunk)
+                continue
+            headers = list(chunk.metadata.get("table_headers") or [])
+            caption = str(chunk.metadata.get("normalized_caption") or chunk.title or "")
+            section_path = list(chunk.section_path or [])
+            table_type = classifier.classify_table(caption, headers).value
+            if table_type == "unknown":
+                table_type = classifier.classify_from_section_path(section_path).value
+            quality = float(chunk.metadata.get("extraction_quality_score") or 0.0)
+            new_meta = {**chunk.metadata, "table_type": table_type, "extraction_quality_score": quality}
+            updated.append(dc_replace(chunk, metadata=new_meta))
+        context.parsed_chunks = updated
+        return context
+
+    async def _stage_resolve_standards(self, context: _IngestionContext) -> _IngestionContext:
+        registry = StandardRegistry()
+        resolved: dict[str, StandardResolution] = {}
+        for chunk in context.parsed_chunks:
+            std_ref = str(chunk.metadata.get("standard_ref") or "").strip()
+            if std_ref and std_ref not in resolved:
+                resolved[std_ref] = registry.resolve(std_ref)
+            # Also scan text for inline standard references
+            text = (chunk.text or "")[:500]
+            for match in __import__("re").finditer(
+                r"\b(CISPR\s*\d+|IEC\s*6\d{4}[-\s\d]*|FCC\s*Part\s*\d+|ISO\s*[\d/]+|EN\s*\d+)\b",
+                text,
+                __import__("re").IGNORECASE,
+            ):
+                ref = match.group(0).strip()
+                if ref not in resolved:
+                    resolved[ref] = registry.resolve(ref)
+        context.resolved_standards = resolved
+        logger.debug("resolved %d standard refs for document_id=%s", len(resolved), context.document_id)
+        return context
+
+    async def _stage_resolve_stable_identities(self, context: _IngestionContext) -> _IngestionContext:
+        from dataclasses import replace as dc_replace
+        import re as _re
+
+        _clause_re = _re.compile(
+            r"^\s*((?:section|clause|article|appendix|annex)?\s*[A-Za-z]?\d+(?:\.\d+)*[A-Za-z]?)\b",
+            _re.IGNORECASE,
+        )
+        updated: list[ParsedChunk] = []
+        for chunk in context.parsed_chunks:
+            otype = chunk.metadata.get("ontology_type") or ""
+            std_ref = str(chunk.metadata.get("standard_ref") or "").strip()
+            # Priority 1: standard_id + clause gives the most stable ID
+            if otype in {"Requirement", "Measurement"} and std_ref:
+                clause_match = _clause_re.search(chunk.title or chunk.metadata.get("section_path") or "")
+                if clause_match:
+                    clause = clause_match.group(1).strip()
+                    resolution = context.resolved_standards.get(std_ref)
+                    std_id = getattr(resolution, "standard_id", None) or std_ref.lower().replace(" ", "_")
+                    new_stable_id = stable_uuid(f"section::{std_id}::{clause}")
+                    new_meta = {**chunk.metadata, "stable_id": new_stable_id, "stable_id_basis": "standard_clause"}
+                    updated.append(dc_replace(chunk, metadata=new_meta))
+                    continue
+            updated.append(chunk)
+        context.parsed_chunks = updated
+        return context
+
+    async def _stage_map_ontology(self, context: _IngestionContext) -> _IngestionContext:
+        context.parsed_chunks = await self._run_ontology_classification(
+            document_id=context.document_id,
+            chunks=context.parsed_chunks,
+        )
+        return context
+
+    async def _stage_build_graph(self, context: _IngestionContext) -> _IngestionContext:
+        hierarchy = build_document_hierarchy(
+            document_id=context.document_id,
+            filename=context.filename,
+            parsed_chunks=context.parsed_chunks,
+            content_hash=context.content_hash,
+        )
+        context.normalized_tree = {
             "documentStableId": hierarchy.document_stable_id,
             "documentFamily": hierarchy.document_family,
             "contentHash": hierarchy.content_hash,
             "metadata": {
                 **hierarchy.metadata,
-                "ocr": ocr_metadata,
-                "content_type": content_type,
+                "ocr": context.ocr_metadata,
+                "content_type": context.content_type,
             },
             "nodes": [node.to_graph_record() for node in hierarchy.nodes],
         }
-        vector_records = [node.to_vector_record() for node in hierarchy.indexable_nodes]
-        if not vector_records:
+        context.vector_records = [
+            node.to_vector_record() for node in hierarchy.indexable_nodes
+        ]
+        if not context.vector_records:
             raise ValueError("No indexable text nodes produced from uploaded document")
-
+        context.docling_graph = DoclingGraphAdapter().build_artifact(
+            document_id=context.document_id,
+            filename=context.filename,
+            document_stable_id=hierarchy.document_stable_id,
+            document_family=hierarchy.document_family,
+            content_hash=context.content_hash,
+            nodes=context.normalized_tree["nodes"],
+            metadata=context.normalized_tree["metadata"],
+            resolved_standards=context.resolved_standards,
+        )
+        context.normalized_tree["metadata"]["ignored_changes"] = list(
+            context.docling_graph.ignored_nodes
+        )
         if self.canonical_store is not None:
             self.canonical_store.save_document(
-                document_id=document_id,
-                filename=filename,
-                content_hash=content_hash,
-                docling_json=doc_json,
-                hierarchy=normalized_tree,
-                metadata=normalized_tree["metadata"],
+                document_id=context.document_id,
+                filename=context.filename,
+                content_hash=context.content_hash,
+                docling_json=context.doc_json,
+                hierarchy=context.normalized_tree,
+                metadata=context.normalized_tree["metadata"],
             )
+        return context
 
-        if self.weaviate is not None:
-            try:
-                self.weaviate.upsert_chunks(vector_records)
-            except Exception:
-                logger.warning(
-                    "weaviate upsert failed for document_id=%s filename=%s — "
-                    "canonical nodes already saved, upload will succeed",
-                    document_id,
-                    filename,
-                    exc_info=True,
-                )
+    async def _stage_build_relationships(self, context: _IngestionContext) -> _IngestionContext:
         if self.neo4j is not None:
             try:
                 self.neo4j.upsert_document_hierarchy(
-                    document_id=document_id,
-                    filename=filename,
-                    document_stable_id=hierarchy.document_stable_id,
-                    document_family=hierarchy.document_family,
-                    content_hash=content_hash,
-                    nodes=[node.to_graph_record() for node in hierarchy.nodes],
-                    metadata={
-                        **hierarchy.metadata,
-                        "ocr": ocr_metadata,
-                        "content_type": content_type,
-                    },
+                    document_id=context.document_id,
+                    filename=context.filename,
+                    document_stable_id=context.normalized_tree.get("documentStableId"),
+                    document_family=context.normalized_tree.get("documentFamily"),
+                    content_hash=context.content_hash,
+                    nodes=context.normalized_tree.get("nodes", []),
+                    metadata=context.normalized_tree.get("metadata", {}),
                 )
+                if context.docling_graph is not None:
+                    self.neo4j.upsert_docling_graph(context.docling_graph)
             except Exception:
                 logger.warning(
                     "neo4j upsert failed for document_id=%s filename=%s — "
                     "canonical nodes already saved, upload will succeed",
-                    document_id,
-                    filename,
+                    context.document_id,
+                    context.filename,
                     exc_info=True,
                 )
-        self._persist_upload_metadata(
-            document_id=document_id,
-            filename=filename,
-            content=content,
-            content_type=content_type,
-            # docling_doc=doc_json,
-            hierarchy=normalized_tree,
-            ocr_metadata=ocr_metadata,
-            chunks_stored=len(vector_records),
-        )
+        return context
 
+    async def _stage_validate_evidence_chains(self, context: _IngestionContext) -> _IngestionContext:
+        if context.docling_graph is None:
+            return context
+        compliance_count = sum(1 for n in context.docling_graph.nodes if n.layer == "compliance")
+        if compliance_count < MIN_COMPLIANCE_NODES:
+            raise DeterministicFailure(
+                f"graph has only {compliance_count} compliance nodes (minimum {MIN_COMPLIANCE_NODES}) "
+                "— document likely unparseable or entirely excluded from compliance index"
+            )
+        report = EvidenceChainValidator().validate(context.docling_graph)
         logger.info(
-            "ingested upload document_id=%s filename=%s nodes=%s indexed=%s",
-            document_id,
-            filename,
-            len(hierarchy.nodes),
-            len(vector_records),
+            "evidence_chain document_id=%s status=%s coverage=%.1f%% incomplete=%d",
+            context.document_id,
+            report.chain_status,
+            report.coverage_pct * 100,
+            len(report.incomplete_node_ids),
         )
+        if report.review_required:
+            # Route to review but do not halt (ARCHITECTURE.md: agent failures continue)
+            context.normalized_tree.setdefault("metadata", {})["evidence_chain_status"] = report.chain_status
+            context.normalized_tree["metadata"]["evidence_chain_coverage"] = report.coverage_pct
+        return context
 
-        return UploadIngestionResult(
-            document_id=document_id,
-            chunks_stored=len(vector_records),
+    async def _stage_embed_nodes(self, context: _IngestionContext) -> _IngestionContext:
+        if self.weaviate is not None:
+            try:
+                self.weaviate.upsert_chunks(context.vector_records)
+            except Exception:
+                logger.warning(
+                    "weaviate upsert failed for document_id=%s filename=%s — "
+                    "canonical nodes already saved, upload will succeed",
+                    context.document_id,
+                    context.filename,
+                    exc_info=True,
+                )
+        context.chunks_stored = len(context.vector_records)
+        return context
+
+    async def _stage_mark_ready(self, context: _IngestionContext) -> _IngestionContext:
+        self._persist_upload_metadata(
+            document_id=context.document_id,
+            filename=context.filename,
+            content=context.content,
+            content_type=context.content_type,
+            hierarchy=context.normalized_tree,
+            ocr_metadata=context.ocr_metadata,
+            chunks_stored=context.chunks_stored,
+            docling_graph=context.docling_graph,
         )
+        return context
+
+    async def _stage_noop(self, context: _IngestionContext) -> _IngestionContext:
+        return context
 
     async def _run_ontology_classification(
         self,
@@ -789,6 +1001,7 @@ class DocumentIngestionService:
         hierarchy: dict[str, Any],
         ocr_metadata: dict[str, Any],
         chunks_stored: int,
+        docling_graph: DoclingGraphArtifact | None = None,
     ) -> None:
         """Persist the original file and metadata under the upload root."""
         target_dir = self.upload_root / document_id
@@ -825,3 +1038,8 @@ class DocumentIngestionService:
             json.dumps(hierarchy, indent=2),
             encoding="utf-8",
         )
+        if docling_graph is not None:
+            (target_dir / "docling_graph.json").write_text(
+                docling_graph.model_dump_json(indent=2),
+                encoding="utf-8",
+            )

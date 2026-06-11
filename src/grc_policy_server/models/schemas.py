@@ -122,6 +122,18 @@ class CompareStreamV4Request(BaseModel):
     forceReExtract: bool = False
 
 
+class GraphCompareTaskPayload(BaseModel):
+    """Celery task payload for graph-tree comparison jobs."""
+
+    doc1: Document
+    doc2: Document
+    testing_department: str = ""
+    include_unchanged: bool = False
+    audit_mode: bool = True
+    force_re_extract: bool = False
+    cache_key: str
+
+
 class DiffChunk(BaseModel):
     type: str
     content: str
@@ -270,3 +282,82 @@ class IngestSource(BaseModel):
 
 class IngestSourcesRequest(BaseModel):
     sources: List[IngestSource]
+
+
+# ---------------------------------------------------------------------------
+# Graph-tree comparison API
+# ---------------------------------------------------------------------------
+
+
+class GraphCompareRequest(BaseModel):
+    doc1: Document
+    doc2: Document
+    testingDepartment: TestingDepartment | None = None
+    includeUnchanged: bool = False
+    auditMode: bool = True
+    forceReExtract: bool = False
+
+
+class GraphNodeRef(BaseModel):
+    nodeId: str
+    stableId: str
+    layer: str
+    label: str
+    ontologyType: str | None = None
+    title: str = ""
+    sectionPath: str = ""
+    page: int | None = None
+    sourceNodeId: str | None = None
+    properties: dict = Field(default_factory=dict)
+
+
+class GraphPropertyChange(BaseModel):
+    path: str
+    oldValue: object | None = None
+    newValue: object | None = None
+
+
+class GraphRelationshipChange(BaseModel):
+    changeType: Literal["ADDED", "REMOVED"]
+    relType: str
+    targetKey: str
+    targetLabel: str = ""
+
+
+class GraphChangeRecord(BaseModel):
+    changeId: str
+    changeType: Literal["ADDED", "REMOVED", "MODIFIED", "UNCHANGED"]
+    severity: Literal["low", "medium", "high"]
+    layer: str
+    ontologyType: str | None = None
+    title: str = ""
+    sectionPath: str = ""
+    doc1Node: GraphNodeRef | None = None
+    doc2Node: GraphNodeRef | None = None
+    propertyChanges: List[GraphPropertyChange] = Field(default_factory=list)
+    relationshipChanges: List[GraphRelationshipChange] = Field(default_factory=list)
+    confidence: float = 1.0
+    requiresHumanReview: bool = False
+    rationale: str = ""
+
+
+class GraphComparisonSummary(BaseModel):
+    totalChanges: int
+    added: int
+    removed: int
+    modified: int
+    unchanged: int = 0
+    highSeverity: int
+    mediumSeverity: int
+    lowSeverity: int
+    requiresHumanReview: bool
+
+
+class GraphComparisonResult(BaseModel):
+    comparisonId: str
+    doc1Id: str
+    doc2Id: str
+    comparisonMode: Literal["document_graph_tree"] = "document_graph_tree"
+    summary: GraphComparisonSummary
+    changes: List[GraphChangeRecord]
+    warnings: List[str] = Field(default_factory=list)

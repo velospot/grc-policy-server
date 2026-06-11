@@ -36,7 +36,7 @@ services:
     networks:
       - grc_shared_net
     profiles:
-      - ""        # default (no profile = always starts)
+      - "" # default (no profile = always starts)
       - offline
 
   # ── Redis ─── required for Celery (async upload/compare) ───────────────────
@@ -84,22 +84,22 @@ services:
 
   # ── Neo4j ─── optional knowledge graph (disabled by default) ───────────────
   # Uncomment and set NEO4J_ENABLED=true to enable.
-  # neo4j:
-  #   container_name: grc_neo4j
-  #   image: neo4j:community-trixie
-  #   volumes:
-  #     - ./neo4j/logs:/logs
-  #     - ./neo4j/config:/config
-  #     - ./neo4j/data:/data
-  #     - ./neo4j/plugins:/plugins
-  #   environment:
-  #     NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}"
-  #   ports:
-  #     - "7474:7474"
-  #     - "7687:7687"
-  #   restart: always
-  #   networks:
-  #     - grc_shared_net
+  neo4j:
+    container_name: grc_neo4j
+    image: neo4j:community-trixie
+    volumes:
+      - ./neo4j/logs:/logs
+      - ./neo4j/config:/config
+      - ./neo4j/data:/data
+      - ./neo4j/plugins:/plugins
+    environment:
+      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    restart: always
+    networks:
+      - grc_shared_net
 
 volumes:
   postgres_data:

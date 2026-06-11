@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from neo4j import GraphDatabase
+
+from grc_policy_server.services.graph.docling_graph_adapter import DoclingGraphArtifact
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,77 @@ class Neo4jClient:
             content_hash=content_hash,
             metadata_json=json.dumps(metadata, sort_keys=True),
             nodes=serialized_nodes,
+            database_=self.settings.database,
+        )
+
+    def upsert_docling_graph(self, artifact: DoclingGraphArtifact) -> None:
+        """Upsert validated tri-layer Docling graph nodes and relationships.
+
+        The write is idempotent by node_id and relationship endpoints/type.
+        Relationship types are generated only from validated internal edge
+        labels and sanitized before interpolation into Cypher.
+        """
+        payloads = [self._serialize_docling_graph_node(node.model_dump(mode="json")) for node in artifact.nodes]
+        by_layer: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for node in payloads:
+            by_layer[str(node.get("layer") or "layout")].append(node)
+
+        self._upsert_docling_graph_nodes("MetaGraphNode", by_layer.get("meta", []))
+        self._upsert_docling_graph_nodes("LayoutGraphNode", by_layer.get("layout", []))
+        self._upsert_docling_graph_nodes("ComplianceNode", by_layer.get("compliance", []))
+
+        edge_payloads = [edge.model_dump(mode="json") for edge in artifact.edges]
+        by_rel_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for edge in edge_payloads:
+            by_rel_type[_safe_rel_type(str(edge.get("rel_type") or "RELATED_TO"))].append(edge)
+
+        for rel_type, edges in by_rel_type.items():
+            self._upsert_docling_graph_edges(rel_type, edges)
+
+    def _upsert_docling_graph_nodes(self, layer_label: str, nodes: list[dict[str, Any]]) -> None:
+        if not nodes:
+            return
+        self._driver.execute_query(
+            f"""
+            UNWIND $nodes AS node
+            MERGE (n:DoclingGraphNode:{layer_label} {{id: node.node_id}})
+            SET n.node_id = node.node_id,
+                n.stable_id = node.stable_id,
+                n.layer = node.layer,
+                n.label = node.label,
+                n.document_id = node.document_id,
+                n.source_node_id = node.source_node_id,
+                n.ontology_type = node.ontology_type,
+                n.title = node.title,
+                n.text = node.text,
+                n.language = node.language,
+                n.page = node.page,
+                n.bbox_refs_json = node.bbox_refs_json,
+                n.properties_json = node.properties_json,
+                n.updated_at = datetime()
+            """,
+            nodes=nodes,
+            database_=self.settings.database,
+        )
+
+    def _upsert_docling_graph_edges(self, rel_type: str, edges: list[dict[str, Any]]) -> None:
+        if not edges:
+            return
+        self._driver.execute_query(
+            f"""
+            UNWIND $edges AS edge
+            MATCH (from_node:DoclingGraphNode {{id: edge.from_node}})
+            MATCH (to_node:DoclingGraphNode {{id: edge.to_node}})
+            MERGE (from_node)-[rel:{rel_type}]->(to_node)
+            SET rel.source = edge.source,
+                rel.confidence = edge.confidence,
+                rel.ontology_version = edge.ontology_version,
+                rel.model_version = edge.model_version,
+                rel.review_flag = edge.review_flag,
+                rel.properties_json = edge.properties_json,
+                rel.updated_at = datetime()
+            """,
+            edges=[self._serialize_docling_graph_edge(edge) for edge in edges],
             database_=self.settings.database,
         )
 
@@ -197,3 +272,19 @@ class Neo4jClient:
         serialized = dict(node)
         serialized["metadata_json"] = json.dumps(serialized.pop("metadata", {}), sort_keys=True)
         return serialized
+
+    def _serialize_docling_graph_node(self, node: dict[str, Any]) -> dict[str, Any]:
+        serialized = dict(node)
+        serialized["bbox_refs_json"] = json.dumps(serialized.pop("bbox_refs", []), sort_keys=True)
+        serialized["properties_json"] = json.dumps(serialized.pop("properties", {}), sort_keys=True)
+        return serialized
+
+    def _serialize_docling_graph_edge(self, edge: dict[str, Any]) -> dict[str, Any]:
+        serialized = dict(edge)
+        serialized["properties_json"] = json.dumps(serialized.pop("properties", {}), sort_keys=True)
+        return serialized
+
+
+def _safe_rel_type(value: str) -> str:
+    rel_type = re.sub(r"[^A-Za-z0-9_]", "_", value.upper()).strip("_")
+    return rel_type or "RELATED_TO"

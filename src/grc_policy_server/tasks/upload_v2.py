@@ -9,6 +9,7 @@ from pathlib import Path
 from grc_policy_server.core.celery_app import celery_app
 from grc_policy_server.core.config import settings
 from grc_policy_server.models.schemas import UploadDocumentResponse, UploadDocumentsResponse
+from grc_policy_server.services.audit.audit_log import AuditLogStore
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient, Neo4jSettings
 from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
@@ -50,6 +51,14 @@ def _build_ingestion_service() -> tuple[
         database_url=settings.database_url,
         upload_root=Path(settings.upload_root),
     )
+    audit_log = (
+        AuditLogStore(
+            database_url=settings.database_url,
+            upload_root=Path(settings.upload_root),
+        )
+        if settings.audit_log_enabled
+        else None
+    )
     service = DocumentIngestionService(
         docling_adapter=docling_adapter,
         weaviate=weaviate,
@@ -57,6 +66,7 @@ def _build_ingestion_service() -> tuple[
         llm=llm,
         upload_root=Path(settings.upload_root),
         canonical_store=canonical_store,
+        audit_log=audit_log,
     )
     return service, weaviate, neo4j, llm
 

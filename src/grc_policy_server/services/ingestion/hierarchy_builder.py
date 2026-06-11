@@ -96,6 +96,23 @@ _SEC_NUM_PREFIX_RE = re.compile(r"^(\d+(?:\.\d+)+)\s*(.*)")
 # Detects OCR fusion where a number and a word are run together without a space:
 #   "5.1.3.2Durchfuhrung" → "5.1.3.2 Durchfuhrung"
 _SEC_FUSION_RE = re.compile(r"(\d+(?:\.\d+)+)([A-Za-zÄÖÜäöüß])")
+# Label fused with number, then letter: "Table16Minimum" → "Table 16 Minimum"
+_LABEL_NUM_FUSION_RE = re.compile(
+    r"\b(Tabellen?|Table|Figure|Figur|Bild|Abbildung|Annexe?|Appendix|Abschnitt|Section)\s*"
+    r"(\d+(?:\.\d+)*)([A-Za-zÄÖÜäöüß])",
+    re.IGNORECASE,
+)
+# Label fused with number then dash-separator: "Tabelle42-Prufung" → "Tabelle 42 Prufung"
+_LABEL_DASH_RE = re.compile(
+    r"\b(Tabellen?|Table|Figure|Figur|Bild|Abbildung|Annexe?|Appendix|Abschnitt|Section)\s*"
+    r"(\d+(?:\.\d+)*)\s*[-–]\s*([A-Za-zÄÖÜäöüß])",
+    re.IGNORECASE,
+)
+# Digit immediately followed by uppercase letter (after label fix): "16Min" → "16 Min"
+_DIGIT_UPPER_RE = re.compile(r"(\d)([A-ZÄÖÜ])")
+# Lowercase-to-uppercase word boundary (CamelCase): "PrufungNummer" → "Prüfung Nummer"
+# Does NOT split all-caps tokens like "EUT", "EMV" because they have no preceding lowercase.
+_CAMEL_BOUNDARY_RE = re.compile(r"([a-zäöüß])([A-ZÄÖÜ])")
 
 # Header/footer suppression -----------------------------------------------
 # Patterns that identify page headers and footers to exclude from hierarchy.
@@ -169,6 +186,43 @@ _SUMMARY_DURATION_RE = re.compile(
 )
 
 
+_STD_REF_IN_TITLE_RE = re.compile(
+    r"\b(CISPR|IEC|ISO|EN|FCC)\s*[\d/]+",
+    re.IGNORECASE,
+)
+
+
+def _stable_id_for_section(
+    title: str,
+    section_path: tuple[str, ...] | list[str],
+    doc_family: str,
+) -> str:
+    """Compute a stable_id for a section node using a priority fallback chain.
+
+    Priority 1 (most stable): standard_id + clause number extracted from title.
+    Priority 2: doc_family + numeric section prefix (e.g. "5.1.2") + title slug.
+    Priority 3: doc_family + slug chain (existing behaviour).
+    """
+    # Priority 1: title contains a standard reference AND a clause number
+    std_match = _STD_REF_IN_TITLE_RE.search(title or "")
+    clause_match = _CLAUSE_MARKER_RE.match(title or "")
+    if std_match and clause_match:
+        std_slug = re.sub(r"\s+", "_", std_match.group(0).strip().lower())
+        clause = clause_match.group(1).strip()
+        return stable_uuid(f"section::{std_slug}::{clause}")
+
+    # Priority 2: title starts with a numeric prefix (e.g. "5.1 Scope")
+    num_match = _SEC_NUM_PREFIX_RE.match(title or "")
+    if num_match:
+        numeric_prefix = num_match.group(1)
+        title_slug = slugify_text(num_match.group(2) or "") or "section"
+        return stable_uuid(f"section::{doc_family}::{numeric_prefix}::{title_slug}")
+
+    # Priority 3: slug chain (original behaviour)
+    stable_key = "/".join(slugify_text(part) or "section" for part in section_path)
+    return stable_uuid(f"section::{doc_family}::{stable_key}")
+
+
 def build_document_hierarchy(
     *,
     document_id: str,
@@ -212,8 +266,7 @@ def build_document_hierarchy(
                 node = section_nodes.get(current_path)
                 if node is None:
                     section_ordinal += 1
-                    stable_key = "/".join(slugify_text(part) or "section" for part in current_path)
-                    stable_id = stable_uuid(f"section::{doc_family}::{stable_key}")
+                    stable_id = _stable_id_for_section(title, current_path, doc_family)
                     node_id = stable_uuid(f"{document_id}::section::{stable_id}")
                     node = HierarchyNode(
                         node_id=node_id,
@@ -441,11 +494,21 @@ def document_family_from_filename(filename: str) -> str:
 
 
 def _repair_section_title_fusion(title: str) -> str:
-    """Insert a space where a numeric section prefix is fused with the next word.
+    """Insert spaces at word boundaries fused together by OCR/PDF extraction.
 
-    Example: "5.1.3.2Durchfuhrung" → "5.1.3.2 Durchfuhrung"
+    Handles three patterns:
+    - Dotted decimal prefix: "5.1.3.2Durchfuhrung" → "5.1.3.2 Durchfuhrung"
+    - Label + number: "Table16Minimum" → "Table 16 Minimum"
+    - CamelCase boundary: "PrufungNummer" → "Prufung Nummer"
     """
-    return _SEC_FUSION_RE.sub(r"\1 \2", title)
+    t = _SEC_FUSION_RE.sub(r"\1 \2", title)         # dotted decimal prefix
+    t = _LABEL_DASH_RE.sub(r"\1 \2 \3", t)          # label + number + dash + text
+    t = _LABEL_NUM_FUSION_RE.sub(r"\1 \2 \3", t)    # label + number + letter
+    t = _DIGIT_UPPER_RE.sub(r"\1 \2", t)             # digit → uppercase boundary
+    t = _CAMEL_BOUNDARY_RE.sub(r"\1 \2", t)          # camelCase word boundary
+    # Collapse any double-spaces introduced by multiple passes
+    t = re.sub(r"  +", " ", t).strip()
+    return t
 
 
 def _expand_numeric_section_path(titles: tuple[str, ...]) -> tuple[str, ...]:

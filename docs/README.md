@@ -11,6 +11,7 @@ This folder contains presentation and architecture deliverables for the document
 - `architecture.md`: architecture overview (current state + target state).
 - `design.md`: detailed system design and decisions.
 - `workflow.md`: end-to-end operational workflows.
+- `docling_graph_neo4j_runbook.md`: DoclingGraph-style tri-layer graph implementation, Neo4j enablement, upload responses, and validation.
 - `uml/`: standalone UML diagrams in Mermaid format.
 
 ## UML Files

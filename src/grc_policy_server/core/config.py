@@ -191,6 +191,7 @@ class Settings(BaseSettings):
     explanation_agent_enabled: bool = True
     max_explanation_tokens: int = 80      # cap per-diff output (L5 mitigation)
     explanation_batch_size: int = 10      # diffs per summary batch (L4 mitigation)
+    graph_explanation_timeout_sec: float = 20.0
 
     # VLM-based table extraction via granite-docling (Ollama API)
     docling_vlm_enabled: bool = False

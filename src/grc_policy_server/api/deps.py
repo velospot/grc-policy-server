@@ -13,12 +13,17 @@ from grc_policy_server.repositories.documents import DocumentRepository
 from grc_policy_server.repositories.human_review import HumanReviewQueue
 from grc_policy_server.services.agents.evidence_agent import EvidenceExtractionAgent
 from grc_policy_server.services.agents.explanation_agent import ExplanationAgent
+from grc_policy_server.services.agents.graph_explanation_agent import GraphExplanationAgent
 from grc_policy_server.services.audit.audit_log import AuditLogStore
 from grc_policy_server.services.comparison.compare_v2_dispatcher import (
     CompareV2Dispatcher,
 )
 from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
 from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
+from grc_policy_server.services.comparison.graph_tree_compare import (
+    GraphArtifactStore,
+    GraphTreeComparisonOrchestrator,
+)
 from grc_policy_server.services.comparison.offline_diff_engine import OfflineDiffEngine
 from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
 from grc_policy_server.services.comparison.real_diff_engine_stream import (
@@ -199,6 +204,24 @@ def get_evidence_agent() -> EvidenceExtractionAgent | None:
     return EvidenceExtractionAgent(base_url=base_url, model=settings.ollama_chat_model)
 
 
+async def get_graph_explanation_agent() -> AsyncGenerator[GraphExplanationAgent | None, None]:
+    """Return graph explanation agent when explanation enrichment is enabled."""
+    if not settings.explanation_agent_enabled:
+        yield None
+        return
+    client = build_llm()
+    try:
+        yield GraphExplanationAgent(
+            llm=client,
+            timeout_sec=settings.graph_explanation_timeout_sec,
+        )
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            logger.exception("failed to close graph explanation LLM client")
+
+
 def _should_use_offline_engine() -> bool:
     """Return True when the offline engine should be selected.
 
@@ -322,6 +345,7 @@ def get_document_ingestion_service(
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
     ontology_classifier: OntologyClassifier | None = Depends(get_ontology_classifier),
     human_review_queue: HumanReviewQueue = Depends(get_human_review_queue),
+    audit_log: AuditLogStore | None = Depends(get_audit_log_store),
 ) -> DocumentIngestionService:
     return DocumentIngestionService(
         docling_adapter=docling_adapter,
@@ -332,6 +356,7 @@ def get_document_ingestion_service(
         canonical_store=canonical_store,
         ontology_classifier=ontology_classifier,
         human_review_queue=human_review_queue,
+        audit_log=audit_log,
     )
 
 
@@ -343,6 +368,7 @@ def get_document_ingestion_service_factory(
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
     ontology_classifier: OntologyClassifier | None = Depends(get_ontology_classifier),
     human_review_queue: HumanReviewQueue = Depends(get_human_review_queue),
+    audit_log: AuditLogStore | None = Depends(get_audit_log_store),
 ) -> Callable[[], DocumentIngestionService]:
     def _factory() -> DocumentIngestionService:
         return DocumentIngestionService(
@@ -354,6 +380,7 @@ def get_document_ingestion_service_factory(
             canonical_store=canonical_store,
             ontology_classifier=ontology_classifier,
             human_review_queue=human_review_queue,
+            audit_log=audit_log,
         )
 
     return _factory
@@ -369,3 +396,14 @@ def get_comparison_cache_store() -> ComparisonCacheStore:
 
 def get_compare_v2_dispatcher() -> CompareV2Dispatcher:
     return CompareV2Dispatcher(upload_root=Path(settings.upload_root))
+
+
+def get_graph_tree_comparison_orchestrator(
+    graph_explanation_agent: GraphExplanationAgent | None = Depends(
+        get_graph_explanation_agent
+    ),
+) -> GraphTreeComparisonOrchestrator:
+    return GraphTreeComparisonOrchestrator(
+        artifact_store=GraphArtifactStore(upload_root=Path(settings.upload_root)),
+        explanation_agent=graph_explanation_agent,
+    )
