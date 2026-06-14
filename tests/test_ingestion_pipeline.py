@@ -304,7 +304,7 @@ async def test_real_diff_engine_enriches_missing_semantics_rule_based():
     # _enrich_nodes_with_semantics now uses rule-based extraction only (no LLM).
     # Use English text so the obligation verb regex matches reliably.
     engine = RealDiffEngine(
-        weaviate=None,  # type: ignore[arg-type]
+        qdrant=None,  # type: ignore[arg-type]
         neo4j=None,  # type: ignore[arg-type]
         llm=None,  # type: ignore[arg-type]
     )
@@ -419,7 +419,7 @@ def test_section_summary_backfill_updates_existing_hierarchy(tmp_path):
         encoding="utf-8",
     )
 
-    class StubWeaviate:
+    class StubQdrant:
         def __init__(self):
             self.records = []
 
@@ -428,7 +428,7 @@ def test_section_summary_backfill_updates_existing_hierarchy(tmp_path):
 
     service = SectionSummaryBackfillService(
         upload_root=tmp_path,
-        weaviate=StubWeaviate(),  # type: ignore[arg-type]
+        qdrant=StubQdrant(),  # type: ignore[arg-type]
         neo4j=None,
     )
 

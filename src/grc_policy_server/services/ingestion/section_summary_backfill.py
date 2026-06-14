@@ -13,7 +13,7 @@ from grc_policy_server.services.ingestion.hierarchy_builder import (
     summarize_section_fragments,
 )
 from grc_policy_server.services.ingestion.hierarchy_models import HierarchyNode
-from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +32,11 @@ class SectionSummaryBackfillService:
         self,
         *,
         upload_root: Path,
-        weaviate: WeaviateClient | None = None,
+        qdrant: QdrantVectorClient | None = None,
         neo4j: Neo4jClient | None = None,
     ) -> None:
         self.upload_root = upload_root
-        self.weaviate = weaviate
+        self.qdrant = qdrant
         self.neo4j = neo4j
 
     def backfill_all(self) -> SectionSummaryBackfillResult:
@@ -96,8 +96,8 @@ class SectionSummaryBackfillService:
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
         vector_records = self._section_vector_records(refreshed_nodes)
-        if vector_records and self.weaviate is not None:
-            self.weaviate.upsert_chunks(vector_records)
+        if vector_records and self.qdrant is not None:
+            self.qdrant.upsert_chunks(vector_records)
 
         if self.neo4j is not None:
             self.neo4j.upsert_document_hierarchy(

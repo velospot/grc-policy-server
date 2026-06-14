@@ -7,7 +7,7 @@ def clear_runtime_env(monkeypatch) -> None:
     for key in (
         "PORT",
         "UPLOAD_ROOT",
-        "WEAVIATE_URL",
+        "QDRANT_URL",
         "POSTGRES_HOST",
         "POSTGRES_PORT",
         "POSTGRES_USER",
@@ -29,7 +29,7 @@ def test_dotenv_values_override_defaults(tmp_path, monkeypatch):
     env_file.write_text(
         "PORT=8500\n"
         "UPLOAD_ROOT=./data/uploads\n"
-        "WEAVIATE_URL=http://localhost:8080\n",
+        "QDRANT_URL=http://localhost:6333\n",
         encoding="utf-8",
     )
 
@@ -37,7 +37,7 @@ def test_dotenv_values_override_defaults(tmp_path, monkeypatch):
 
     assert settings.port == 8500
     assert settings.upload_root == "./data/uploads"
-    assert settings.weaviate_url == "http://localhost:8080"
+    assert settings.qdrant_url == "http://localhost:6333"
 
 
 def test_nullish_dotenv_values_fall_back_to_defaults(tmp_path, monkeypatch):
@@ -46,7 +46,7 @@ def test_nullish_dotenv_values_fall_back_to_defaults(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "PORT=\n"
-        "WEAVIATE_URL=null\n"
+        "QDRANT_URL=null\n"
         "OLLAMA_CHAT_MODEL=none\n",
         encoding="utf-8",
     )
@@ -54,7 +54,7 @@ def test_nullish_dotenv_values_fall_back_to_defaults(tmp_path, monkeypatch):
     settings = Settings(_env_file=env_file)
 
     assert settings.port == 8000
-    assert settings.weaviate_url == "http://weaviate:8080"
+    assert settings.qdrant_url == "http://qdrant:6333"
     assert settings.ollama_chat_model == "granite3.3:8b"
 
 

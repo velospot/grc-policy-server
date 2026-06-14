@@ -81,7 +81,7 @@ async def test_document_ingestion_service_uses_state_machine_without_api_schema_
             self.saved.append(kwargs)
             return []
 
-    class FakeWeaviate:
+    class FakeQdrant:
         def __init__(self):
             self.records = []
 
@@ -89,10 +89,10 @@ async def test_document_ingestion_service_uses_state_machine_without_api_schema_
             self.records.extend(records)
 
     fake_store = FakeStore()
-    fake_weaviate = FakeWeaviate()
+    fake_qdrant = FakeQdrant()
     service = DocumentIngestionService(
         docling_adapter=None,  # type: ignore[arg-type]
-        weaviate=fake_weaviate,  # type: ignore[arg-type]
+        qdrant=fake_qdrant,  # type: ignore[arg-type]
         neo4j=None,
         llm=None,  # type: ignore[arg-type]
         upload_root=tmp_path,
@@ -125,6 +125,6 @@ async def test_document_ingestion_service_uses_state_machine_without_api_schema_
     assert result.document_id
     assert result.chunks_stored > 0
     assert fake_store.saved
-    assert fake_weaviate.records
+    assert fake_qdrant.records
     assert (tmp_path / result.document_id / "metadata.json").exists()
 

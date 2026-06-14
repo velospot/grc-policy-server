@@ -48,7 +48,7 @@ class OfflineDiffEngine(RealDiffEngine):
         max_diffs: int = 40,
     ) -> None:
         super().__init__(
-            weaviate=None,
+            qdrant=None,
             neo4j=None,
             llm=_NOOP_LLM,
             canonical_store=canonical_store,

@@ -76,13 +76,13 @@ class _StubCanonicalStore:
         return self.artifacts_by_document.get(document_id, {})
 
 
-class _FailingFetchWeaviate:
+class _FailingFetchQdrant:
     def __init__(self) -> None:
         self.fetch_called = False
 
     def fetch_chunks_by_document(self, document_id: str) -> list[dict]:
         self.fetch_called = True
-        raise AssertionError("comparison must not use Weaviate as canonical substrate")
+        raise AssertionError("comparison must not use Qdrant as canonical substrate")
 
     def search_section_in_document(self, **kwargs) -> list[dict]:
         return []
@@ -210,7 +210,7 @@ def test_canonical_node_normalizes_glossary_definitions():
 
 
 @pytest.mark.anyio
-async def test_real_diff_engine_compares_canonical_nodes_not_weaviate_chunks():
+async def test_real_diff_engine_compares_canonical_nodes_not_qdrant_chunks():
     left = _node(
         node_id="doc-1-node",
         document_id="doc-1",
@@ -225,9 +225,9 @@ async def test_real_diff_engine_compares_canonical_nodes_not_weaviate_chunks():
         text="Admins must use MFA.",
         obligation="must",
     )
-    weaviate = _FailingFetchWeaviate()
+    qdrant = _FailingFetchQdrant()
     engine = RealDiffEngine(
-        weaviate=weaviate,  # type: ignore[arg-type]
+        qdrant=qdrant,  # type: ignore[arg-type]
         neo4j=None,
         llm=_StubLLM(),  # type: ignore[arg-type]
         canonical_store=_StubCanonicalStore({"doc-1": [left], "doc-2": [right]}),  # type: ignore[arg-type]
@@ -235,7 +235,7 @@ async def test_real_diff_engine_compares_canonical_nodes_not_weaviate_chunks():
 
     result = await engine.compare(_doc("doc-1"), _doc("doc-2"))
 
-    assert weaviate.fetch_called is False
+    assert qdrant.fetch_called is False
     assert result.summary == "structured summary"
     assert len(result.keyDifferences) == 1
     assert result.keyDifferences[0].changeType == "MODIFIED"
@@ -261,7 +261,7 @@ async def test_real_diff_engine_sends_structured_change_records_to_llm():
     )
     llm = _CapturingChangeRecordLLM()
     engine = RealDiffEngine(
-        weaviate=_FailingFetchWeaviate(),  # type: ignore[arg-type]
+        qdrant=_FailingFetchQdrant(),  # type: ignore[arg-type]
         neo4j=None,
         llm=llm,  # type: ignore[arg-type]
         canonical_store=_StubCanonicalStore({"doc-1": [left], "doc-2": [right]}),  # type: ignore[arg-type]
@@ -310,7 +310,7 @@ async def test_comparison_trace_captures_loss_map_checkpoints(tmp_path: Path):
         "doc-2": _debug_artifacts("doc-2", [right]),
     }
     engine = RealDiffEngine(
-        weaviate=_FailingFetchWeaviate(),  # type: ignore[arg-type]
+        qdrant=_FailingFetchQdrant(),  # type: ignore[arg-type]
         neo4j=None,
         llm=_CapturingChangeRecordLLM(),  # type: ignore[arg-type]
         canonical_store=_StubCanonicalStore(
@@ -360,7 +360,7 @@ async def test_real_diff_engine_records_moved_canonical_nodes():
         text="Admins must use MFA.",
     )
     engine = RealDiffEngine(
-        weaviate=_FailingFetchWeaviate(),  # type: ignore[arg-type]
+        qdrant=_FailingFetchQdrant(),  # type: ignore[arg-type]
         neo4j=None,
         llm=_StubLLM(),  # type: ignore[arg-type]
         canonical_store=_StubCanonicalStore({"doc-1": [left], "doc-2": [right]}),  # type: ignore[arg-type]
@@ -396,7 +396,7 @@ async def test_real_diff_engine_records_moved_semantic_changes_as_high():
         obligation="may",
     )
     engine = RealDiffEngine(
-        weaviate=_FailingFetchWeaviate(),  # type: ignore[arg-type]
+        qdrant=_FailingFetchQdrant(),  # type: ignore[arg-type]
         neo4j=None,
         llm=_StubLLM(),  # type: ignore[arg-type]
         canonical_store=_StubCanonicalStore({"doc-1": [left], "doc-2": [right]}),  # type: ignore[arg-type]
@@ -431,7 +431,7 @@ async def test_real_diff_engine_records_cosmetic_text_changes_as_low():
         text="Administrators must maintain record keeping logs:",
     )
     engine = RealDiffEngine(
-        weaviate=_FailingFetchWeaviate(),  # type: ignore[arg-type]
+        qdrant=_FailingFetchQdrant(),  # type: ignore[arg-type]
         neo4j=None,
         llm=_StubLLM(),  # type: ignore[arg-type]
         canonical_store=_StubCanonicalStore({"doc-1": [left], "doc-2": [right]}),  # type: ignore[arg-type]
@@ -469,7 +469,7 @@ async def test_real_diff_engine_records_split_canonical_nodes():
         order=2,
     )
     engine = RealDiffEngine(
-        weaviate=_FailingFetchWeaviate(),  # type: ignore[arg-type]
+        qdrant=_FailingFetchQdrant(),  # type: ignore[arg-type]
         neo4j=None,
         llm=_StubLLM(),  # type: ignore[arg-type]
         canonical_store=_StubCanonicalStore(

@@ -1,14 +1,14 @@
 # GRC Policy Server — Docker Compose (development / default)
 #
-# OFFLINE MODE (PostgreSQL + local Ollama only — no Weaviate, no Redis):
+# OFFLINE MODE (PostgreSQL + local Ollama only — no Qdrant, no Redis):
 #   docker compose up postgres
 #   COMPARISON_BACKEND=offline uvicorn grc_policy_server.main:app
 #
-# FULL STACK (Weaviate + Redis + Celery worker):
+# FULL STACK (Qdrant + Redis + Celery worker):
 #   docker compose up
 #
 # Profiles
-#   (no profile)  — postgres + redis + weaviate (full stack)
+#   (no profile)  — postgres + redis + qdrant (full stack)
 #   offline       — postgres only
 #
 # Usage with offline profile:
@@ -50,37 +50,29 @@ services:
     networks:
       - grc_shared_net
 
-  # ── Weaviate ─── optional vector search backend ─────────────────────────────
+  # ── Qdrant ─── optional vector search backend ──────────────────────────────
   # Not required when COMPARISON_BACKEND=offline.
-  # ServiceHealthRegistry probes this at /v1/.well-known/ready every 30s;
+  # ServiceHealthRegistry probes this at /healthz every 30s;
   # if it's unreachable, auto mode degrades to OfflineDiffEngine automatically.
-  weaviate:
-    container_name: weaviate_chat_db
-    image: cr.weaviate.io/semitechnologies/weaviate:1.31.5
-    command:
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --scheme
-      - http
+  qdrant:
+    container_name: qdrant_vector_db
+    image: qdrant/qdrant:v1.13.6
     ports:
-      - "8085:8080"
-      - "50051:50051"
+      - "6333:6333"
+      - "6334:6334"
     volumes:
-      - weaviate_data:/var/lib/weaviate
-    restart: on-failure:2
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
     networks:
       - grc_shared_net
     environment:
-      DISABLE_TELEMETRY: "true"
-      QUERY_DEFAULTS_LIMIT: "25"
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
-      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-      ENABLE_API_BASED_MODULES: "true"
-      ENABLE_MODULES: "text2vec-ollama,generative-ollama"
-      DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
-      CLUSTER_HOSTNAME: "node1"
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ── Neo4j ─── optional knowledge graph (disabled by default) ───────────────
   # Uncomment and set NEO4J_ENABLED=true to enable.
@@ -103,7 +95,7 @@ services:
 
 volumes:
   postgres_data:
-  weaviate_data:
+  qdrant_data:
 
 networks:
   grc_shared_net:

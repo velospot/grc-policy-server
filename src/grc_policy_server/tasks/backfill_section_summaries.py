@@ -9,18 +9,18 @@ from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient, Neo
 from grc_policy_server.services.ingestion.section_summary_backfill import (
     SectionSummaryBackfillService,
 )
-from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
 
 logger = logging.getLogger(__name__)
 
 
 @celery_app.task(name="grc_policy_server.tasks.backfill_section_summaries")
 def backfill_section_summaries() -> dict[str, int]:
-    weaviate: WeaviateClient | None = None
+    qdrant: QdrantVectorClient | None = None
     try:
-        weaviate = WeaviateClient()
+        qdrant = QdrantVectorClient()
     except Exception:
-        logger.warning("Weaviate unavailable — backfill will skip vector upsert")
+        logger.warning("Qdrant unavailable — backfill will skip vector upsert")
     neo4j: Neo4jClient | None = None
     if settings.neo4j_enabled:
         neo4j = Neo4jClient(
@@ -35,7 +35,7 @@ def backfill_section_summaries() -> dict[str, int]:
     try:
         service = SectionSummaryBackfillService(
             upload_root=Path(settings.upload_root),
-            weaviate=weaviate,
+            qdrant=qdrant,
             neo4j=neo4j,
         )
         result = service.backfill_all()
@@ -48,10 +48,10 @@ def backfill_section_summaries() -> dict[str, int]:
         }
     finally:
         try:
-            if weaviate is not None:
-                weaviate.close()
+            if qdrant is not None:
+                qdrant.close()
         except Exception:
-            logger.exception("failed to close Weaviate client in backfill task")
+            logger.exception("failed to close Qdrant client in backfill task")
         try:
             if neo4j is not None:
                 neo4j.close()

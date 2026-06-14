@@ -136,13 +136,10 @@ class Settings(BaseSettings):
     neo4j_enabled: bool = False
     save_comparison_to_db: bool = False
 
-    weaviate_url: str = "http://weaviate:8080"
-    weaviate_collection: str = "PolicyChunk"
-    weaviate_embedded: bool = False
-    weaviate_api_key: str | None = None
-    weaviate_grpc_host: str | None = None
-    weaviate_grpc_port: int | None = None
-    weaviate_grpc_secure: bool | None = None
+    qdrant_url: str = "http://qdrant:6333"
+    qdrant_collection: str = "PolicyChunk"
+    qdrant_api_key: str | None = None
+    qdrant_vector_size: int = 1024          # BGE-M3 / qwen3-embedding output dimension
     ollama_url: str = "http://localhost:11434"
     ollama_embedding_url: str = "http://localhost:11434"
     ollama_chat_model: str = Field(

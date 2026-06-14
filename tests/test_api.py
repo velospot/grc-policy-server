@@ -12,8 +12,8 @@ from grc_policy_server.api.deps import (
     get_document_ingestion_service_factory,
     get_document_repository,
     get_neo4j_client,
+    get_qdrant_client,
     get_upload_v2_dispatcher,
-    get_weaviate_client,
 )
 from grc_policy_server.core.config import settings
 from grc_policy_server.main import app
@@ -243,7 +243,7 @@ class StubDeleteDocumentRepository:
         return self.delete_results.get(document_id, False)
 
 
-class StubWeaviateDeleteClient:
+class StubQdrantDeleteClient:
     def __init__(
         self,
         *,
@@ -257,7 +257,7 @@ class StubWeaviateDeleteClient:
     def delete_chunks_by_document(self, document_id: str) -> int:
         self.deleted_document_ids.append(document_id)
         if document_id in self.failing_document_ids:
-            raise RuntimeError("weaviate deletion failure")
+            raise RuntimeError("qdrant deletion failure")
         return self.deleted_chunks.get(document_id, 0)
 
 
@@ -279,7 +279,7 @@ class StubNeo4jDeleteClient:
         return self.deleted_nodes.get(document_id, 0)
 
 
-class StubWeaviateHybridSearchClient:
+class StubQdrantHybridSearchClient:
     def __init__(
         self,
         *,
@@ -672,7 +672,7 @@ def test_delete_documents():
             "doc-missing": False,
         }
     )
-    weaviate = StubWeaviateDeleteClient(
+    weaviate = StubQdrantDeleteClient(
         deleted_chunks={
             "doc-local-only": 0,
             "doc-local-and-vectors": 4,
@@ -691,7 +691,7 @@ def test_delete_documents():
         }
     )
     app.dependency_overrides[get_document_repository] = lambda: repository
-    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_qdrant_client] = lambda: weaviate
     app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
@@ -748,10 +748,10 @@ def test_delete_documents():
 
 def test_delete_documents_rejects_duplicate_and_blank_ids():
     repository = StubDeleteDocumentRepository(delete_results={"doc-1": True})
-    weaviate = StubWeaviateDeleteClient(deleted_chunks={"doc-1": 3})
+    weaviate = StubQdrantDeleteClient(deleted_chunks={"doc-1": 3})
     neo4j = StubNeo4jDeleteClient(deleted_nodes={"doc-1": 2})
     app.dependency_overrides[get_document_repository] = lambda: repository
-    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_qdrant_client] = lambda: weaviate
     app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
@@ -786,12 +786,12 @@ def test_delete_documents_rejects_duplicate_and_blank_ids():
     }
 
 
-def test_delete_documents_returns_error_on_weaviate_failure():
+def test_delete_documents_returns_error_on_qdrant_failure():
     repository = StubDeleteDocumentRepository(delete_results={"doc-1": True})
-    weaviate = StubWeaviateDeleteClient(failing_document_ids={"doc-1"})
+    weaviate = StubQdrantDeleteClient(failing_document_ids={"doc-1"})
     neo4j = StubNeo4jDeleteClient(deleted_nodes={"doc-1": 4})
     app.dependency_overrides[get_document_repository] = lambda: repository
-    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_qdrant_client] = lambda: weaviate
     app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
@@ -808,7 +808,7 @@ def test_delete_documents_returns_error_on_weaviate_failure():
                 "documentId": "doc-1",
                 "deleted": False,
                 "deletedChunks": None,
-                "error": "Failed to delete document records from Weaviate",
+                "error": "Failed to delete document records from Qdrant",
             }
         ],
     }
@@ -818,10 +818,10 @@ def test_delete_documents_returns_error_on_weaviate_failure():
 
 def test_delete_documents_returns_error_on_neo4j_failure():
     repository = StubDeleteDocumentRepository(delete_results={"doc-1": True})
-    weaviate = StubWeaviateDeleteClient(deleted_chunks={"doc-1": 3})
+    weaviate = StubQdrantDeleteClient(deleted_chunks={"doc-1": 3})
     neo4j = StubNeo4jDeleteClient(failing_document_ids={"doc-1"})
     app.dependency_overrides[get_document_repository] = lambda: repository
-    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_qdrant_client] = lambda: weaviate
     app.dependency_overrides[get_neo4j_client] = lambda: neo4j
 
     response = client.post(
@@ -846,7 +846,7 @@ def test_delete_documents_returns_error_on_neo4j_failure():
 
 
 def test_hybrid_search_documents():
-    weaviate = StubWeaviateHybridSearchClient(
+    weaviate = StubQdrantHybridSearchClient(
         results_by_document={
             "doc-1": [
                 {
@@ -878,7 +878,7 @@ def test_hybrid_search_documents():
             ],
         }
     )
-    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+    app.dependency_overrides[get_qdrant_client] = lambda: weaviate
 
     response = client.post(
         "/documents/search/hybrid",
@@ -941,7 +941,7 @@ def test_hybrid_search_documents():
 
 
 def test_hybrid_search_documents_rejects_invalid_payload():
-    app.dependency_overrides[get_weaviate_client] = lambda: StubWeaviateHybridSearchClient()
+    app.dependency_overrides[get_qdrant_client] = lambda: StubQdrantHybridSearchClient()
     try:
         response = client.post(
             "/documents/search/hybrid",
@@ -955,11 +955,11 @@ def test_hybrid_search_documents_rejects_invalid_payload():
         assert response.status_code == 400
         assert response.json() == {"detail": "documentId1 and documentId2 must be different"}
     finally:
-        app.dependency_overrides.pop(get_weaviate_client, None)
+        app.dependency_overrides.pop(get_qdrant_client, None)
 
 
 def test_hybrid_search_documents_rejects_blank_query():
-    app.dependency_overrides[get_weaviate_client] = lambda: StubWeaviateHybridSearchClient()
+    app.dependency_overrides[get_qdrant_client] = lambda: StubQdrantHybridSearchClient()
     try:
         response = client.post(
             "/documents/search/hybrid",
@@ -973,12 +973,12 @@ def test_hybrid_search_documents_rejects_blank_query():
         assert response.status_code == 400
         assert response.json() == {"detail": "Query must not be empty"}
     finally:
-        app.dependency_overrides.pop(get_weaviate_client, None)
+        app.dependency_overrides.pop(get_qdrant_client, None)
 
 
-def test_hybrid_search_documents_returns_error_on_weaviate_failure():
-    weaviate = StubWeaviateHybridSearchClient(should_fail=True)
-    app.dependency_overrides[get_weaviate_client] = lambda: weaviate
+def test_hybrid_search_documents_returns_error_on_qdrant_failure():
+    weaviate = StubQdrantHybridSearchClient(should_fail=True)
+    app.dependency_overrides[get_qdrant_client] = lambda: weaviate
 
     response = client.post(
         "/documents/search/hybrid",
@@ -990,7 +990,7 @@ def test_hybrid_search_documents_returns_error_on_weaviate_failure():
         headers=auth_headers(),
     )
     assert response.status_code == 502
-    assert response.json() == {"detail": "Failed to run hybrid search in Weaviate"}
+    assert response.json() == {"detail": "Failed to run hybrid search in Qdrant"}
 
 
 def test_compare_documents():
@@ -1169,16 +1169,24 @@ def test_compare_v2_response_by_query_param():
     assert dispatcher.status_calls == ["compare-job-789"]
 
 
-def test_weaviate_dependency_closes_client(monkeypatch):
+def test_qdrant_dependency_closes_client(monkeypatch):
     closed = {"value": False}
 
-    class StubWeaviateClient:
+    class StubQdrantVectorClient:
+        def _client_get_collections(self):
+            pass
+
+        class _client:
+            @staticmethod
+            def get_collections():
+                pass
+
         def close(self):
             closed["value"] = True
 
-    monkeypatch.setattr("grc_policy_server.api.deps.WeaviateClient", StubWeaviateClient)
+    monkeypatch.setattr("grc_policy_server.api.deps.QdrantVectorClient", StubQdrantVectorClient)
 
-    dep = get_weaviate_client()
+    dep = get_qdrant_client()
     _ = next(dep)
     with pytest.raises(StopIteration):
         next(dep)

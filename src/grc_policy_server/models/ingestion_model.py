@@ -16,7 +16,7 @@ class IngestOptions(BaseModel):
 
     # Storage toggles
     save_to_neo4j: bool = False
-    save_to_weaviate: bool = False
+    save_to_qdrant: bool = False
 
 
 class IngestRequest(BaseModel):

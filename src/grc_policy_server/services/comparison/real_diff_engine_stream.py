@@ -36,7 +36,7 @@ from grc_policy_server.services.comparison.real_diff_engine import (
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.base import BaseLLM
-from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ def _format_hint(node_type: str) -> str:
 
 @dataclass
 class RealDiffEngineStream:
-    weaviate: WeaviateClient | None
+    qdrant: QdrantVectorClient | None
     neo4j: Neo4jClient | None
     llm: BaseLLM
     canonical_store: CanonicalDocumentStore | None = None
@@ -146,7 +146,7 @@ class RealDiffEngineStream:
         }
         yield {"type": "progress", "stage": "load_canonical_nodes"}
         engine = RealDiffEngine(
-            weaviate=self.weaviate,
+            qdrant=self.qdrant,
             neo4j=self.neo4j,
             llm=self.llm,
             canonical_store=self.canonical_store,
@@ -394,7 +394,7 @@ class RealDiffEngineStream:
         yield {"type": "progress", "stage": "loading", "message": "Loading canonical nodes"}
 
         engine = RealDiffEngine(
-            weaviate=self.weaviate,
+            qdrant=self.qdrant,
             neo4j=self.neo4j,
             llm=self.llm,
             canonical_store=self.canonical_store,

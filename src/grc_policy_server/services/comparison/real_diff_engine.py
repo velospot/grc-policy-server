@@ -64,7 +64,7 @@ from grc_policy_server.services.documents.canonical_models import (
 from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient
 from grc_policy_server.services.llm.base import BaseLLM
-from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
 from grc_policy_server.utils.hashing import pure_text_hash as _pure_text_hash
 
 logger = logging.getLogger(__name__)
@@ -273,7 +273,7 @@ def _reconstruct_canonical_table(node: dict) -> "Any | None":
 
 @dataclass
 class RealDiffEngine:
-    weaviate: WeaviateClient | None
+    qdrant: QdrantVectorClient | None
     neo4j: Neo4jClient | None
     llm: BaseLLM
     canonical_store: CanonicalDocumentStore | None = None
@@ -286,18 +286,18 @@ class RealDiffEngine:
     audit_log: "Any | None" = field(default=None)     # AuditLogStore | None
     evidence_agent: "Any | None" = field(default=None) # EvidenceExtractionAgent | None
 
-    def _weaviate_search_fn(self):
-        """Return a search callable that silently falls back on any Weaviate error."""
-        if self.weaviate is None:
+    def _qdrant_search_fn(self):
+        """Return a search callable that silently falls back on any Qdrant error."""
+        if self.qdrant is None:
             return None
-        _weaviate = self.weaviate
+        _qdrant = self.qdrant
 
         def _search(*args, **kwargs):
             try:
-                return _weaviate.search_section_in_document(*args, **kwargs)
+                return _qdrant.search_section_in_document(*args, **kwargs)
             except Exception:
                 logger.warning(
-                    "Weaviate search failed during compare — continuing without vector search",
+                    "Qdrant search failed during compare — continuing without vector search",
                     exc_info=True,
                 )
                 return []
@@ -360,7 +360,7 @@ class RealDiffEngine:
         )
 
         matcher = ClauseMatcher(
-            search_fn=self._weaviate_search_fn(),
+            search_fn=self._qdrant_search_fn(),
             thresholds=self.thresholds,
             topk=self.topk,
             language=language,
@@ -663,7 +663,7 @@ class RealDiffEngine:
         right_nodes = self._filter_non_compliance_nodes(right_nodes)
 
         matcher = ClauseMatcher(
-            search_fn=self._weaviate_search_fn(),
+            search_fn=self._qdrant_search_fn(),
             thresholds=self.thresholds,
             topk=self.topk,
             language=language,
@@ -787,22 +787,22 @@ class RealDiffEngine:
                 f"{document_id}. Re-ingest the document before comparing."
             )
 
-        if self.weaviate is None:
+        if self.qdrant is None:
             raise ValueError(
                 f"No data source available for document {document_id}. "
                 "Ensure canonical_store is configured."
             )
         logger.warning(
-            "canonical comparison nodes unavailable; falling back to Weaviate "
+            "canonical comparison nodes unavailable; falling back to Qdrant "
             "document_id=%s",
             document_id,
         )
         try:
-            return self.weaviate.fetch_chunks_by_document(document_id)
+            return self.qdrant.fetch_chunks_by_document(document_id)
         except Exception as exc:
             raise ValueError(
                 f"No data source available for document {document_id}. "
-                "Canonical store returned no nodes and Weaviate is unreachable."
+                "Canonical store returned no nodes and Qdrant is unreachable."
             ) from exc
 
     async def _run_evidence_extraction(

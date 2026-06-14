@@ -14,6 +14,7 @@ Design
   holds a request for more than ~2 seconds.
 - Thread-safe: a `threading.Lock` guards the status dict.
 """
+
 from __future__ import annotations
 
 import logging
@@ -30,13 +31,13 @@ logger = logging.getLogger(__name__)
 
 ServiceStatus = Literal["up", "down", "disabled", "unknown"]
 
-_PROBE_TIMEOUT = 2.0   # seconds — fast fail on dead service
+_PROBE_TIMEOUT = 2.0  # seconds — fast fail on dead service
 
 
 @dataclass
 class _ServiceState:
     status: ServiceStatus = "unknown"
-    last_checked: float = 0.0        # monotonic seconds
+    last_checked: float = 0.0  # monotonic seconds
     consecutive_failures: int = 0
 
 
@@ -45,7 +46,7 @@ class ServiceHealthRegistry:
 
     Usage:
         registry = get_service_health_registry()
-        if registry.is_healthy("weaviate"):
+        if registry.is_healthy("qdrant"):
             ...
         report = registry.status_report()  # dict for /health/services
     """
@@ -62,7 +63,7 @@ class ServiceHealthRegistry:
         self._circuit_timeout = timeout_s
         self._lock = threading.Lock()
         self._states: dict[str, _ServiceState] = {
-            "weaviate": _ServiceState(),
+            "qdrant": _ServiceState(),
             "neo4j": _ServiceState(),
             "celery": _ServiceState(),
             "llm": _ServiceState(),
@@ -127,13 +128,15 @@ class ServiceHealthRegistry:
     def _probe(self, service: str) -> None:
         try:
             healthy = {
-                "weaviate": self._probe_weaviate,
+                "qdrant": self._probe_qdrant,
                 "neo4j": self._probe_neo4j,
                 "celery": self._probe_celery,
                 "llm": self._probe_llm,
             }[service]()
         except Exception:
-            logger.debug("health probe for %s raised unexpectedly", service, exc_info=True)
+            logger.debug(
+                "health probe for %s raised unexpectedly", service, exc_info=True
+            )
             healthy = False
 
         with self._lock:
@@ -151,8 +154,8 @@ class ServiceHealthRegistry:
                 state.consecutive_failures += 1
                 state.status = "down"
 
-    def _probe_weaviate(self) -> bool:
-        url = settings.weaviate_url.rstrip("/") + "/v1/.well-known/ready"
+    def _probe_qdrant(self) -> bool:
+        url = settings.qdrant_url.rstrip("/") + "/healthz"
         try:
             r = httpx.get(url, timeout=_PROBE_TIMEOUT)
             return r.status_code < 400
@@ -175,7 +178,7 @@ class ServiceHealthRegistry:
 
     def _probe_celery(self) -> bool:
         if settings.comparison_backend == "offline":
-            return None  # disabled in offline mode
+            return False  # disabled in offline mode
         broker_url = settings.celery_broker_url
         if not broker_url:
             return False
@@ -183,11 +186,14 @@ class ServiceHealthRegistry:
         # Redis speaks its own protocol, so we just check TCP connect by
         # hitting the Redis URL host:port via a raw socket rather than httpx.
         import socket
+
         try:
             url = broker_url.replace("redis://", "").replace("rediss://", "")
             url = url.split("/")[0]
             host, _, port = url.partition(":")
-            with socket.create_connection((host, int(port or 6379)), timeout=_PROBE_TIMEOUT):
+            with socket.create_connection(
+                (host, int(port or 6379)), timeout=_PROBE_TIMEOUT
+            ):
                 return True
         except Exception:
             return False

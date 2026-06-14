@@ -144,7 +144,7 @@ docker run -d \
   -e POSTGRES_HOST=grc_postgres \
   -e CELERY_BROKER_URL=redis://grc_redis:6379/0 \
   -e CELERY_RESULT_BACKEND=redis://grc_redis:6379/1 \
-  -e WEAVIATE_URL=http://weaviate_chat_db:8080 \
+  -e QDRANT_URL=http://qdrant_vector_db:6333 \
   -v "$(pwd)/data:/app/data" \
   -p 8500:8500 \
   --restart unless-stopped \
@@ -161,7 +161,7 @@ docker run -d \
   -e POSTGRES_HOST=grc_postgres \
   -e CELERY_BROKER_URL=redis://grc_redis:6379/0 \
   -e CELERY_RESULT_BACKEND=redis://grc_redis:6379/1 \
-  -e WEAVIATE_URL=http://weaviate_chat_db:8080 \
+  -e QDRANT_URL=http://qdrant_vector_db:6333 \
   -e CELERY_WORKER_POOL=prefork \
   -e CELERY_WORKER_CONCURRENCY=4 \
   -v "$(pwd)/data:/app/data" \
@@ -225,14 +225,14 @@ Swagger UI: `http://localhost:8500/docs`
 | `CELERY_TASK_HARD_TIME_LIMIT_SEC` | `3600` | No | Hard kill limit per task |
 | `CELERY_WORKER_MAX_TASKS_PER_CHILD` | `200` | No | Restart worker after N tasks (memory leak guard) |
 
-### Weaviate
+### Qdrant
 
 | Variable | Default | Required | Description |
 |----------|---------|:--------:|-------------|
-| `WEAVIATE_URL` | `http://weaviate:8080` | **YES** | Weaviate service URL |
-| `WEAVIATE_COLLECTION` | `PolicyChunk` | No | Collection name |
-| `WEAVIATE_VECTORIZER` | `huggingface` | No | `ollama` or `huggingface` |
-| `WEAVIATE_HUGGINGFACE_MODEL` | `Qwen/Qwen3-Embedding-0.6B` | No | Model for HuggingFace vectorizer |
+| `QDRANT_URL` | `http://qdrant:6333` | **YES** | Qdrant service URL (REST port 6333) |
+| `QDRANT_COLLECTION` | `PolicyChunk` | No | Collection name |
+| `QDRANT_API_KEY` | _(none)_ | No | API key when Qdrant auth is enabled |
+| `QDRANT_VECTOR_SIZE` | `1024` | No | Embedding dimension — must match `OLLAMA_EMBED_MODEL` output |
 
 ### LLM Backend
 

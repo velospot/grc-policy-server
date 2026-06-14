@@ -46,8 +46,8 @@ from grc_policy_server.services.storage.storage_provider_store import (
     StorageProviderStore,
 )
 from grc_policy_server.services.ontology.ontology_classifier import OntologyClassifier
-from grc_policy_server.services.vector.weaviate_client import (
-    WeaviateClient,
+from grc_policy_server.services.vector.qdrant_store import (
+    QdrantVectorClient,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,15 +78,12 @@ def require_api_bearer_token(
         )
 
 
-def get_weaviate_client() -> Generator[WeaviateClient | None, None, None]:
-    _candidate: WeaviateClient | None = None
+def get_qdrant_client() -> Generator[QdrantVectorClient | None, None, None]:
+    _candidate: QdrantVectorClient | None = None
     try:
-        _candidate = WeaviateClient()
-        # skip_init_checks=True defers the HTTP meta-endpoint check until the first
-        # real operation. Force it now so routes receive None when server is unreachable.
-        _candidate.client.connect()
-        if not _candidate.client.is_ready():
-            raise RuntimeError("Weaviate is not ready")
+        _candidate = QdrantVectorClient()
+        # Probe by listing collections — fast, fails immediately if Qdrant is unreachable.
+        _candidate._client.get_collections()
         try:
             yield _candidate
         finally:
@@ -95,7 +92,7 @@ def get_weaviate_client() -> Generator[WeaviateClient | None, None, None]:
             except Exception:
                 pass
     except Exception:
-        logger.warning("Weaviate unavailable — comparison will use local fallback")
+        logger.warning("Qdrant unavailable — comparison will use local fallback")
         if _candidate is not None:
             try:
                 _candidate.close()
@@ -241,13 +238,13 @@ def _should_use_offline_engine() -> bool:
             get_service_health_registry,
         )
         registry = get_service_health_registry()
-        weaviate_ok = registry.is_healthy("weaviate")
+        qdrant_ok = registry.is_healthy("qdrant")
         llm_ok = registry.is_healthy("llm")
-        if not weaviate_ok or not llm_ok:
+        if not qdrant_ok or not llm_ok:
             logger.info(
                 "auto mode: degrading to offline engine "
-                "(weaviate=%s llm=%s)",
-                "up" if weaviate_ok else "down",
+                "(qdrant=%s llm=%s)",
+                "up" if qdrant_ok else "down",
                 "up" if llm_ok else "down",
             )
             return True
@@ -255,7 +252,7 @@ def _should_use_offline_engine() -> bool:
 
 
 def get_diff_engine(
-    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
+    qdrant: QdrantVectorClient | None = Depends(get_qdrant_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
@@ -269,7 +266,7 @@ def get_diff_engine(
             trace_store=trace_store,
         )
     return RealDiffEngine(
-        weaviate=weaviate,
+        qdrant=qdrant,
         neo4j=neo4j,
         llm=llm,
         canonical_store=canonical_store,
@@ -294,7 +291,7 @@ def get_explanation_agent(
 
 
 def get_diff_engine_stream(
-    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
+    qdrant: QdrantVectorClient | None = Depends(get_qdrant_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     explanation_llm: BaseLLM = Depends(get_explanation_agent),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
@@ -302,7 +299,7 @@ def get_diff_engine_stream(
 ) -> RealDiffEngineStream:
     # Streaming uses the full online engine; offline callers use /compare directly.
     return RealDiffEngineStream(
-        weaviate=weaviate,
+        qdrant=qdrant,
         neo4j=neo4j,
         llm=explanation_llm,
         canonical_store=canonical_store,
@@ -339,7 +336,7 @@ def get_human_review_queue() -> HumanReviewQueue:
 
 def get_document_ingestion_service(
     docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
-    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
+    qdrant: QdrantVectorClient | None = Depends(get_qdrant_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
@@ -349,7 +346,7 @@ def get_document_ingestion_service(
 ) -> DocumentIngestionService:
     return DocumentIngestionService(
         docling_adapter=docling_adapter,
-        weaviate=weaviate,
+        qdrant=qdrant,
         neo4j=neo4j,
         llm=llm,
         upload_root=Path(settings.upload_root),
@@ -362,7 +359,7 @@ def get_document_ingestion_service(
 
 def get_document_ingestion_service_factory(
     docling_adapter: DoclingAdapter = Depends(get_docling_adapter),
-    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
+    qdrant: QdrantVectorClient | None = Depends(get_qdrant_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
     llm: BaseLLM = Depends(get_llm_client),
     canonical_store: CanonicalDocumentStore = Depends(get_canonical_document_store),
@@ -373,7 +370,7 @@ def get_document_ingestion_service_factory(
     def _factory() -> DocumentIngestionService:
         return DocumentIngestionService(
             docling_adapter=docling_adapter,
-            weaviate=weaviate,
+            qdrant=qdrant,
             neo4j=neo4j,
             llm=llm,
             upload_root=Path(settings.upload_root),

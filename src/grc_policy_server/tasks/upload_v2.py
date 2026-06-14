@@ -19,23 +19,23 @@ from grc_policy_server.services.ingestion.document_ingestion_service import (
 from grc_policy_server.services.ingestion.upload_v2_models import UploadTaskFilePayload
 from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.llm.factory import build_llm
-from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
 
 logger = logging.getLogger(__name__)
 
 
 def _build_ingestion_service() -> tuple[
     DocumentIngestionService,
-    WeaviateClient | None,
+    QdrantVectorClient | None,
     Neo4jClient | None,
     BaseLLM,
 ]:
     docling_adapter = DoclingAdapter()
-    weaviate: WeaviateClient | None = None
+    qdrant: QdrantVectorClient | None = None
     try:
-        weaviate = WeaviateClient()
+        qdrant = QdrantVectorClient()
     except Exception:
-        logger.warning("Weaviate unavailable in upload task — vector index skipped")
+        logger.warning("Qdrant unavailable in upload task — vector index skipped")
     neo4j: Neo4jClient | None = None
     if settings.neo4j_enabled:
         neo4j = Neo4jClient(
@@ -61,26 +61,26 @@ def _build_ingestion_service() -> tuple[
     )
     service = DocumentIngestionService(
         docling_adapter=docling_adapter,
-        weaviate=weaviate,
+        qdrant=qdrant,
         neo4j=neo4j,
         llm=llm,
         upload_root=Path(settings.upload_root),
         canonical_store=canonical_store,
         audit_log=audit_log,
     )
-    return service, weaviate, neo4j, llm
+    return service, qdrant, neo4j, llm
 
 
 async def _run_ingest(payload_files: list[UploadTaskFilePayload]) -> UploadDocumentsResponse:
-    service, weaviate, neo4j, llm = _build_ingestion_service()
+    service, qdrant, neo4j, llm = _build_ingestion_service()
     try:
         return await _ingest_payloads(service=service, payload_files=payload_files)
     finally:
         try:
-            if weaviate is not None:
-                weaviate.close()
+            if qdrant is not None:
+                qdrant.close()
         except Exception:
-            logger.exception("failed to close Weaviate client in upload_v2 task")
+            logger.exception("failed to close Qdrant client in upload_v2 task")
         try:
             if neo4j is not None:
                 neo4j.close()

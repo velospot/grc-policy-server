@@ -15,34 +15,30 @@ from grc_policy_server.services.documents.canonical_store import CanonicalDocume
 from grc_policy_server.services.graph.graph_neo4j_client import Neo4jClient, Neo4jSettings
 from grc_policy_server.services.llm.base import BaseLLM
 from grc_policy_server.services.llm.factory import build_llm
-from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
 
 logger = logging.getLogger(__name__)
 
 
 def _build_diff_engine() -> tuple[
     RealDiffEngine,
-    WeaviateClient | None,
+    QdrantVectorClient | None,
     Neo4jClient | None,
     BaseLLM,
 ]:
-    weaviate: WeaviateClient | None = None
-    _candidate: WeaviateClient | None = None
+    qdrant: QdrantVectorClient | None = None
     try:
-        _candidate = WeaviateClient()
-        # skip_init_checks=True defers the HTTP meta-endpoint check until the first
-        # real operation. Force it now so we know before handing the client to the engine.
-        _candidate.client.connect()
-        if not _candidate.client.is_ready():
-            raise RuntimeError("Weaviate is not ready")
-        weaviate = _candidate
+        qdrant = QdrantVectorClient()
+        # Probe — fails immediately if Qdrant is unreachable.
+        qdrant._client.get_collections()
     except Exception:
-        logger.warning("Weaviate unavailable in compare task — local fallback will be used")
-        if _candidate is not None:
+        logger.warning("Qdrant unavailable in compare task — local fallback will be used")
+        if qdrant is not None:
             try:
-                _candidate.close()
+                qdrant.close()
             except Exception:
                 pass
+        qdrant = None
     neo4j: Neo4jClient | None = None
     if settings.neo4j_enabled:
         neo4j = Neo4jClient(
@@ -56,7 +52,7 @@ def _build_diff_engine() -> tuple[
 
     llm = build_llm()
     engine = RealDiffEngine(
-        weaviate=weaviate,
+        qdrant=qdrant,
         neo4j=neo4j,
         llm=llm,
         canonical_store=CanonicalDocumentStore(
@@ -65,11 +61,11 @@ def _build_diff_engine() -> tuple[
         ),
         trace_store=ComparisonTraceStore(upload_root=Path(settings.upload_root)),
     )
-    return engine, weaviate, neo4j, llm
+    return engine, qdrant, neo4j, llm
 
 
 async def _compare_payload(payload: CompareTaskPayload) -> dict[str, Any]:
-    engine, weaviate, neo4j, llm = _build_diff_engine()
+    engine, qdrant, neo4j, llm = _build_diff_engine()
     try:
         effective_save_to_db = payload.save_to_db or settings.save_comparison_to_db
         result = await engine.compare(
@@ -94,10 +90,10 @@ async def _compare_payload(payload: CompareTaskPayload) -> dict[str, Any]:
         }
     finally:
         try:
-            if weaviate is not None:
-                weaviate.close()
+            if qdrant is not None:
+                qdrant.close()
         except Exception:
-            logger.exception("failed to close Weaviate client in compare_v2 task")
+            logger.exception("failed to close Qdrant client in compare_v2 task")
         try:
             if neo4j is not None:
                 neo4j.close()

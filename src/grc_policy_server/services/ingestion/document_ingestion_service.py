@@ -50,7 +50,7 @@ from grc_policy_server.services.validation.evidence_chain_validator import (
     EvidenceChainValidator,
     MIN_COMPLIANCE_NODES,
 )
-from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
 from grc_policy_server.utils.hashing import sha256_hex, stable_uuid
 
 logger = logging.getLogger(__name__)
@@ -405,7 +405,7 @@ class DocumentIngestionService:
         self,
         *,
         docling_adapter: DoclingAdapter,
-        weaviate: WeaviateClient | None,
+        qdrant: QdrantVectorClient | None,
         neo4j: Neo4jClient | None,
         llm: BaseLLM,
         upload_root: Path,
@@ -415,7 +415,7 @@ class DocumentIngestionService:
         audit_log=None,             # AuditLogStore | None
     ):
         self.docling_adapter = docling_adapter
-        self.weaviate = weaviate
+        self.qdrant = qdrant
         self.neo4j = neo4j
         self.llm = llm
         self.upload_root = upload_root
@@ -686,12 +686,12 @@ class DocumentIngestionService:
         return context
 
     async def _stage_embed_nodes(self, context: _IngestionContext) -> _IngestionContext:
-        if self.weaviate is not None:
+        if self.qdrant is not None:
             try:
-                self.weaviate.upsert_chunks(context.vector_records)
+                self.qdrant.upsert_chunks(context.vector_records)
             except Exception:
                 logger.warning(
-                    "weaviate upsert failed for document_id=%s filename=%s — "
+                    "qdrant upsert failed for document_id=%s filename=%s — "
                     "canonical nodes already saved, upload will succeed",
                     context.document_id,
                     context.filename,

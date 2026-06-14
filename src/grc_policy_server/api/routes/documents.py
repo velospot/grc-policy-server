@@ -11,9 +11,9 @@ from grc_policy_server.api.deps import (
     get_document_repository,
     get_human_review_queue,
     get_neo4j_client,
+    get_qdrant_client,
     get_storage_provider_store,
     get_upload_v2_dispatcher,
-    get_weaviate_client,
     require_api_bearer_token,
 )
 from grc_policy_server.models.schemas import (
@@ -50,7 +50,7 @@ from grc_policy_server.services.storage.source_resolver import (
 )
 from grc_policy_server.services.storage.storage_provider_store import StorageProviderStore
 from grc_policy_server.repositories.human_review import HumanReviewQueue
-from grc_policy_server.services.vector.weaviate_client import WeaviateClient
+from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -484,7 +484,7 @@ def download_document_pdf(
 def delete_documents(
     payload: DeleteDocumentsRequest,
     repository: DocumentRepository = Depends(get_document_repository),
-    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
+    qdrant: QdrantVectorClient | None = Depends(get_qdrant_client),
     neo4j: Neo4jClient | None = Depends(get_neo4j_client),
 ):
     """Delete local document artifacts and associated vector and graph records."""
@@ -520,20 +520,20 @@ def delete_documents(
             continue
         seen_document_ids.add(document_id)
 
-        # Weaviate — optional (same pattern as ingestion)
+        # Qdrant — optional (same pattern as ingestion)
         deleted_chunks = 0
-        if weaviate is not None:
+        if qdrant is not None:
             try:
-                deleted_chunks = weaviate.delete_chunks_by_document(document_id)
+                deleted_chunks = qdrant.delete_chunks_by_document(document_id)
             except Exception:
                 logger.warning(
-                    "weaviate delete failed document_id=%s — continuing with other stores",
+                    "qdrant delete failed document_id=%s — continuing with other stores",
                     document_id,
                     exc_info=True,
                 )
         else:
             logger.debug(
-                "weaviate unavailable — vector records not deleted for document_id=%s",
+                "qdrant unavailable — vector records not deleted for document_id=%s",
                 document_id,
             )
 
@@ -607,13 +607,13 @@ def delete_documents(
 )
 def hybrid_search_documents(
     payload: HybridSearchRequest,
-    weaviate: WeaviateClient | None = Depends(get_weaviate_client),
+    qdrant: QdrantVectorClient | None = Depends(get_qdrant_client),
 ):
-    """Run hybrid retrieval in Weaviate for two documents and return matched chunks."""
-    if weaviate is None:
+    """Run hybrid retrieval in Qdrant for two documents and return matched chunks."""
+    if qdrant is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Weaviate is not available — hybrid search requires vector storage",
+            detail="Qdrant is not available — hybrid search requires vector storage",
         )
     document_id_1 = payload.documentId1.strip()
     document_id_2 = payload.documentId2.strip()
@@ -636,12 +636,12 @@ def hybrid_search_documents(
         )
 
     try:
-        doc1_matches = weaviate.hybrid_search_in_document(
+        doc1_matches = qdrant.hybrid_search_in_document(
             query_string=query_string,
             target_document_id=document_id_1,
             limit=payload.limit,
         )
-        doc2_matches = weaviate.hybrid_search_in_document(
+        doc2_matches = qdrant.hybrid_search_in_document(
             query_string=query_string,
             target_document_id=document_id_2,
             limit=payload.limit,
@@ -654,7 +654,7 @@ def hybrid_search_documents(
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to run hybrid search in Weaviate",
+            detail="Failed to run hybrid search in Qdrant",
         )
 
     return HybridSearchResponse(

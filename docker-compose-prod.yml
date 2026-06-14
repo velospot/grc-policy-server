@@ -48,33 +48,25 @@ services:
   #     networks:
   #         - grc_shared_net
 
-  weaviate:
-    container_name: weaviate_chat_db
-    command:
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --scheme
-      - http
-    image: cr.weaviate.io/semitechnologies/weaviate:1.31.5
+  qdrant:
+    container_name: qdrant_vector_db
+    image: qdrant/qdrant:v1.13.6
     ports:
-      - 8080:8080
-      - 50051:50051
+      - "6333:6333"
+      - "6334:6334"
     volumes:
-      - ./weaviate_data:/var/lib/weaviate
-    restart: on-failure:2
+      - ./qdrant_data:/qdrant/storage
+    restart: unless-stopped
     networks:
       - grc_shared_net
     environment:
-      DISABLE_TELEMETRY: true
-      QUERY_DEFAULTS_LIMIT: 25
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
-      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-      ENABLE_API_BASED_MODULES: "true"
-      ENABLE_MODULES: "text2vec-ollama,generative-ollama"
-      DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
-      CLUSTER_HOSTNAME: "node1"
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   # GPU worker — requires NVIDIA Container Toolkit on the host.
   # Build image first: docker build -f Dockerfile.gpu -t grc-policy-server:gpu .
   # worker-gpu:
