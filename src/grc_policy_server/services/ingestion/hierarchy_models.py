@@ -3,8 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-NodeType = Literal["document", "section", "clause", "table", "figure"]
-ChunkType = Literal["heading", "clause", "table", "figure", "footnote"]
+NodeType = Literal[
+    "document", "section", "clause", "table", "figure",
+    "list_item", "note", "warning", "definition", "formula",
+    "heading", "table_caption",
+]
+ChunkType = Literal[
+    "heading", "clause", "table", "figure", "footnote",
+    "list_item", "note", "warning", "definition", "formula", "table_caption",
+]
 
 
 @dataclass(frozen=True)
@@ -123,11 +130,16 @@ class HierarchyNode:
             "table_schema_signature": str(
                 self.metadata.get("table_schema_signature") or ""
             ),
+            "table_headers": list(self.metadata.get("table_headers") or []),
             "table_row_fingerprints": list(
                 self.metadata.get("table_row_fingerprints") or []
             ),
             "table_normalized_caption": str(
                 self.metadata.get("normalized_caption") or ""
+            ),
+            "table_quality_flags": list(self.metadata.get("table_quality_flags") or []),
+            "low_confidence_table": bool(
+                self.metadata.get("low_confidence_table", False)
             ),
         }
 

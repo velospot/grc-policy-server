@@ -162,6 +162,75 @@ def detect_numeric_changes(
     return changes
 
 
+_LATEX_NUM_RE = re.compile(
+    r"([+-]?\s*\d+(?:[.,]\d+)?(?:\s*[eE][+-]?\d+)?)"
+    r"\s*(?:\\,)?\s*"
+    r"(?:\\text\{([^}]*)\}|\\mathrm\{([^}]*)\}|([A-Za-zµΩ°%]+))?"
+)
+
+
+def extract_numeric_from_latex(latex: str) -> list[tuple[float, str]]:
+    """Extract (value, unit) pairs from a LaTeX math string.
+
+    Handles common patterns like ``1000\\,\\text{V}`` → ``(1000.0, "v")``,
+    ``30\\,\\text{dB}\\mu\\text{V/m}`` → ``(30.0, "dbuv/m")``.
+    Returns an empty list when the string contains no numeric values.
+    """
+    results: list[tuple[float, str]] = []
+    text = latex or ""
+    # Normalise common LaTeX macros to plain text for easier parsing
+    text = re.sub(r"\\,", " ", text)
+    text = re.sub(r"\\mu", "µ", text)
+    text = re.sub(r"\\Omega", "Ω", text)
+    text = re.sub(r"\\leq|\\le\b", "≤", text)
+    text = re.sub(r"\\geq|\\ge\b", "≥", text)
+    text = re.sub(r"\\pm", "±", text)
+    text = re.sub(r"\\cdot", "·", text)
+    for m in _LATEX_NUM_RE.finditer(text):
+        num_str = m.group(1).replace(",", ".").replace(" ", "")
+        unit = (m.group(2) or m.group(3) or m.group(4) or "").strip().lower()
+        try:
+            val = float(num_str)
+        except ValueError:
+            continue
+        results.append((val, unit))
+    return results
+
+
+def detect_numeric_changes_formula(
+    left_latex: str | None,
+    right_latex: str | None,
+) -> list[dict[str, Any]]:
+    """Detect numeric value changes between two LaTeX formula strings.
+
+    Supplements ``detect_numeric_changes`` for formula nodes where values are
+    encoded in LaTeX rather than plain text.  Returns the same structure as
+    ``detect_numeric_changes`` so callers can merge the lists.
+    """
+    left_pairs = extract_numeric_from_latex(left_latex or "")
+    right_pairs = extract_numeric_from_latex(right_latex or "")
+    # Build comparable sets: (value, unit) tuples
+    left_set = set(left_pairs)
+    right_set = set(right_pairs)
+    if left_set == right_set:
+        return []
+
+    changes: list[dict[str, Any]] = []
+    removed = sorted(left_set - right_set, key=lambda x: x[0])
+    added = sorted(right_set - left_set, key=lambda x: x[0])
+    for (old_v, old_u), (new_v, new_u) in zip(removed, added, strict=False):
+        changes.append({
+            "type": "modified",
+            "old": f"{old_v} {old_u}".strip(),
+            "new": f"{new_v} {new_u}".strip(),
+        })
+    for (old_v, old_u) in removed[len(added):]:
+        changes.append({"type": "removed", "old": f"{old_v} {old_u}".strip(), "new": None})
+    for (new_v, new_u) in added[len(removed):]:
+        changes.append({"type": "added", "old": None, "new": f"{new_v} {new_u}".strip()})
+    return changes
+
+
 def is_formatting_only_change(
     left_text: str | None,
     right_text: str | None,

@@ -1,7 +1,5 @@
 """Tests for multi-backend table extraction ensemble."""
 
-import pytest
-
 from grc_policy_server.services.ingestion.table_extraction_ensemble import (
     TableCandidate,
     TableExtractorEnsemble,

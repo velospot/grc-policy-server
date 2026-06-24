@@ -8,17 +8,12 @@ being in the same section with identical content.
 
 from __future__ import annotations
 
-import pytest
-
 from grc_policy_server.services.comparison.table_diff_engine import (
     TableDiffEngine,
     TableDiffImpact,
-    TableDiffType,
 )
 from grc_policy_server.services.documents.canonical_table_model import (
-    BBox,
     CanonicalTable,
-    CellType,
     TableCell,
     TableColumn,
     TableRow,
@@ -189,7 +184,6 @@ class TestSection615TableHandling:
         )
 
         # Export to JSON
-        json_str = table.to_json()
         table_dict = table.to_dict()
 
         # Verify JSON contains all required info

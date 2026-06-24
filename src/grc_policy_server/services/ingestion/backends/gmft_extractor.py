@@ -42,11 +42,10 @@ class GmftTableExtractor(TableExtractor):
             page_numbers: Optional list of specific pages to process
 
         Returns:
-            List of TableCandidate objects
+        List of TableCandidate objects
         """
         try:
             import pdf2image
-            from PIL import Image
 
             # Convert PDF to images
             images = await asyncio.to_thread(
@@ -84,11 +83,9 @@ class GmftTableExtractor(TableExtractor):
             page_number: Page number in the PDF
 
         Returns:
-            List of TableCandidate objects for this page
+        List of TableCandidate objects for this page
         """
         try:
-            from transformers import AutoFeatureExtractor, AutoModelForObjectDetection
-
             # Lazy load model
             if self.model is None:
                 await self._load_model()

@@ -6,18 +6,14 @@ Backward compatibility: existing severity values must not change.
 
 from __future__ import annotations
 
-import pytest
-
 from grc_policy_server.services.comparison.severity_classifier import (
     AuditDisposition,
     ClassificationContext,
     ClassificationResult,
-    DefaultRule,
     DomainEntityRule,
     NormativeObligationEscalationRule,
     ObligationStrengthCodeRule,
     PresentationOnlyRule,
-    RuleEngine,
     SemanticImpact,
     SeverityClassifier,
     SeverityReasonCode,

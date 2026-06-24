@@ -4,8 +4,10 @@ from datetime import datetime
 import pytest
 from fastapi.testclient import TestClient
 
+import grc_policy_server.api.deps as api_deps
 from grc_policy_server.api.deps import (
     get_compare_v2_dispatcher,
+    get_compare_v5_dispatcher,
     get_comparison_cache_store,
     get_diff_engine,
     get_diff_engine_stream,
@@ -21,10 +23,15 @@ from grc_policy_server.models.domain import DocumentDomain
 from grc_policy_server.models.schemas import (
     ActionItem,
     ComparisonResult,
+    CompareRequest,
     DocumentReference,
     KeyDifference,
 )
 from grc_policy_server.repositories.documents import DocumentRepository
+from grc_policy_server.services.comparison.compare_v2_dispatcher import (
+    CeleryNotAvailableError,
+)
+from grc_policy_server.services.comparison.compare_v2_models import CompareTaskPayload
 from grc_policy_server.services.ingestion.document_ingestion_service import (
     UploadIngestionResult,
 )
@@ -75,8 +82,80 @@ class StubDocumentRepository:
         ]
 
 
+class StubCompareDocumentRepository:
+    def __init__(self, missing: set[str] | None = None) -> None:
+        self.missing = missing or set()
+
+    def get_document(self, document_id: str) -> DocumentDomain | None:
+        if document_id in self.missing:
+            return None
+        return DocumentDomain(
+            id=document_id,
+            name=f"{document_id}.pdf",
+            version="1.0",
+            upload_date=datetime(2026, 2, 1),
+            size_bytes=2048,
+            category="standard",
+            file_path=f"/tmp/{document_id}.pdf",
+        )
+
+
+class StubCanonicalStore:
+    def __init__(self, nodes_by_document: dict[str, list[dict]]) -> None:
+        self.nodes_by_document = nodes_by_document
+
+    def load_comparison_nodes(self, document_id: str) -> list[dict]:
+        return self.nodes_by_document.get(document_id, [])
+
+
+def test_qdrant_dependency_does_not_swallow_endpoint_exceptions(monkeypatch):
+    class StubRemote:
+        def get_collections(self):
+            return []
+
+    class StubQdrantClient:
+        def __init__(self) -> None:
+            self._client = StubRemote()
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(api_deps, "QdrantVectorClient", StubQdrantClient)
+
+    generator = api_deps.get_qdrant_client()
+    client_instance = next(generator)
+    assert isinstance(client_instance, StubQdrantClient)
+
+    with pytest.raises(RuntimeError, match="endpoint failed"):
+        generator.throw(RuntimeError("endpoint failed"))
+    assert client_instance.closed is True
+
+
 class StubDiffEngine:
-    async def compare(self, doc1, doc2, force_re_extract: bool = False, audit_mode: bool = False, save_to_db: bool = False) -> ComparisonResult:
+    def __init__(self, canonical_store=None) -> None:
+        self.calls = []
+        self.canonical_store = canonical_store
+
+    async def compare(
+        self,
+        doc1,
+        doc2,
+        force_re_extract: bool = False,
+        audit_mode: bool = False,
+        save_to_db: bool = False,
+        testing_department: str = "",
+    ) -> ComparisonResult:
+        self.calls.append(
+            {
+                "doc1_id": doc1.id,
+                "doc2_id": doc2.id,
+                "force_re_extract": force_re_extract,
+                "audit_mode": audit_mode,
+                "save_to_db": save_to_db,
+                "testing_department": testing_department,
+            }
+        )
         return ComparisonResult(
             summary=f"Compared {doc1.id} with {doc2.id}",
             keyDifferences=[
@@ -115,6 +194,9 @@ class StubDiffEngine:
 
 
 class StubDiffEngineStream:
+    def __init__(self) -> None:
+        self.v4_calls = []
+
     async def compare_stream(self, doc1, doc2, force_re_extract: bool = False):
         yield {"type": "progress", "stage": "load_chunks"}
         yield {
@@ -147,6 +229,33 @@ class StubDiffEngineStream:
                 ).model_dump()
             ],
             "followUpQuestions": ["Is legal review required for the new SLA?"],
+        }
+
+    async def compare_stream_v4(
+        self,
+        doc1,
+        doc2,
+        force_re_extract: bool = False,
+        testing_department: str | None = None,
+    ):
+        self.v4_calls.append(
+            {
+                "doc1_id": doc1.id,
+                "doc2_id": doc2.id,
+                "force_re_extract": force_re_extract,
+                "testing_department": testing_department,
+            }
+        )
+        yield {
+            "type": "payload",
+            "doc1_id": doc1.id,
+            "doc2_id": doc2.id,
+            "testing_department": testing_department,
+        }
+        yield {
+            "type": "done",
+            "total_diffs": 0,
+            "accuracy_metrics": None,
         }
 
 
@@ -352,6 +461,24 @@ def test_openapi_includes_core_routes():
     assert "/v2/compare" in paths
     assert "/v2/compare/response" in paths
     assert "/v2/compare/response/{job_id}" in paths
+    assert "/v5/compare" in paths
+    assert "/v5/compare/stream" in paths
+    assert (
+        paths["/v5/compare"]["post"]["requestBody"]["content"]["application/json"][
+            "schema"
+        ]
+        == paths["/v2/compare"]["post"]["requestBody"]["content"]["application/json"][
+            "schema"
+        ]
+    )
+    assert (
+        paths["/v5/compare"]["post"]["responses"]["202"]["content"][
+            "application/json"
+        ]["schema"]
+        == paths["/v2/compare"]["post"]["responses"]["202"]["content"][
+            "application/json"
+        ]["schema"]
+    )
 
     security_schemes = schema["components"]["securitySchemes"]
     assert any(
@@ -1003,6 +1130,189 @@ def test_compare_documents():
     assert payload["keyDifferences"][0]["changeType"] == "MODIFIED"
 
 
+def test_compare_v5_enqueue_matches_v2_contract():
+    dispatcher = StubCompareV2Dispatcher(enqueue_job_id="compare-v5-job-123")
+
+    class StubCacheStore:
+        def load_for_pair(self, *, doc1_id: str, doc2_id: str):
+            return None
+
+        def cached_job_id_for_pair(
+            self,
+            *,
+            doc1_id: str,
+            doc2_id: str,
+            api_version: str = "v2",
+            testing_department: str | None = None,
+        ) -> str:
+            return f"cached-{doc1_id}-{doc2_id}"
+
+        def cache_key_for_pair(
+            self,
+            *,
+            doc1_id: str,
+            doc2_id: str,
+            api_version: str = "v2",
+            testing_department: str | None = None,
+        ) -> str:
+            return f"{api_version}:{testing_department or ''}:{doc1_id}:{doc2_id}"
+
+    app.dependency_overrides[get_compare_v5_dispatcher] = lambda: dispatcher
+    app.dependency_overrides[get_comparison_cache_store] = lambda: StubCacheStore()
+
+    try:
+        response = client.post(
+            "/v5/compare",
+            json=compare_payload(),
+            headers=auth_headers(),
+        )
+    finally:
+        app.dependency_overrides.pop(get_compare_v5_dispatcher, None)
+        app.dependency_overrides.pop(get_comparison_cache_store, None)
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "jobId": "compare-v5-job-123",
+        "status": "queued",
+        "cacheHit": False,
+        "result": None,
+    }
+    assert len(dispatcher.enqueue_calls) == 1
+    queued_payload = dispatcher.enqueue_calls[0]
+    assert queued_payload.doc1.id == "policy-v1"
+    assert queued_payload.doc2.id == "policy-v2"
+    assert queued_payload.cache_key == "v5:EMC:policy-v1:policy-v2"
+    assert queued_payload.api_version == "v5"
+    assert queued_payload.testing_department == "EMC"
+    assert queued_payload.save_to_db is False
+
+
+def test_compare_v5_job_can_be_polled_from_v2_response_endpoint():
+    dispatcher = StubCompareV2Dispatcher(
+        enqueue_job_id="compare-v5-job-456",
+        status_payload={
+            "jobId": "compare-v5-job-456",
+            "status": "queued",
+            "done": False,
+            "result": None,
+            "error": None,
+            "cacheHit": False,
+        },
+    )
+
+    class StubCacheStore:
+        def load_for_pair(self, *, doc1_id: str, doc2_id: str):
+            return None
+
+        def cached_job_id_for_pair(
+            self,
+            *,
+            doc1_id: str,
+            doc2_id: str,
+            api_version: str = "v2",
+            testing_department: str | None = None,
+        ) -> str:
+            return f"cached-{doc1_id}-{doc2_id}"
+
+        def cache_key_for_pair(
+            self,
+            *,
+            doc1_id: str,
+            doc2_id: str,
+            api_version: str = "v2",
+            testing_department: str | None = None,
+        ) -> str:
+            return f"{api_version}:{testing_department or ''}:{doc1_id}:{doc2_id}"
+
+    app.dependency_overrides[get_compare_v5_dispatcher] = lambda: dispatcher
+    app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
+    app.dependency_overrides[get_comparison_cache_store] = lambda: StubCacheStore()
+
+    try:
+        create_response = client.post(
+            "/v5/compare",
+            json=compare_payload(),
+            headers=auth_headers(),
+        )
+        status_response = client.get(
+            "/v2/compare/response/compare-v5-job-456",
+            headers=auth_headers(),
+        )
+    finally:
+        app.dependency_overrides.pop(get_compare_v5_dispatcher, None)
+        app.dependency_overrides.pop(get_compare_v2_dispatcher, None)
+        app.dependency_overrides.pop(get_comparison_cache_store, None)
+
+    assert create_response.status_code == 202
+    assert create_response.json()["jobId"] == "compare-v5-job-456"
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        "jobId": "compare-v5-job-456",
+        "status": "queued",
+        "done": False,
+        "result": None,
+        "error": None,
+        "cacheHit": False,
+    }
+    assert dispatcher.status_calls == ["compare-v5-job-456"]
+
+
+def test_compare_v5_dispatcher_requires_celery_queue(monkeypatch):
+    monkeypatch.setattr(settings, "comparison_backend", "offline")
+    dispatcher = api_deps.get_compare_v5_dispatcher()
+    request = CompareRequest.model_validate(compare_payload())
+    task_payload = CompareTaskPayload(
+        doc1=request.doc1,
+        doc2=request.doc2,
+        force_re_extract=request.forceReExtract,
+        cache_key="policy-v1:policy-v2",
+        audit_mode=request.auditMode,
+        save_to_db=request.saveToDb,
+    )
+
+    with pytest.raises(CeleryNotAvailableError, match="Celery queue is required"):
+        dispatcher.enqueue_compare(task_payload)
+
+
+def test_compare_v5_stream_by_id():
+    stream_engine = StubDiffEngineStream()
+    app.dependency_overrides[get_diff_engine_stream] = lambda: stream_engine
+    app.dependency_overrides[get_document_repository] = lambda: StubCompareDocumentRepository()
+
+    try:
+        with client.stream(
+            "POST",
+            "/v5/compare/stream",
+            json={
+                "doc1Id": "doc-a",
+                "doc2Id": "doc-b",
+                "testingDepartment": "Environment",
+            },
+            headers=auth_headers(),
+        ) as response:
+            body = response.read().decode("utf-8")
+    finally:
+        app.dependency_overrides.pop(get_diff_engine_stream, None)
+        app.dependency_overrides.pop(get_document_repository, None)
+
+    assert response.status_code == 200
+    assert "data:" in body
+    assert '"type": "payload"' in body
+    assert '"type": "done"' in body
+    assert '"apiVersion": "v5"' in body
+    assert '"serviceVersion": "compare-v5"' in body
+    assert '"responseSchema": "comparison_stream_event_v5"' in body
+    assert '"hybridSignals"' in body
+    assert stream_engine.v4_calls == [
+        {
+            "doc1_id": "doc-a",
+            "doc2_id": "doc-b",
+            "force_re_extract": False,
+            "testing_department": "Environment",
+        }
+    ]
+
+
 def test_compare_with_summary():
     app.dependency_overrides[get_diff_engine_stream] = lambda: StubDiffEngineStream()
     response = client.post(
@@ -1024,10 +1334,24 @@ def test_compare_v2_enqueue():
         def load_for_pair(self, *, doc1_id: str, doc2_id: str):
             return None
 
-        def cached_job_id_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+        def cached_job_id_for_pair(
+            self,
+            *,
+            doc1_id: str,
+            doc2_id: str,
+            api_version: str = "v2",
+            testing_department: str | None = None,
+        ) -> str:
             return f"cached-{doc1_id}-{doc2_id}"
 
-        def cache_key_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+        def cache_key_for_pair(
+            self,
+            *,
+            doc1_id: str,
+            doc2_id: str,
+            api_version: str = "v2",
+            testing_department: str | None = None,
+        ) -> str:
             return f"{doc1_id}:{doc2_id}"
 
     app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher
@@ -1061,10 +1385,24 @@ def test_compare_v2_enqueue_returns_cached_result():
         def load_for_pair(self, *, doc1_id: str, doc2_id: str):
             return cached_result
 
-        def cached_job_id_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+        def cached_job_id_for_pair(
+            self,
+            *,
+            doc1_id: str,
+            doc2_id: str,
+            api_version: str = "v2",
+            testing_department: str | None = None,
+        ) -> str:
             return f"cached-{doc1_id}-{doc2_id}"
 
-        def cache_key_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
+        def cache_key_for_pair(
+            self,
+            *,
+            doc1_id: str,
+            doc2_id: str,
+            api_version: str = "v2",
+            testing_department: str | None = None,
+        ) -> str:
             return f"{doc1_id}:{doc2_id}"
 
     app.dependency_overrides[get_compare_v2_dispatcher] = lambda: dispatcher

@@ -308,10 +308,13 @@ class CanonicalDocumentStore:
                     """,
                     (document_id,),
                 ).fetchall()
-        except Exception:
-            logger.exception(
-                "failed to load canonical nodes from PostgreSQL document_id=%s",
+        except Exception as exc:
+            logger.warning(
+                "failed to load canonical nodes from PostgreSQL document_id=%s "
+                "— falling back to local canonical files error_type=%s error=%s",
                 document_id,
+                type(exc).__name__,
+                str(exc),
             )
             self._postgres_disabled = True
             return []

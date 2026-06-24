@@ -84,7 +84,10 @@ def test_graph_compare_rest_endpoint_uses_separate_route(monkeypatch) -> None:
     )
 
     client = TestClient(app)
-    _doc = lambda doc_id: {"id": doc_id, "name": doc_id, "version": "1.0", "uploadDate": "2026-01-01", "size": "1MB", "category": "standard"}
+
+    def _doc(doc_id: str) -> dict:
+        return {"id": doc_id, "name": doc_id, "version": "1.0", "uploadDate": "2026-01-01", "size": "1MB", "category": "standard"}
+
     response = client.post(
         "/graph-compare",
         json={"doc1": _doc("doc-a"), "doc2": _doc("doc-b")},
@@ -139,7 +142,10 @@ def test_graph_compare_stream_endpoint_emits_sse_events() -> None:
     app.dependency_overrides[get_graph_tree_comparison_orchestrator] = lambda: StubOrchestrator()
     try:
         client = TestClient(app)
-        _doc = lambda doc_id: {"id": doc_id, "name": doc_id, "version": "1.0", "uploadDate": "2026-01-01", "size": "1MB", "category": "standard"}
+
+        def _doc(doc_id: str) -> dict:
+            return {"id": doc_id, "name": doc_id, "version": "1.0", "uploadDate": "2026-01-01", "size": "1MB", "category": "standard"}
+
         with client.stream(
             "POST",
             "/graph-compare/stream",

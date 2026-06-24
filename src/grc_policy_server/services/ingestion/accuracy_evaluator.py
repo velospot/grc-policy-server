@@ -144,7 +144,7 @@ class AccuracyEvaluator:
         metrics = DocumentAccuracyMetrics(document_id=document_id, filename=document_id)
 
         if not nodes_file.exists():
-            metrics.errors.append(f"canonical_nodes.json not found")
+            metrics.errors.append("canonical_nodes.json not found")
             return metrics
 
         try:
@@ -280,7 +280,6 @@ class AccuracyEvaluator:
         meta = node.get("metadata") or {}
         ts = meta.get("table_structure") or {}
         cells_raw = ts.get("cells") or []
-        num_rows = int(ts.get("num_rows") or 0)
         num_cols = int(ts.get("num_cols") or 0)
         heading_path = node.get("heading_path") or []
         caption = heading_path[0] if heading_path else ""

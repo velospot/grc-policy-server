@@ -6,6 +6,7 @@ Usage:
     uv run python scripts/benchmark_metrics.py
     uv run python scripts/benchmark_metrics.py --uploads-dir data/uploads --output data/benchmark_results/metrics.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -15,10 +16,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 # ---------------------------------------------------------------------------
 # Document metrics (from hierarchy.json)
 # ---------------------------------------------------------------------------
+
 
 def _doc_metrics(doc_dir: Path) -> dict | None:
     hier_path = doc_dir / "hierarchy.json"
@@ -63,7 +64,16 @@ def _doc_metrics(doc_dir: Path) -> dict | None:
         if total > 0:
             non_empty = sum(1 for c in cells if str(c.get("text", "")).strip())
             fill = non_empty / total
-            numeric = sum(1 for c in cells if any(ch.isdigit() for ch in str(c.get("text", "")))) / max(1, non_empty) if non_empty else 0
+            numeric = (
+                sum(
+                    1
+                    for c in cells
+                    if any(ch.isdigit() for ch in str(c.get("text", "")))
+                )
+                / max(1, non_empty)
+                if non_empty
+                else 0
+            )
             table_fills.append(fill)
             table_numeric.append(numeric)
 
@@ -72,8 +82,6 @@ def _doc_metrics(doc_dir: Path) -> dict | None:
             stub_header_count += 1
         if tmeta.get("table_source") in ("camelot", "ensemble"):
             camelot_count += 1
-
-    quality_score = tmeta.get("extraction_quality_score") if table_nodes else None
 
     return {
         "id": meta.get("id"),
@@ -84,8 +92,12 @@ def _doc_metrics(doc_dir: Path) -> dict | None:
         "unsectioned_node_count": unsectioned,
         "tables": {
             "count": len(table_nodes),
-            "avg_fill_rate": round(sum(table_fills) / len(table_fills), 4) if table_fills else None,
-            "avg_numeric_density": round(sum(table_numeric) / len(table_numeric), 4) if table_numeric else None,
+            "avg_fill_rate": round(sum(table_fills) / len(table_fills), 4)
+            if table_fills
+            else None,
+            "avg_numeric_density": round(sum(table_numeric) / len(table_numeric), 4)
+            if table_numeric
+            else None,
             "stub_header_count": stub_header_count,
             "camelot_or_ensemble_count": camelot_count,
         },
@@ -96,10 +108,9 @@ def _doc_metrics(doc_dir: Path) -> dict | None:
 # Comparison pair metrics (from latest trace for each pair)
 # ---------------------------------------------------------------------------
 
+
 def _latest_trace(trace_dir: Path, doc1_id: str, doc2_id: str) -> Path | None:
-    candidates = sorted(
-        trace_dir.glob(f"{doc1_id}__{doc2_id}__*.json"), reverse=True
-    )
+    candidates = sorted(trace_dir.glob(f"{doc1_id}__{doc2_id}__*.json"), reverse=True)
     return candidates[0] if candidates else None
 
 
@@ -131,8 +142,11 @@ def _pair_metrics(
         crs = []
 
     matched = align.get("matchedNodes") or align.get("total_matches") or 0
-    ul = align.get("unmatchedLeft") or 0
-    ur = align.get("unmatchedRight") or 0
+    # unmatchedLeft/Right are present in RealDiffEngine traces; fall back to
+    # REMOVED/ADDED change counts for OfflineDiffEngine traces.
+    cc_all = dr.get("changeCounts") or {}
+    ul = align.get("unmatchedLeft") if align.get("unmatchedLeft") is not None else cc_all.get("REMOVED", 0)
+    ur = align.get("unmatchedRight") if align.get("unmatchedRight") is not None else cc_all.get("ADDED", 0)
     total = matched + ul + ur
     match_rate = round(matched / total, 4) if total else 0.0
 
@@ -162,6 +176,9 @@ def _pair_metrics(
 
     warnings = data.get("warnings") or []
 
+    # matchTypes: RealDiffEngine traces use "matchTypes"; OfflineDiffEngine uses "confidence_breakdown"
+    match_types = align.get("matchTypes") or align.get("confidence_breakdown") or {}
+
     return {
         "name": pair.get("name"),
         "family": pair.get("family"),
@@ -172,19 +189,24 @@ def _pair_metrics(
         "unmatched_left": ul,
         "unmatched_right": ur,
         "match_rate": match_rate,
+        "match_types": match_types,
         "change_counts": dr.get("changeCounts", {}),
         "severity_distribution": sev,
         "total_change_records": len(crs),
         "table_change_records": table_records,
         "empty_doc1content_rate_table_modified": (
             round(empty_doc1_table_content / modified_table_close, 4)
-            if modified_table_close else None
+            if modified_table_close
+            else None
         ),
         "compatibility_warning_issued": any(
-            "low section-title overlap" in str(w).lower() or "different standards" in str(w).lower()
+            "low section-title overlap" in str(w).lower()
+            or "different standards" in str(w).lower()
             for w in warnings
         ),
-        "confidence_mean": round(sum(conf_vals) / len(conf_vals), 4) if conf_vals else None,
+        "confidence_mean": round(sum(conf_vals) / len(conf_vals), 4)
+        if conf_vals
+        else None,
         "confidence_min": round(min(conf_vals), 4) if conf_vals else None,
         "numeric_changes": dr.get("numericChanges"),
         "table_changes": dr.get("tableChanges"),
@@ -196,14 +218,19 @@ def _pair_metrics(
 # Global summary
 # ---------------------------------------------------------------------------
 
-def _global_summary(doc_metrics_list: list[dict], pair_metrics_list: list[dict]) -> dict:
+
+def _global_summary(
+    doc_metrics_list: list[dict], pair_metrics_list: list[dict]
+) -> dict:
     in_family = [
-        p for p in pair_metrics_list
+        p
+        for p in pair_metrics_list
         if not p.get("expected_incompatible") and p.get("match_rate") is not None
     ]
     avg_match = (
         round(sum(p["match_rate"] for p in in_family) / len(in_family), 4)
-        if in_family else None
+        if in_family
+        else None
     )
     camelot_total = sum(
         d.get("tables", {}).get("camelot_or_ensemble_count", 0)
@@ -216,7 +243,11 @@ def _global_summary(doc_metrics_list: list[dict], pair_metrics_list: list[dict])
         if isinstance(d, dict)
     )
     max_hier = max(
-        (d.get("section_hierarchy_max_depth", 0) for d in doc_metrics_list if isinstance(d, dict)),
+        (
+            d.get("section_hierarchy_max_depth", 0)
+            for d in doc_metrics_list
+            if isinstance(d, dict)
+        ),
         default=0,
     )
     return {
@@ -234,31 +265,59 @@ def _global_summary(doc_metrics_list: list[dict], pair_metrics_list: list[dict])
 _ITER_TABLE_HEADER = """\
 ## 11. Iteration History
 
-| Timestamp | Git | Avg Match | TL p013 | DNVGL p023 | Camelot | Stub Headers | Max Depth |
-|---|---|---|---|---|---|---|---|"""
+| Timestamp | Git | Avg Match | TL p013 | DNVGL p023 | stable_id | section | qdrant | Camelot | Stub Headers | Max Depth |
+|---|---|---|---|---|---|---|---|---|---|---|"""
+
+
+def _strategy_totals(pairs: list[dict]) -> tuple[int, int, int]:
+    """Sum match_types across all pairs: (stable_id, section_alignment, qdrant)."""
+    stable, section, qdrant = 0, 0, 0
+    for p in pairs:
+        mt = p.get("match_types") or {}
+        stable += mt.get("stable_id", 0)
+        section += mt.get("section_alignment", 0)
+        qdrant += mt.get("vector_search", mt.get("qdrant", 0))
+    return stable, section, qdrant
 
 
 def _append_iteration_row(md_path: Path, metrics: dict) -> None:
     ts = metrics.get("run_timestamp", "?")[:16]
     commit = (metrics.get("git_commit") or "?")[:7]
     s = metrics.get("summary", {})
-    avg = f"{s.get('avg_match_rate_in_family', 0)*100:.1f}%" if s.get("avg_match_rate_in_family") is not None else "?"
+    avg = (
+        f"{s.get('avg_match_rate_in_family', 0) * 100:.1f}%"
+        if s.get("avg_match_rate_in_family") is not None
+        else "?"
+    )
     camelot = s.get("camelot_upgrade_count", 0)
     stub = s.get("stub_header_count_total", "?")
     depth = s.get("max_section_hierarchy_depth", "?")
 
+    pairs = metrics.get("comparison_pairs", [])
     tl_p013 = next(
-        (f"{p['match_rate']*100:.1f}%" for p in metrics.get("comparison_pairs", [])
-         if "p013" in p.get("name", "") and "TL" in p.get("name", "") and p.get("match_rate") is not None),
+        (
+            f"{p['match_rate'] * 100:.1f}%"
+            for p in pairs
+            if "p013" in p.get("name", "")
+            and "TL" in p.get("name", "")
+            and p.get("match_rate") is not None
+        ),
         "?",
     )
     dnvgl_p023 = next(
-        (f"{p['match_rate']*100:.1f}%" for p in metrics.get("comparison_pairs", [])
-         if "p023" in p.get("name", "") and p.get("match_rate") is not None),
+        (
+            f"{p['match_rate'] * 100:.1f}%"
+            for p in pairs
+            if "p023" in p.get("name", "") and p.get("match_rate") is not None
+        ),
         "?",
     )
 
-    new_row = f"| {ts} | {commit} | {avg} | {tl_p013} | {dnvgl_p023} | {camelot} | {stub} | {depth} |"
+    stable, section, qdrant = _strategy_totals(pairs)
+    new_row = (
+        f"| {ts} | {commit} | {avg} | {tl_p013} | {dnvgl_p023}"
+        f" | {stable} | {section} | {qdrant} | {camelot} | {stub} | {depth} |"
+    )
 
     if not md_path.exists():
         return
@@ -271,10 +330,11 @@ def _append_iteration_row(md_path: Path, metrics: dict) -> None:
     if new_row not in content:
         # Find end of table: insert before next ## or end of file
         import re
+
         pattern = r"(\| Timestamp.*?\|(?:\n\|[^\n]*\|)*)"
         m = re.search(pattern, content, re.DOTALL)
         if m:
-            updated = content[: m.end()] + "\n" + new_row + content[m.end():]
+            updated = content[: m.end()] + "\n" + new_row + content[m.end() :]
         else:
             updated = content + "\n" + new_row
         md_path.write_text(updated)
@@ -283,6 +343,7 @@ def _append_iteration_row(md_path: Path, metrics: dict) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def compute_metrics(uploads_dir: Path) -> dict:
     doc_metrics_list = []
@@ -308,11 +369,13 @@ def compute_metrics(uploads_dir: Path) -> dict:
             for doc in doc_metrics_list:
                 fname_to_id[doc["name"]] = doc["id"]
             for p in static_pairs:
-                pairs.append({
-                    **p,
-                    "doc1_id": fname_to_id.get(p["doc1_filename"]),
-                    "doc2_id": fname_to_id.get(p["doc2_filename"]),
-                })
+                pairs.append(
+                    {
+                        **p,
+                        "doc1_id": fname_to_id.get(p["doc1_filename"]),
+                        "doc2_id": fname_to_id.get(p["doc2_filename"]),
+                    }
+                )
 
     trace_dir = uploads_dir / "_comparison_traces"
     pair_metrics_list = []
@@ -376,11 +439,13 @@ def main() -> None:
 
     # Print summary
     s = metrics["summary"]
-    print(f"\n=== Benchmark Metrics ===")
+    print("\n=== Benchmark Metrics ===")
     print(f"Git commit      : {metrics['git_commit']}")
     print(f"Documents       : {len(metrics['documents'])}")
     if s.get("avg_match_rate_in_family") is not None:
-        print(f"Avg match rate  : {s['avg_match_rate_in_family']:.1%} (in-family pairs)")
+        print(
+            f"Avg match rate  : {s['avg_match_rate_in_family']:.1%} (in-family pairs)"
+        )
     print(f"Max hier depth  : {s.get('max_section_hierarchy_depth', '?')}")
     print(f"Camelot upgrades: {s.get('camelot_upgrade_count', 0)}")
     print(f"Stub headers    : {s.get('stub_header_count_total', '?')}")
@@ -391,7 +456,9 @@ def main() -> None:
         mr_s = f"{mr:.1%}" if mr is not None else "?"
         cc = p.get("change_counts") or {}
         warn = "⚠ incompatible" if p.get("compatibility_warning_issued") else ""
-        print(f"  {p['name']:<40} match={mr_s:>7}  {cc}  {warn}")
+        mt = p.get("match_types") or {}
+        mt_s = f"stable={mt.get('stable_id',0)} sect={mt.get('section_alignment',0)} qdrant={mt.get('vector_search', mt.get('qdrant',0))}"
+        print(f"  {p['name']:<40} match={mr_s:>7}  [{mt_s}]  {cc}  {warn}")
 
     print(f"\nMetrics saved: {out_path}")
 

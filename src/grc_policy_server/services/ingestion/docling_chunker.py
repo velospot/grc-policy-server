@@ -17,6 +17,7 @@ from grc_policy_server.services.ingestion.chunk_enricher import _detect_section_
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
 from grc_policy_server.services.ingestion.table_normalization import (
     extract_headers_from_cells,
+    classify_columns,
     normalize_table_cells,
     rows_from_cells,
     schema_signature,
@@ -252,8 +253,10 @@ _HEADER_FOOTER_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def chunk_document(dl_doc, *, merge_list_items: bool) -> list[Any]:
+    # merge_list_items=False preserves individual bullets as separate chunks
+    # so list_item nodes can be produced for fine-grained comparison.
     chunker = HierarchicalChunker(
-        merge_list_items=merge_list_items,
+        merge_list_items=False,
         always_emit_headings=True,
         serializer_provider=MDTableSerializerProvider(),
     )
@@ -342,6 +345,7 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
                 metadata["table_headers"] = headers
                 metadata["table_header_depth"] = header_depth
                 metadata["table_schema_signature"] = schema_signature(headers)
+                metadata["table_column_roles"] = classify_columns(headers)
                 metadata["table_row_fingerprints"] = [
                     str(row.get("row_fingerprint") or "") for row in rows
                 ]
@@ -355,7 +359,7 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
         elif any(
             item.label == DocItemLabel.FORMULA for item in doc_chunk.meta.doc_items
         ):
-            chunk_type = "clause"  # formulas are treated as clause-level content
+            chunk_type = "formula"
             # Extract LaTeX from docling formula enrichment — stored as item.text
             formula_latex = ""
             for item in doc_chunk.meta.doc_items:
@@ -369,11 +373,23 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
                 metadata["formula_display"] = f"$${formula_latex}$$"
                 metadata["node_type_hint"] = "formula"
         elif any(
+            item.label == DocItemLabel.LIST_ITEM for item in doc_chunk.meta.doc_items
+        ):
+            chunk_type = "list_item"
+            metadata["node_type_hint"] = "list_item"
+        elif any(
             item.label == DocItemLabel.FOOTNOTE for item in doc_chunk.meta.doc_items
         ):
             chunk_type = "footnote"
             metadata["section_role"] = "informative"
             metadata["node_type_hint"] = "footnote"
+        elif any(
+            item.label == DocItemLabel.CAPTION for item in doc_chunk.meta.doc_items
+        ):
+            chunk_type = "table_caption"
+            metadata["node_type_hint"] = "table_caption"
+            if text:
+                metadata["normalized_caption"] = _normalize_table_caption(text)
         elif any(
             item.label == DocItemLabel.PICTURE for item in doc_chunk.meta.doc_items
         ):

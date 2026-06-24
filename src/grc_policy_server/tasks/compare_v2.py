@@ -7,6 +7,10 @@ from typing import Any
 
 from grc_policy_server.core.celery_app import celery_app
 from grc_policy_server.core.config import settings
+from grc_policy_server.services.comparison.auditor_v5 import (
+    infer_testing_department,
+    shape_v5_auditor_result,
+)
 from grc_policy_server.services.comparison.compare_v2_models import CompareTaskPayload
 from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
 from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
@@ -20,7 +24,10 @@ from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
 logger = logging.getLogger(__name__)
 
 
-def _build_diff_engine() -> tuple[
+def _build_diff_engine(
+    *,
+    api_version: str = "v2",
+) -> tuple[
     RealDiffEngine,
     QdrantVectorClient | None,
     Neo4jClient | None,
@@ -60,21 +67,44 @@ def _build_diff_engine() -> tuple[
             upload_root=Path(settings.upload_root),
         ),
         trace_store=ComparisonTraceStore(upload_root=Path(settings.upload_root)),
+        max_diffs=1000 if api_version == "v5" else 40,
+        max_llm_explanations=40,
+        max_llm_markdown_summaries=40,
+        suppress_low_diffs=api_version != "v5",
     )
     return engine, qdrant, neo4j, llm
 
 
 async def _compare_payload(payload: CompareTaskPayload) -> dict[str, Any]:
-    engine, qdrant, neo4j, llm = _build_diff_engine()
+    engine, qdrant, neo4j, llm = _build_diff_engine(api_version=payload.api_version)
     try:
         effective_save_to_db = payload.save_to_db or settings.save_comparison_to_db
+        testing_department = payload.testing_department or infer_testing_department(
+            payload.doc1,
+            payload.doc2,
+        )
         result = await engine.compare(
             payload.doc1,
             payload.doc2,
             force_re_extract=payload.force_re_extract,
-            audit_mode=payload.audit_mode,
-            save_to_db=effective_save_to_db,
+            audit_mode=True if payload.api_version == "v5" else payload.audit_mode,
+            save_to_db=effective_save_to_db and payload.api_version != "v5",
+            testing_department=testing_department,
         )
+        if payload.api_version == "v5":
+            result = shape_v5_auditor_result(
+                result,
+                doc1=payload.doc1,
+                doc2=payload.doc2,
+                testing_department=testing_department,
+            )
+            if effective_save_to_db:
+                engine._try_save_comparison_to_postgres(  # noqa: SLF001
+                    payload.doc1.id,
+                    payload.doc2.id,
+                    result,
+                    True,
+                )
         cache_store = ComparisonCacheStore(upload_root=Path(settings.upload_root))
         cache_store.save_for_key(
             key=payload.cache_key,

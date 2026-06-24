@@ -18,6 +18,7 @@ from grc_policy_server.services.audit.audit_log import AuditLogStore
 from grc_policy_server.services.comparison.compare_v2_dispatcher import (
     CompareV2Dispatcher,
 )
+from grc_policy_server.services.comparison.compare_v5_service import CompareV5Service
 from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
 from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
 from grc_policy_server.services.comparison.graph_tree_compare import (
@@ -84,13 +85,6 @@ def get_qdrant_client() -> Generator[QdrantVectorClient | None, None, None]:
         _candidate = QdrantVectorClient()
         # Probe by listing collections — fast, fails immediately if Qdrant is unreachable.
         _candidate._client.get_collections()
-        try:
-            yield _candidate
-        finally:
-            try:
-                _candidate.close()
-            except Exception:
-                pass
     except Exception:
         logger.warning("Qdrant unavailable — comparison will use local fallback")
         if _candidate is not None:
@@ -99,6 +93,15 @@ def get_qdrant_client() -> Generator[QdrantVectorClient | None, None, None]:
             except Exception:
                 pass
         yield None
+        return
+
+    try:
+        yield _candidate
+    finally:
+        try:
+            _candidate.close()
+        except Exception:
+            pass
 
 
 def get_neo4j_client() -> Generator[Neo4jClient | None, None, None]:
@@ -312,6 +315,16 @@ def get_document_repository() -> DocumentRepository:
     return DocumentRepository(upload_root=Path(settings.upload_root))
 
 
+def get_compare_v5_stream_service(
+    stream_engine: RealDiffEngineStream = Depends(get_diff_engine_stream),
+    document_repo: DocumentRepository = Depends(get_document_repository),
+) -> CompareV5Service:
+    return CompareV5Service(
+        document_repo=document_repo,
+        stream_engine=stream_engine,
+    )
+
+
 def get_ontology_classifier() -> OntologyClassifier | None:
     """Return an OntologyClassifier instance, or None when disabled."""
     if not settings.ontology_classification_enabled:
@@ -393,6 +406,13 @@ def get_comparison_cache_store() -> ComparisonCacheStore:
 
 def get_compare_v2_dispatcher() -> CompareV2Dispatcher:
     return CompareV2Dispatcher(upload_root=Path(settings.upload_root))
+
+
+def get_compare_v5_dispatcher() -> CompareV2Dispatcher:
+    return CompareV2Dispatcher(
+        upload_root=Path(settings.upload_root),
+        allow_offline_fallback=False,
+    )
 
 
 def get_graph_tree_comparison_orchestrator(

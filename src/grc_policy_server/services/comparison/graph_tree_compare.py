@@ -1,17 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re as _re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
-
-import logging
-
-# Regex helpers for section hierarchy extraction
-_CLAUSE_NUM_RE = _re.compile(r'\b(\d+(?:\.\d+)+)\b')  # multi-level: "5.2.3"
-_TOP_LEVEL_NUM_RE = _re.compile(r'^\s*(\d+)\b')        # top-level only: "5"
 
 from grc_policy_server.models.schemas import (
     ActionItem,
@@ -35,6 +30,10 @@ from grc_policy_server.services.graph.docling_graph_adapter import (
 from grc_policy_server.utils.hashing import normalize_text, sha256_hex
 
 logger = logging.getLogger(__name__)
+
+# Regex helpers for section hierarchy extraction
+_CLAUSE_NUM_RE = _re.compile(r'\b(\d+(?:\.\d+)+)\b')  # multi-level: "5.2.3"
+_TOP_LEVEL_NUM_RE = _re.compile(r'^\s*(\d+)\b')        # top-level only: "5"
 
 _EMBED_MATCH_THRESHOLD = 0.85
 _EMBED_REVIEW_THRESHOLD = 0.60
@@ -380,7 +379,6 @@ def _section_grouped_index(
     """
     groups: dict[str, list[DoclingGraphNode]] = {}
     owner_section = _node_section_from_owner(artifact)
-    incoming_owner = _incoming_fact_owner(artifact)
     for node in artifact.nodes:
         if node.layer != "compliance":
             continue

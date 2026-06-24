@@ -374,6 +374,63 @@ class CosmeticOnlyRule:
         return None
 
 
+class ListItemAddedRemovedRule:
+    """Rule 4a — list_item ADDED/REMOVED → context-tiered MEDIUM/HIGH.
+
+    Individual list items are enumerated conditions — not standalone requirements
+    — so they get a softer default than generic clause nodes.
+
+    Tier 1: normative section + strong obligation verb (shall/must, strength ≥ 4) → HIGH
+    Default: MEDIUM + human review (item may be a test condition or acceptance criterion)
+
+    Must be placed before AddedRemovedRule so it consumes list_item nodes first.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if ctx.node_type != "list_item" or ctx.change_type not in {"ADDED", "REMOVED"}:
+            return None
+        reasons = _collect_reasons(ctx)
+        if ctx.section_role == "normative" and ctx.obligation_strength >= 4:
+            return ClassificationResult(
+                severity="high",
+                reasons=reasons + ["normative_list_item"],
+                semantic_impact=SemanticImpact.NORMATIVE,
+                audit_disposition=AuditDisposition.ESCALATED,
+            )
+        return ClassificationResult(
+            severity="medium",
+            reasons=reasons + ["list_item_change"],
+            semantic_impact=SemanticImpact.SEMANTIC,
+            audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+        )
+
+
+class TableCaptionRule:
+    """Rule 4b — table_caption changed (any change_type) → MEDIUM + human review.
+
+    Table captions encode scope identifiers: class designation, test method name,
+    standard reference.  Auditors use captions to map test evidence to requirements.
+    Any caption change — added, removed, or modified — warrants human review but is
+    not automatically HIGH since the quantitative content is in the table itself.
+
+    Must be placed before AddedRemovedRule so ADDED/REMOVED captions are caught here
+    rather than defaulting to the generic HIGH tier.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if ctx.node_type != "table_caption":
+            return None
+        reasons = _collect_reasons(ctx)
+        return ClassificationResult(
+            severity="medium",
+            reasons=reasons + ["table_caption_change"],
+            semantic_impact=SemanticImpact.STRUCTURAL,
+            severity_reason_codes=[SeverityReasonCode.ACCEPTANCE_CRITERION_CHANGED],
+            severity_confidence=0.85,
+            audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+        )
+
+
 class AddedRemovedRule:
     """Rule 4 — Added or removed content → context-tiered severity.
 
@@ -947,6 +1004,37 @@ class EntityGraphChangeRule:
         return None
 
 
+class FormulaNumericsRule:
+    """Rule 4.82 — MODIFIED formula with numeric value change → HIGH.
+
+    Mathematical equations in standards define quantitative requirements (voltage
+    limits, current thresholds, power densities, field strengths).  A change in
+    any embedded numeric value — extracted from LaTeX or plain text — is a
+    compliance-critical event regardless of testing department.
+
+    ADDED/REMOVED formula nodes are handled upstream by AddedRemovedRule.
+    Domain-specific escalation (EMC/Safety/Env) fires before this rule for those
+    departments; this rule catches all remaining cases.
+    """
+
+    def evaluate(self, ctx: ClassificationContext) -> ClassificationResult | None:
+        if ctx.node_type != "formula" or ctx.change_type != "MODIFIED":
+            return None
+        if not ctx.numeric_changes:
+            return None
+        return ClassificationResult(
+            severity="high",
+            reasons=_collect_reasons(ctx) + ["formula_numeric_change"],
+            semantic_impact=SemanticImpact.TECHNICAL,
+            severity_reason_codes=[
+                SeverityReasonCode.NUMERIC_LIMIT_CHANGED,
+                SeverityReasonCode.EVIDENCE_MAY_BE_INVALIDATED,
+            ],
+            severity_confidence=0.93,
+            audit_disposition=AuditDisposition.REQUIRES_HUMAN_REVIEW,
+        )
+
+
 class DefaultRule:
     """Rule 10 — Catch-all → LOW.
 
@@ -1025,6 +1113,8 @@ _DEFAULT_ENGINE = RuleEngine(
         ReferenceNumberOnlyRule(),  # Rule 1   — reference-number-only       → low
         FormattingOnlyRule(),  # Rule 2   — formatting-only              → low
         CosmeticOnlyRule(),  # Rule 3   — cosmetic MODIFIED            → low
+        ListItemAddedRemovedRule(),  # Rule 4a  — list_item ADDED/REMOVED      → medium (high if normative+modal)
+        TableCaptionRule(),          # Rule 4b  — table_caption any change     → medium + human review
         AddedRemovedRule(),  # Rule 4   — ADDED / REMOVED              → context-tiered
         # Domain expert rules fire BEFORE generic MEDIUM rules so they can
         # escalate obligation/numeric/table changes from MEDIUM → HIGH.
@@ -1033,6 +1123,7 @@ _DEFAULT_ENGINE = RuleEngine(
         EnvironmentalExpertRule(),  # Rule 4.7 — Environmental domain expert   → high (numeric/setup/procedure)
         EntityGraphChangeRule(),    # Rule 4.8  — entity graph high-sev entity  → high
         OntologyMeasurementRule(),  # Rule 4.81 — universal ontology Measurement/Threshold → high
+        FormulaNumericsRule(),       # Rule 4.82 — formula numeric change       → high + human review
         ObligationChangeRule(),  # Rule 5   — obligation verb change       → medium
         HighDistanceRule(),  # Rule 6   — distance > 0.75              → high
         MovedRule(),  # Rule 7   — moved node/section           → medium (always)

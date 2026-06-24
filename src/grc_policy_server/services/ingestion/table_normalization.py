@@ -74,6 +74,170 @@ def schema_signature(headers: list[str]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# EMC/Safety/Environment column-role classification and unit normalization
+# Based on AG-04-COMPARE.md specification
+# ---------------------------------------------------------------------------
+
+_LIMIT_COLUMNS: frozenset[str] = frozenset({
+    "limit", "limit (dbμv/m)", "limit (dbuv/m)", "max level", "requirement",
+    "limit level", "class limit", "grenzwert", "grenzwerte", "max", "maximum",
+    "upper limit", "lower limit", "level limit", "emv grenzwert",
+})
+_MEASURED_COLUMNS: frozenset[str] = frozenset({
+    "measured", "result", "level", "reading", "measured level", "test result",
+    "messwert", "messung", "measured value", "peak", "average", "quasi-peak",
+    "qp", "av", "pk", "ergebnis", "wert",
+})
+_MARGIN_COLUMNS: frozenset[str] = frozenset({
+    "margin", "headroom", "margin (db)", "pass margin", "reserve", "abstand",
+    "sicherheitsabstand", "safety margin", "db margin",
+})
+_RESULT_COLUMNS: frozenset[str] = frozenset({
+    "pass/fail", "status", "verdict", "result", "pass", "fail",
+    "bestanden", "ergebnis", "bewertung", "konformitat", "compliance",
+    "p/f", "pass / fail",
+})
+_FREQUENCY_COLUMNS: frozenset[str] = frozenset({
+    "frequency", "freq", "frequency (mhz)", "freq (hz)", "frequenz",
+    "mhz", "ghz", "khz", "hz", "freq (khz)", "freq (ghz)", "frequency range",
+})
+
+
+def classify_columns(headers: list[str]) -> dict[int, str]:
+    """Map column index → role string for EMC/Safety/Environment tables.
+
+    Returns dict: {col_index: role} where role ∈
+    {"limit", "measured", "margin", "result", "frequency", "other"}.
+    Unrecognized columns get role "other".
+    """
+    roles: dict[int, str] = {}
+    for idx, header in enumerate(headers):
+        norm = normalize_header(header)
+        # Try exact/partial matches in priority order
+        if any(kw in norm for kw in _LIMIT_COLUMNS):
+            roles[idx] = "limit"
+        elif any(kw in norm for kw in _RESULT_COLUMNS):
+            roles[idx] = "result"
+        elif any(kw in norm for kw in _MARGIN_COLUMNS):
+            roles[idx] = "margin"
+        elif any(kw in norm for kw in _MEASURED_COLUMNS):
+            roles[idx] = "measured"
+        elif any(kw in norm for kw in _FREQUENCY_COLUMNS):
+            roles[idx] = "frequency"
+        else:
+            roles[idx] = "other"
+    return roles
+
+
+# Unit normalization constants
+_NUMERIC_UNIT_RE = re.compile(
+    r"^\s*([<>≤≥]?\s*[+-]?\s*\d+(?:[.,]\d+)?(?:\s*[eE][+-]?\d+)?)\s*"
+    r"(dbuv/m|dbµv/m|dbuv|dbµv|dbua/m|dbµa/m|dbm|v/m|mv/m|"
+    r"mv|kv|v|a|ma|ka|ppm|mg/kg|%|db|dbc|dbd|dbw|w|kw|mw)\s*$",
+    re.IGNORECASE,
+)
+
+_PASS_FAIL_VALUES: frozenset[str] = frozenset({
+    "pass", "fail", "p", "f", "bestanden", "nicht bestanden",
+    "ok", "nok", "yes", "no", "konform", "nicht konform",
+    "compliant", "non-compliant", "✓", "✗", "x",
+})
+_PASS_VALUES: frozenset[str] = frozenset({
+    "pass", "p", "bestanden", "ok", "yes", "konform", "compliant", "✓",
+})
+_FAIL_VALUES: frozenset[str] = frozenset({
+    "fail", "f", "nicht bestanden", "nok", "no",
+    "nicht konform", "non-compliant", "✗", "x",
+})
+
+_UNIT_TO_DB_UV_M: dict[str, float | None] = {
+    "dbuv/m": 1.0, "dbµv/m": 1.0,
+    "dbuv": 1.0, "dbµv": 1.0,
+    "dbua/m": 1.0, "dbµa/m": 1.0,
+    "dbm": None,  # cannot convert without impedance
+}
+_UNIT_CONVERSIONS_V: dict[str, float] = {"mv": 0.001, "v": 1.0, "kv": 1000.0}
+_UNIT_CONVERSIONS_CONC: dict[str, float | None] = {
+    "ppm": 1.0, "mg/kg": 1.0, "%": 10000.0,
+}
+_NUMERIC_TOLERANCE = 0.01  # 1% relative tolerance
+
+
+def normalize_cell_value(raw: str, column_role: str) -> tuple[float | None, str | None]:
+    """Normalize a cell value to a canonical unit for numeric comparison.
+
+    Returns (normalized_float, canonical_unit) or (None, None) when the value
+    cannot be converted (incomparable units, non-numeric text, etc.).
+    """
+    cleaned = raw.strip()
+    m = _NUMERIC_UNIT_RE.match(cleaned)
+    if not m:
+        return None, None
+    num_str = m.group(1).replace(",", ".").replace(" ", "").lstrip("<>≤≥")
+    unit = m.group(2).lower()
+    try:
+        num = float(num_str)
+    except ValueError:
+        return None, None
+
+    if column_role in ("limit", "measured", "margin"):
+        # Try EMC dB-family first
+        if unit in _UNIT_TO_DB_UV_M:
+            factor = _UNIT_TO_DB_UV_M[unit]
+            if factor is None:
+                return None, None  # incomparable
+            return num * factor, "dbuv/m"
+        # Safety voltage
+        if unit in _UNIT_CONVERSIONS_V:
+            return num * _UNIT_CONVERSIONS_V[unit], "v"
+        # Environmental concentration
+        if unit in _UNIT_CONVERSIONS_CONC:
+            factor = _UNIT_CONVERSIONS_CONC[unit]
+            if factor is None:
+                return None, None
+            return num * factor, "mg/kg"
+    return num, unit
+
+
+def cell_values_equivalent(
+    left_raw: str, right_raw: str, column_role: str
+) -> bool:
+    """Return True when two cell values are equivalent after unit normalization.
+
+    Applies 1% relative tolerance for numeric values in the same canonical unit.
+    Falls back to normalized text equality when normalization is not possible.
+    """
+    left_norm, left_unit = normalize_cell_value(left_raw, column_role)
+    right_norm, right_unit = normalize_cell_value(right_raw, column_role)
+    if left_norm is not None and right_norm is not None and left_unit == right_unit:
+        if left_norm == 0 and right_norm == 0:
+            return True
+        ref = max(abs(left_norm), abs(right_norm))
+        return abs(left_norm - right_norm) / ref <= _NUMERIC_TOLERANCE
+    return normalize_cell(left_raw) == normalize_cell(right_raw)
+
+
+def classify_result_transition(left_raw: str, right_raw: str) -> str | None:
+    """Classify a PASS/FAIL transition in a result column.
+
+    Returns "pass_to_fail", "fail_to_pass", "unchanged", or None (non-result value).
+    """
+    left = normalize_cell(left_raw).lower()
+    right = normalize_cell(right_raw).lower()
+    is_left_result = left in _PASS_FAIL_VALUES
+    is_right_result = right in _PASS_FAIL_VALUES
+    if not is_left_result or not is_right_result:
+        return None
+    left_pass = left in _PASS_VALUES
+    right_pass = right in _PASS_VALUES
+    if left_pass and not right_pass:
+        return "pass_to_fail"
+    if not left_pass and right_pass:
+        return "fail_to_pass"
+    return "unchanged"
+
+
 def row_key_from_values(values: list[str]) -> str:
     meaningful = [value.strip().lower() for value in values if value and value.strip()]
     if not meaningful:

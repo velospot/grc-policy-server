@@ -135,6 +135,61 @@ class TestExtractionValidator:
         assert delta["tables_after"] == 2
         assert delta["stitched_tables_after"] == 1
 
+    def test_raw_table_loss_categorizes_caption_like_tables(self, tmp_path):
+        from grc_policy_server.services.ingestion.extraction_validator import ExtractionValidator
+
+        doc_dir = tmp_path / "doc006"
+        doc_dir.mkdir()
+        nodes = [
+            {
+                "node_type": "table",
+                "heading_path": ["Sec"],
+                "metadata": {
+                    "table_structure": {
+                        "num_cols": 2,
+                        "num_rows": 2,
+                        "cells": [
+                            {"row": 0, "col": 0, "text": "A", "is_header": True},
+                            {"row": 0, "col": 1, "text": "B", "is_header": True},
+                        ],
+                    }
+                },
+            }
+        ]
+        raw_docling = {
+            "tables": [
+                {
+                    "prov": [{"page_no": 1}],
+                    "data": {
+                        "num_rows": 2,
+                        "num_cols": 2,
+                        "table_cells": [
+                            {"text": "A"},
+                            {"text": "B"},
+                        ],
+                    },
+                },
+                {
+                    "prov": [{"page_no": 2}],
+                    "data": {
+                        "num_rows": 1,
+                        "num_cols": 1,
+                        "table_cells": [{"text": "caption only"}],
+                    },
+                },
+            ]
+        }
+        (doc_dir / "canonical_nodes.json").write_text(json.dumps(nodes))
+        (doc_dir / "raw_docling.json").write_text(json.dumps(raw_docling))
+
+        metrics = ExtractionValidator(tmp_path).validate_document("doc006")
+
+        assert metrics.raw_docling_table_count == 2
+        assert metrics.raw_docling_table_like_count == 1
+        assert metrics.lost_tables_count == 1
+        assert metrics.possible_lost_tables_count == 0
+        assert metrics.intentionally_filtered_table_count == 1
+
     def test_print_report_no_crash(self, tmp_path, capsys):
         from grc_policy_server.services.ingestion.extraction_validator import (
             ExtractionMetrics,

@@ -145,7 +145,7 @@ def print_details(r: dict) -> None:
     print(f"Document: {r['filename']}")
     print(f"Doc ID:   {r['doc_id']}")
     print(f"Extractor: {r['extractor']}  (raw elements: {r['raw_element_count']})")
-    print(f"\nNode counts:")
+    print("\nNode counts:")
     for k, v in sorted(r["by_type"].items()):
         print(f"  {k:<15} {v:>5}")
     print(f"\nSection coverage:  {r['section_coverage_pct']}% of content nodes have a section path")

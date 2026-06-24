@@ -27,12 +27,43 @@ class ComparisonCacheStore:
     # Bump when the comparison algorithm changes to auto-invalidate stale cached results.
     CACHE_VERSION = "v2"
 
-    def cache_key_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
-        normalized = f"{self.CACHE_VERSION}::{doc1_id.strip()}::{doc2_id.strip()}"
+    def cache_key_for_pair(
+        self,
+        *,
+        doc1_id: str,
+        doc2_id: str,
+        api_version: str = "v2",
+        testing_department: str | None = None,
+    ) -> str:
+        if str(api_version or "v2").strip() == "v2" and not testing_department:
+            normalized = f"{self.CACHE_VERSION}::{doc1_id.strip()}::{doc2_id.strip()}"
+            return sha256(normalized.encode("utf-8")).hexdigest()
+        normalized = "::".join(
+            [
+                self.CACHE_VERSION,
+                str(api_version or "v2").strip(),
+                str(testing_department or "").strip(),
+                doc1_id.strip(),
+                doc2_id.strip(),
+            ]
+        )
         return sha256(normalized.encode("utf-8")).hexdigest()
 
-    def cached_job_id_for_pair(self, *, doc1_id: str, doc2_id: str) -> str:
-        return f"{self.cached_job_prefix}{self.cache_key_for_pair(doc1_id=doc1_id, doc2_id=doc2_id)}"
+    def cached_job_id_for_pair(
+        self,
+        *,
+        doc1_id: str,
+        doc2_id: str,
+        api_version: str = "v2",
+        testing_department: str | None = None,
+    ) -> str:
+        key = self.cache_key_for_pair(
+            doc1_id=doc1_id,
+            doc2_id=doc2_id,
+            api_version=api_version,
+            testing_department=testing_department,
+        )
+        return f"{self.cached_job_prefix}{key}"
 
     def is_cached_job_id(self, job_id: str) -> bool:
         return str(job_id or "").startswith(self.cached_job_prefix)

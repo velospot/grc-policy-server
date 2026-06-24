@@ -845,7 +845,6 @@ class TableDiffEngine:
 
         # Map row keys to row indices
         old_key_map = {k: i for i, k in enumerate(old_row_keys.values())}
-        new_key_map = {k: i for i, k in enumerate(new_row_keys.values())}
 
         # Track which old rows have been matched
         matched_old_indices = set()
@@ -1025,7 +1024,7 @@ class TableDiffEngine:
                             row=-1,  # Special marker for nested table diff
                             col=-1,
                             old_value=f"<nested table: {uid}>",
-                            new_value=f"<nested table modified>",
+                            new_value="<nested table modified>",
                             change_type="nested_table_changed",
                             metadata={
                                 "nested_table_uid": uid,

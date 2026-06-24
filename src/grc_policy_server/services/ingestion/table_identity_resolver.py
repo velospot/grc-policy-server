@@ -10,7 +10,6 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
 
 from grc_policy_server.services.ingestion.table_extraction_ensemble import TableCandidate
 

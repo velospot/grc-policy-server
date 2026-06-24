@@ -37,7 +37,12 @@ class ExtractionMetrics:
     # Lost table detection
     raw_docling_table_count: int = 0
     lost_tables_count: int = 0          # raw_docling_table_count - total_tables (floor 0)
+    raw_docling_table_like_count: int = 0
+    intentionally_filtered_table_count: int = 0
+    possible_lost_tables_count: int = 0
     lost_table_pages: list[int] = field(default_factory=list)
+    intentionally_filtered_table_pages: list[int] = field(default_factory=list)
+    possible_lost_table_pages: list[int] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -57,15 +62,35 @@ class ExtractionValidator:
         self.upload_root = upload_root
 
     @staticmethod
-    def _count_docling_tables(raw_docling: dict) -> tuple[int, list[int]]:
-        """Count table items in raw docling output; return (count, page_list)."""
+    def _count_docling_tables(raw_docling: dict) -> tuple[int, list[int], int, list[int]]:
+        """Count raw and likely real table items in raw docling output.
+
+        Docling often emits figure legends or caption-only blocks as ``tables``.
+        The likely-real estimate requires at least 2x2 dimensions and more than
+        one non-empty cell, which keeps the legacy raw count visible while giving
+        benchmark users a less noisy possible-loss metric.
+        """
         tables = raw_docling.get("tables") or []
         pages: list[int] = []
+        likely_real_pages: list[int] = []
         for t in tables:
             provs = t.get("prov") or []
+            page = 0
             if provs:
-                pages.append(int(provs[0].get("page_no") or provs[0].get("page") or 0))
-        return len(tables), pages
+                page = int(provs[0].get("page_no") or provs[0].get("page") or 0)
+                pages.append(page)
+            if ExtractionValidator._looks_like_real_docling_table(t):
+                likely_real_pages.append(page)
+        return len(tables), pages, len(likely_real_pages), likely_real_pages
+
+    @staticmethod
+    def _looks_like_real_docling_table(table: dict) -> bool:
+        data = table.get("data") or {}
+        num_rows = int(data.get("num_rows") or table.get("num_rows") or 0)
+        num_cols = int(data.get("num_cols") or table.get("num_cols") or 0)
+        cells = data.get("table_cells") or data.get("cells") or table.get("cells") or []
+        non_empty = sum(1 for cell in cells if str(cell.get("text") or "").strip())
+        return num_rows >= 2 and num_cols >= 2 and non_empty >= 2
 
     def validate_document(self, document_id: str) -> ExtractionMetrics:
         """Load canonical_nodes.json from document directory and compute metrics."""
@@ -102,8 +127,15 @@ class ExtractionValidator:
         if raw_docling_file.exists():
             try:
                 raw_dl = json.loads(raw_docling_file.read_text(encoding="utf-8"))
-                docling_count, _docling_pages = self._count_docling_tables(raw_dl)
+                (
+                    docling_count,
+                    _docling_pages,
+                    likely_real_count,
+                    likely_real_pages,
+                ) = self._count_docling_tables(raw_dl)
                 metrics.raw_docling_table_count = docling_count
+                metrics.raw_docling_table_like_count = likely_real_count
+                metrics.possible_lost_table_pages = likely_real_pages
             except Exception as e:
                 metrics.errors.append(f"raw_docling read error: {e}")
 
@@ -159,6 +191,22 @@ class ExtractionValidator:
             metrics.lost_tables_count = lost
             if lost > 0:
                 metrics.lost_table_pages = _docling_pages
+            possible_lost = max(
+                0,
+                metrics.raw_docling_table_like_count - metrics.total_tables,
+            )
+            metrics.possible_lost_tables_count = possible_lost
+            if possible_lost == 0:
+                metrics.possible_lost_table_pages = []
+            metrics.intentionally_filtered_table_count = max(
+                0,
+                metrics.lost_tables_count - metrics.possible_lost_tables_count,
+            )
+            if metrics.intentionally_filtered_table_count:
+                likely_pages = set(metrics.possible_lost_table_pages)
+                metrics.intentionally_filtered_table_pages = [
+                    page for page in _docling_pages if page not in likely_pages
+                ]
 
         # Compute derived metrics
         if metrics.total_nodes > 0:
@@ -244,7 +292,12 @@ class ExtractionValidator:
                 f"{err_count:>6}"
             )
             if m.lost_tables_count:
-                print(f"  ^ lost {m.lost_tables_count} tables on pages: {sorted(set(m.lost_table_pages))}")
+                print(
+                    f"  ^ raw-canonical delta {m.lost_tables_count}; "
+                    f"possible lost {m.possible_lost_tables_count} on pages: "
+                    f"{sorted(set(m.possible_lost_table_pages))}; "
+                    f"intentionally filtered {m.intentionally_filtered_table_count}"
+                )
             for err in m.errors:
                 print(f"  ! {err}")
         print("=" * 100)

@@ -1,7 +1,5 @@
 """Tests for row key extraction and change detection."""
 
-import pytest
-
 from grc_policy_server.services.documents.canonical_table_model import (
     CanonicalTable,
     TableCell,

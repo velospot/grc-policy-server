@@ -30,13 +30,18 @@ def run_comparison(
     doc2_id: str,
     testing_department: str,
     uploads_dir: Path,
+    engine_type: str = "offline",
 ) -> dict:
-    """Run one offline comparison and return a summary dict."""
+    """Run one comparison and return a summary dict.
+
+    engine_type: "offline" uses OfflineDiffEngine (no external services).
+                 "real"    uses RealDiffEngine with Qdrant (QDRANT_URL env var required).
+    """
+    import os
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
     from grc_policy_server.models.schemas import Document
-    from grc_policy_server.services.comparison.offline_diff_engine import OfflineDiffEngine
     from grc_policy_server.services.documents.canonical_store import CanonicalDocumentStore
 
     store = CanonicalDocumentStore(upload_root=uploads_dir)
@@ -61,7 +66,23 @@ def run_comparison(
         category=meta2.get("category", "application"),
     )
 
-    engine = OfflineDiffEngine(canonical_store=store)
+    if engine_type == "real":
+        from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
+        from grc_policy_server.services.llm.noop_llm import NoOpLLM
+        from grc_policy_server.services.vector.qdrant_store import QdrantVectorClient
+
+        qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+        qdrant = QdrantVectorClient(url=qdrant_url)
+        engine = RealDiffEngine(
+            qdrant=qdrant,
+            neo4j=None,
+            llm=NoOpLLM(),
+            canonical_store=store,
+        )
+        print(f"  [engine=real, qdrant={qdrant_url}]")
+    else:
+        from grc_policy_server.services.comparison.offline_diff_engine import OfflineDiffEngine
+        engine = OfflineDiffEngine(canonical_store=store)
 
     result = asyncio.run(
         engine.compare(
@@ -117,7 +138,6 @@ def run_comparison(
     accuracy = result.accuracyMetrics
     match_rate = None
     if accuracy:
-        total_m = accuracy.total_matches
         # Rough estimate: accuracy only has match info, unmatched derived from counts
         match_rate = round(
             accuracy.overall_confidence, 4
@@ -154,7 +174,7 @@ def _count_tables(diffs) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run offline comparison pairs")
+    parser = argparse.ArgumentParser(description="Run comparison pairs (offline or hybrid)")
     parser.add_argument(
         "--pairs",
         type=Path,
@@ -163,6 +183,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--uploads-dir", type=Path, default=Path("data/uploads")
+    )
+    parser.add_argument(
+        "--engine",
+        choices=["offline", "real"],
+        default="offline",
+        help=(
+            "offline: OfflineDiffEngine (no external services, default). "
+            "real: RealDiffEngine with Qdrant (requires QDRANT_URL env var)."
+        ),
     )
     args = parser.parse_args()
 
@@ -195,8 +224,8 @@ def main() -> None:
                 doc2_id=doc2_id,
                 testing_department=p.get("testing_department", ""),
                 uploads_dir=args.uploads_dir,
+                engine_type=args.engine,
             )
-            cc = result["change_counts"]
             total = result["total_diffs"]
             sev = result["severity"]
             h = sev.get("high", 0)
@@ -210,6 +239,8 @@ def main() -> None:
             if result.get("warnings"):
                 for w in result["warnings"]:
                     print(f"  ⚠ {w[:100]}")
+        except FileNotFoundError:
+            print(f"{name:<40} {'SKIP - docs not uploaded':>40}")
         except Exception as e:
             print(f"{name:<40} {'ERROR':>8}: {e}")
             import traceback

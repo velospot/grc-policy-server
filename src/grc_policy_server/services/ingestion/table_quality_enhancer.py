@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-import io
 import logging
 import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
+
+from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
+from grc_policy_server.services.ingestion.table_normalization import (
+    extract_headers_from_cells,
+    normalize_table_cells,
+    rows_from_cells,
+    schema_signature,
+    table_text_projection,
+)
 
 if TYPE_CHECKING:
     from grc_policy_server.services.ingestion.document_family_profile import DocumentFamilyProfile
@@ -20,15 +28,6 @@ _REFERENCE_SECTION_RE = re.compile(
     r"\b(legende|symbole?|abkürzung|definitionen?|begriffe?|inhalt|glossar"
     r"|annex|anhang|abbreviation|legend|symbol|glossary|definition)\b",
     re.IGNORECASE,
-)
-
-from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
-from grc_policy_server.services.ingestion.table_normalization import (
-    extract_headers_from_cells,
-    normalize_table_cells,
-    rows_from_cells,
-    schema_signature,
-    table_text_projection,
 )
 
 logger = logging.getLogger(__name__)

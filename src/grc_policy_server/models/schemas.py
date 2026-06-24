@@ -122,6 +122,15 @@ class CompareStreamV4Request(BaseModel):
     forceReExtract: bool = False
 
 
+class CompareStreamV5Request(BaseModel):
+    """ID-based stream request for v5 hybrid comparison endpoints."""
+
+    doc1Id: str
+    doc2Id: str
+    testingDepartment: TestingDepartment
+    forceReExtract: bool = False
+
+
 class GraphCompareTaskPayload(BaseModel):
     """Celery task payload for graph-tree comparison jobs."""
 
@@ -200,6 +209,7 @@ class DeleteDocumentResult(BaseModel):
     deleted: bool
     deletedChunks: int | None = None
     error: str | None = None
+    warnings: list[str] | None = None
 
 
 class DeleteDocumentsResponse(BaseModel):

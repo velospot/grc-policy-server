@@ -638,7 +638,6 @@ class ClauseMatcher:
             distance = 1.0 - score
             # Register each left fragment matched to the first right fragment
             # (many-to-many virtual match — suppresses false REMOVED/ADDED)
-            primary_right_id = str(right_frags[0].get("chunk_id") or "")
             for left_frag in left_frags:
                 lid = str(left_frag.get("chunk_id") or "")
                 if lid and lid not in matched_left:
@@ -812,10 +811,7 @@ class ClauseMatcher:
         "pruefbedingung": "test condition",
         "prüfkörper": "test specimen",
         "pruefkoerper": "test specimen",
-        "grenzwert": "limit",
-        "grenzwerte": "limits",
         "pegels": "level",
-        "prüfpegel": "test level",
         "pruefpegel": "test level",
         "schutzziele": "protection objectives",
         "schutzmaßnahmen": "protective measures",
@@ -1013,13 +1009,38 @@ class ClauseMatcher:
         order_penalty = abs(left.order - right.order)
         path_score = 1.0 / (1 + order_penalty * 0.3)
         numeric_ov = self._numeric_overlap(left.clean_text, right.clean_text)
-        return (
+        score = (
             0.20 * title_score
             + 0.15 * numbering_score
             + 0.10 * path_score
             + 0.45 * content_score
             + 0.10 * numeric_ov
         )
+        anchor_overlap = self._title_anchor_overlap(left_title, right_title)
+        if anchor_overlap == 0.0 and content_score < 0.70:
+            score = max(0.0, score - 0.18)
+        return score
+
+    _TITLE_ANCHOR_STOPWORDS = frozenset({
+        "a", "an", "and", "the", "of", "for", "to", "in", "on", "by", "with",
+        "under", "test", "tests", "testing", "procedure", "procedures", "method",
+        "methods", "general", "performance", "section", "chapter", "clause",
+    })
+
+    def _title_anchor_tokens(self, title: str) -> set[str]:
+        tokens = {
+            t
+            for t in re.findall(r"[a-z][a-z0-9]{2,}", title.lower())
+            if t not in self._TITLE_ANCHOR_STOPWORDS
+        }
+        return tokens
+
+    def _title_anchor_overlap(self, left_title: str, right_title: str) -> float | None:
+        left_tokens = self._title_anchor_tokens(left_title)
+        right_tokens = self._title_anchor_tokens(right_title)
+        if not left_tokens or not right_tokens:
+            return None
+        return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
     @staticmethod
     def _chapter_divergence_penalty(left_key: str, right_key: str) -> float:
@@ -1155,6 +1176,29 @@ class ClauseMatcher:
         schema = str(node.get("table_schema_signature") or "")
         if not schema:
             return False
+        if bool(node.get("low_confidence_table", False)):
+            return False
+        flags = {
+            str(flag)
+            for flag in (
+                node.get("table_quality_flags")
+                or (node.get("canonical_metadata") or {}).get("table_quality_flags")
+                or []
+            )
+        }
+        if flags & {"placeholder_headers", "mostly_placeholder_headers", "sparse_cells"}:
+            return False
+        headers = (
+            node.get("table_headers")
+            or (node.get("canonical_metadata") or {}).get("table_headers")
+            or []
+        )
+        if any(
+            str(header).startswith("column_")
+            or str(header).startswith("_row_label_")
+            for header in headers
+        ):
+            return False
         cells = node.get("table_cells") or []
         row0_cells = [c for c in cells if int(c.get("row", -1)) == 0]
         has_placeholder = any(
@@ -1162,6 +1206,81 @@ class ClauseMatcher:
             for c in row0_cells
         )
         return not has_placeholder
+
+    @staticmethod
+    def _is_low_confidence_table(node: dict) -> bool:
+        flags = {
+            str(flag)
+            for flag in (
+                node.get("table_quality_flags")
+                or (node.get("canonical_metadata") or {}).get("table_quality_flags")
+                or []
+            )
+        }
+        return bool(node.get("low_confidence_table")) or bool(
+            flags & {"placeholder_headers", "mostly_placeholder_headers", "sparse_cells"}
+        )
+
+    def _table_subject_score(self, left: dict, right: dict) -> float:
+        """Similarity of table identity text independent from schema quality."""
+        left_parts = [
+            str(left.get("table_normalized_caption") or ""),
+            str(left.get("title") or ""),
+            str(left.get("section_path") or ""),
+        ]
+        right_parts = [
+            str(right.get("table_normalized_caption") or ""),
+            str(right.get("title") or ""),
+            str(right.get("section_path") or ""),
+        ]
+        left_text = self._normalize_section_title(" ".join(left_parts).lower())
+        right_text = self._normalize_section_title(" ".join(right_parts).lower())
+        if not left_text or not right_text:
+            return 0.0
+        seq = SequenceMatcher(None, left_text, right_text).ratio()
+        tok = token_overlap(left_text, right_text, self.language)
+        return max(seq, tok)
+
+    @staticmethod
+    def _table_row_key_set(node: dict) -> set[str]:
+        keys = {
+            str(key).strip().lower()
+            for key in (node.get("table_row_semantic_keys") or [])
+            if str(key).strip()
+        }
+        if keys:
+            return keys
+        canonical = node.get("canonical_metadata") or {}
+        table = canonical.get("canonical_table") or {}
+        for row in table.get("rows") or []:
+            row_key = str(row.get("semantic_key") or row.get("row_key") or "").strip().lower()
+            if row_key:
+                keys.add(row_key)
+            cells = row.get("cells") or []
+            if cells:
+                first = str((cells[0] or {}).get("text") or "").strip().lower()
+                if first:
+                    keys.add(first)
+        if keys:
+            return keys
+        cells = node.get("table_cells") or []
+        first_col_values = {
+            str(cell.get("text") or "").strip().lower()
+            for cell in cells
+            if int(cell.get("col", -1)) == 0 and str(cell.get("text") or "").strip()
+        }
+        return {
+            value
+            for value in first_col_values
+            if not value.startswith("column_") and len(value) > 1
+        }
+
+    def _table_row_key_overlap(self, left: dict, right: dict) -> float | None:
+        left_keys = self._table_row_key_set(left)
+        right_keys = self._table_row_key_set(right)
+        if not left_keys or not right_keys:
+            return None
+        return len(left_keys & right_keys) / len(left_keys | right_keys)
 
     def _table_score(self, left: dict, right: dict) -> float:
         """Compute similarity score for tables with lenient handling of structural changes.
@@ -1229,6 +1348,17 @@ class ClauseMatcher:
         if left_row_fp and right_row_fp:
             row_fp_score = len(left_row_fp & right_row_fp) / len(left_row_fp | right_row_fp)
 
+        low_confidence_identity_floor = 0.0
+        if self._is_low_confidence_table(left) or self._is_low_confidence_table(right):
+            subject_score = self._table_subject_score(left, right)
+            row_key_overlap = self._table_row_key_overlap(left, right)
+            if subject_score >= 0.72:
+                low_confidence_identity_floor = 0.50
+                if row_key_overlap is not None and row_key_overlap >= 0.25:
+                    low_confidence_identity_floor = 0.62
+                elif title_score is not None and title_score >= 0.85:
+                    low_confidence_identity_floor = 0.58
+
         # Step 2 – content similarity (cell / text / structure).
         # If no structural cell data fall back to full-text comparison.
         if not left_cells_norm or not right_cells_norm:
@@ -1246,8 +1376,11 @@ class ClauseMatcher:
                     + 0.40 * text_score
                     + 0.15 * schema_score
                     + 0.10 * row_fp_score
-                )
-            return 0.60 * text_score + 0.25 * schema_score + 0.15 * row_fp_score
+                    )
+            return max(
+                low_confidence_identity_floor,
+                0.60 * text_score + 0.25 * schema_score + 0.15 * row_fp_score,
+            )
 
         # Dimension similarity (using caption-adjusted counts).
         if left_rows == right_rows and left_cols == right_cols:
@@ -1354,7 +1487,7 @@ class ClauseMatcher:
                 # REMOVED — which would inflate the reported impact to HIGH.
                 if schema_score == 1.0:
                     base_with_title_match = max(base_with_title_match, 0.45)
-                return base_with_title_match
+                return max(base_with_title_match, low_confidence_identity_floor)
 
             base_with_title_low = (
                 0.20 * title_score  # type: ignore[operator]
@@ -1373,7 +1506,7 @@ class ClauseMatcher:
             if cell_score > 0.75 and schema_score > 0.5:
                 return max(base_with_title_low, 0.68)
 
-            return base_with_title_low
+            return max(base_with_title_low, low_confidence_identity_floor)
 
         # No title available – fall back to structure-only weights.
         base_score = (
@@ -1389,9 +1522,9 @@ class ClauseMatcher:
         # still fundamentally the same table.
         if base_score < 0.65 and cell_score > 0.75:
             # High cell content similarity overrides dimension/name differences
-            return max(base_score, 0.65)
+            return max(base_score, 0.65, low_confidence_identity_floor)
 
-        return base_score
+        return max(base_score, low_confidence_identity_floor)
 
     def _table_text_score(self, left: dict, right: dict) -> float:
         """Compute text-based similarity for tables (fallback when no structure)."""

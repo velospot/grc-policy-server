@@ -105,8 +105,6 @@ class CamelotTableExtractor(TableExtractor):
             TableCandidate or None if conversion fails
         """
         try:
-            import camelot
-
             # Get table data
             df = camelot_table.df
             if df.empty or len(df) == 0:

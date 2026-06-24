@@ -137,6 +137,64 @@ def _score_table_extraction_quality(
     )
 
 
+def _table_quality_flags(
+    cells: list[dict],
+    num_rows: int,
+    num_cols: int,
+    headers: list[str],
+) -> list[str]:
+    """Return deterministic quality flags for downstream comparison.
+
+    These flags do not suppress tables.  They tell the matcher not to trust
+    schema signatures produced from sparse grids or placeholder row-label
+    headers, which are common in image-heavy standards pages.
+    """
+    flags: list[str] = []
+    total_cells = max(0, int(num_rows or 0)) * max(0, int(num_cols or 0))
+    non_empty = sum(1 for c in cells if str(c.get("text", "")).strip())
+    fill_rate = non_empty / total_cells if total_cells else 0.0
+    placeholder_headers = [
+        h for h in headers
+        if str(h).startswith("column_") or str(h).startswith("_row_label_")
+    ]
+
+    if not cells or total_cells == 0:
+        flags.append("missing_cells")
+    elif fill_rate < 0.50:
+        flags.append("sparse_cells")
+    if headers and placeholder_headers:
+        flags.append("placeholder_headers")
+    if headers and len(placeholder_headers) >= max(1, len(headers) // 2):
+        flags.append("mostly_placeholder_headers")
+    if num_rows < 2 or num_cols < 2:
+        flags.append("minimal_dimensions")
+
+    return flags
+
+
+def _is_sparse_placeholder_table_metadata(metadata: dict[str, Any]) -> bool:
+    flags = {str(flag) for flag in (metadata.get("table_quality_flags") or [])}
+    if {"sparse_cells", "placeholder_headers"} <= flags:
+        return True
+    headers = list(metadata.get("table_headers") or [])
+    structure = metadata.get("table_structure") or {}
+    cells = list(structure.get("cells") or [])
+    rows = int(structure.get("num_rows") or 0)
+    cols = int(structure.get("num_cols") or 0)
+    total = rows * cols
+    fill = (
+        sum(1 for cell in cells if str(cell.get("text") or "").strip()) / total
+        if total
+        else 0.0
+    )
+    has_placeholder = any(
+        str(header).startswith("column_")
+        or str(header).startswith("_row_label_")
+        for header in headers
+    )
+    return has_placeholder and fill < 0.50
+
+
 def _merge_table_extractions(docling_chunk: Any, camelot_cand: Any) -> dict:
     """Merge cell data from Docling and Camelot when quality scores are tied.
 
@@ -270,8 +328,12 @@ async def _correlate_camelot_tables(
             docling_struct_cells, docling_nr, docling_nc, docling_headers
         )
 
-        # Find best Camelot candidate (lowest IoU threshold for quality evaluation)
+        # Find best Camelot candidate (lowest IoU threshold for quality evaluation).
+        # Sparse placeholder-header tables are often bad Docling bbox/table-structure
+        # captures, so allow a same-page rescue candidate even when bbox overlap is
+        # weak. Quality still has to win before the replacement is accepted.
         _EVAL_IOU = 0.25   # threshold for quality comparison / merge
+        sparse_rescue = _is_sparse_placeholder_table_metadata(chunk.metadata)
         best_cand = None
         best_iou = _EVAL_IOU
         best_quality = 0.0
@@ -280,7 +342,8 @@ async def _correlate_camelot_tables(
                 iou = _bbox_iou(docling_bbox, cand.bbox)
             else:
                 iou = _EVAL_IOU + 0.01  # no bbox → accept any same-page candidate
-            if iou >= _EVAL_IOU:
+            accepted = iou >= _EVAL_IOU or sparse_rescue
+            if accepted:
                 cq = _score_table_extraction_quality(
                     list(cand.cells), cand.num_rows, cand.num_cols, cand.headers
                 )
@@ -305,11 +368,14 @@ async def _correlate_camelot_tables(
                     "canonical_table": table_dict,
                     "table_source": best_cand.backend_name,
                     "extraction_quality_score": round(best_quality, 3),
+                    "table_rescue_reason": "sparse_placeholder_camelot"
+                    if sparse_rescue
+                    else "",
                 }
                 updated[i] = dc_replace(chunk, metadata=new_meta)
                 logger.debug(
-                    "camelot won table page=%d iou=%.2f quality %.2f→%.2f",
-                    page, best_iou, docling_quality, best_quality,
+                    "camelot won table page=%d iou=%.2f quality %.2f→%.2f sparse_rescue=%s",
+                    page, best_iou, docling_quality, best_quality, sparse_rescue,
                 )
             elif abs(quality_gap) <= 0.05 and best_iou >= _EVAL_IOU:
                 # Tied → ensemble merge
@@ -531,7 +597,25 @@ class DocumentIngestionService:
             if table_type == "unknown":
                 table_type = classifier.classify_from_section_path(section_path).value
             quality = float(chunk.metadata.get("extraction_quality_score") or 0.0)
-            new_meta = {**chunk.metadata, "table_type": table_type, "extraction_quality_score": quality}
+            structure = chunk.metadata.get("table_structure") or {}
+            cells = list(structure.get("cells") or [])
+            num_rows = int(structure.get("num_rows") or 0)
+            num_cols = int(structure.get("num_cols") or 0)
+            flags = _table_quality_flags(cells, num_rows, num_cols, headers)
+            if quality <= 0.0:
+                quality = _score_table_extraction_quality(
+                    cells,
+                    num_rows,
+                    num_cols,
+                    headers,
+                )
+            new_meta = {
+                **chunk.metadata,
+                "table_type": table_type,
+                "extraction_quality_score": round(quality, 3),
+                "table_quality_flags": flags,
+                "low_confidence_table": bool(flags),
+            }
             updated.append(dc_replace(chunk, metadata=new_meta))
         context.parsed_chunks = updated
         return context
@@ -652,13 +736,14 @@ class DocumentIngestionService:
                 )
                 if context.docling_graph is not None:
                     self.neo4j.upsert_docling_graph(context.docling_graph)
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "neo4j upsert failed for document_id=%s filename=%s — "
-                    "canonical nodes already saved, upload will succeed",
+                    "canonical nodes already saved, upload will succeed error_type=%s error=%s",
                     context.document_id,
                     context.filename,
-                    exc_info=True,
+                    type(exc).__name__,
+                    str(exc),
                 )
         return context
 
@@ -803,7 +888,10 @@ class DocumentIngestionService:
         )
         if is_pdf:
             chunks = await asyncio.to_thread(enhance_table_chunks, content, chunks)
-            _profile = get_profile_for_document(filename=filename)
+            _body_texts = [
+                f"{c.title or ''} {c.text or ''}" for c in chunks[:50]
+            ]
+            _profile = get_profile_for_document(filename=filename, body_texts=_body_texts)
             chunks = filter_degenerate_table_chunks(chunks, profile=_profile)
             chunks = await _correlate_camelot_tables(content, chunks)
         return chunks, ocr_metadata, doc_json

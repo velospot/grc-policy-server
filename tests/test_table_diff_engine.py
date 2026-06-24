@@ -1,7 +1,5 @@
 """Tests for table diff engine with cell-level diffs and structural awareness."""
 
-import pytest
-
 from grc_policy_server.services.comparison.table_diff_engine import (
     CellDiff,
     RowDiff,
@@ -16,7 +14,6 @@ from grc_policy_server.services.documents.canonical_table_model import (
     TableColumn,
     TableRow,
 )
-from grc_policy_server.services.ingestion.row_key_extractor import RowKeyExtractor
 
 
 class TestCellDiff:

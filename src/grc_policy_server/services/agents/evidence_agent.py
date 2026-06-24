@@ -173,7 +173,7 @@ class EvidenceExtractionAgent:
         text = raw.strip()
         if text.startswith("```"):
             lines = text.splitlines()
-            text = "\n".join(l for l in lines if not l.startswith("```")).strip()
+            text = "\n".join(line for line in lines if not line.startswith("```")).strip()
 
         parsed = json.loads(text)
         has_change = bool(parsed.get("has_meaningful_change", False))

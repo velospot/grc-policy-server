@@ -387,12 +387,19 @@ Rules — follow strictly:
 - Do NOT mention tables, cells, rows, columns, or node types under any circumstance.
 - No explanations, commentary, or notes about what is or is not applicable.
 - Write in the same language as the source text.
+- Choose EXACTLY ONE output format below; never combine Format A and Format B.
 
 
 Format A — inline bullets (word/phrase-level changes):
 - Removed: <span style="color:red">~~phrase~~</span>
 - Added: <span style="color:green">**phrase**</span>
 - Modified: <span style="color:red">~~old~~</span> → <span style="color:green">**new**</span>
+
+Format B — fenced diff block:
+```diff
+- removed semantic text
++ added semantic text
+```
 
 """.strip()
 

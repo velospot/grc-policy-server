@@ -43,6 +43,17 @@ def _load_doc_ids() -> list[str]:
     return [i for i in ids if i]
 
 
+def _load_upload_metadata() -> list[dict]:
+    metadata = []
+    for d in UPLOADS_DIR.iterdir():
+        if d.name.startswith("_") or not d.is_dir():
+            continue
+        meta = d / "metadata.json"
+        if meta.exists():
+            metadata.append(json.loads(meta.read_text()))
+    return metadata
+
+
 def _run_offline_comparison(doc1_id: str, doc2_id: str):
     """Run one offline comparison and return the ComparisonResult."""
     from grc_policy_server.models.schemas import Document
@@ -73,26 +84,29 @@ def _run_offline_comparison(doc1_id: str, doc2_id: str):
 
 
 def _load_resolved_pairs() -> list[dict]:
-    p = SCRIPTS_DIR / "comparison_pairs_resolved.json"
-    if not p.exists():
-        # Fall back: try to resolve from static pairs + current uploads
-        static = SCRIPTS_DIR / "comparison_pairs.json"
-        if not static.exists():
-            return []
-        fname_to_id: dict[str, str] = {}
-        for d in UPLOADS_DIR.iterdir():
-            if d.name.startswith("_") or not d.is_dir():
-                continue
-            meta = d / "metadata.json"
-            if meta.exists():
-                m = json.loads(meta.read_text())
-                fname_to_id[m.get("name", "")] = m.get("id", "")
+    static = SCRIPTS_DIR / "comparison_pairs.json"
+    resolved = SCRIPTS_DIR / "comparison_pairs_resolved.json"
+    upload_metadata = _load_upload_metadata()
+    fname_to_id = {m.get("name", ""): m.get("id", "") for m in upload_metadata}
+    current_ids = {m.get("id") for m in upload_metadata}
+
+    if static.exists():
         pairs = json.loads(static.read_text())["pairs"]
         return [
-            {**pair, "doc1_id": fname_to_id.get(pair["doc1_filename"]), "doc2_id": fname_to_id.get(pair["doc2_filename"])}
+            {
+                **pair,
+                "doc1_id": fname_to_id.get(pair["doc1_filename"], ""),
+                "doc2_id": fname_to_id.get(pair["doc2_filename"], ""),
+            }
             for pair in pairs
         ]
-    return json.loads(p.read_text())["pairs"]
+    if not resolved.exists():
+        return []
+    return [
+        pair
+        for pair in json.loads(resolved.read_text())["pairs"]
+        if pair.get("doc1_id") in current_ids and pair.get("doc2_id") in current_ids
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +252,6 @@ def test_in_family_match_rate_above_floor():
         result = _run_offline_comparison(p["doc1_id"], p["doc2_id"])
         # We can't compute match_rate directly from result (accuracy metrics may vary),
         # but we can assert that not ALL diffs are REMOVED+ADDED with no MODIFIED
-        change_types = {d.changeType for d in result.keyDifferences}
         total = len(result.keyDifferences)
         # At minimum, there should be some changes found (documents differ)
         # This ensures ingestion completed and comparison ran

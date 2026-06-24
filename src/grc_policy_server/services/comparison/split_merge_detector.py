@@ -111,16 +111,16 @@ class SplitMergeDetector:
                 continue
 
             matching_left = [
-                l for l in left_nodes
-                if l.node_id not in used_left and _is_prefix_of(right_title_words, _title_words(l.title))
+                left for left in left_nodes
+                if left.node_id not in used_left and _is_prefix_of(right_title_words, _title_words(left.title))
             ]
             if len(matching_left) < 2:
                 continue
 
             right_tokens = _text_tokens(right.text)
             left_tokens: set[str] = set()
-            for l in matching_left:
-                left_tokens.update(_text_tokens(l.text))
+            for left in matching_left:
+                left_tokens.update(_text_tokens(left.text))
             if not right_tokens:
                 continue
             overlap = len(right_tokens & left_tokens) / len(right_tokens)
@@ -128,11 +128,11 @@ class SplitMergeDetector:
                 continue
 
             confidence = round(overlap, 3)
-            used_left.update(l.node_id for l in matching_left)
+            used_left.update(left.node_id for left in matching_left)
             groups.append(
                 SplitGroup(
                     source_node_id=right.node_id,
-                    target_node_ids=[l.node_id for l in matching_left],
+                    target_node_ids=[left.node_id for left in matching_left],
                     alignment_type="MERGE",
                     confidence=confidence,
                     review_required=confidence < _SPLIT_CONFIDENCE_THRESHOLD,

@@ -45,6 +45,15 @@
       "expected_incompatible": true,
       "doc1_id": "b23e1f76-baee-43aa-95f1-26a62d3587f0",
       "doc2_id": "789aaa48-a2d7-4886-8454-efdaf3486f0c"
+    },
+    {
+      "name": "TL-81000 p063 (2018→2021)",
+      "family": "TL-81000",
+      "doc1_filename": "TL_81000_2018-03_p063-072.pdf",
+      "doc2_filename": "TL_81000_2021-09_GER_p063-072.pdf",
+      "testing_department": "Safety",
+      "doc1_id": "05738b4a-ddea-401a-814d-e0ce3c05df36",
+      "doc2_id": "b9dea506-d06a-4d3b-9925-77b5acc77f2c"
     }
   ]
 }

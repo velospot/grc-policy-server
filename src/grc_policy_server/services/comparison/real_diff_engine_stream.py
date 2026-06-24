@@ -70,12 +70,12 @@ def _bbox_for_pdfjs(bbox_refs: list[dict], page: int) -> dict | None:
     Docling stores coords with BOTTOMLEFT origin; flip Y using page height (842pt for A4).
     """
     for ref in bbox_refs:
-        l, t, r, b = ref.get("l"), ref.get("t"), ref.get("r"), ref.get("b")
-        if all(v is not None for v in (l, t, r, b)):
+        left, top, right, bottom = ref.get("l"), ref.get("t"), ref.get("r"), ref.get("b")
+        if all(v is not None for v in (left, top, right, bottom)):
             if ref.get("coord_origin", "BOTTOMLEFT") == "BOTTOMLEFT":
                 ph = ref.get("page_height", 842)
-                return {"left": l, "top": ph - t, "right": r, "bottom": ph - b, "page": page}
-            return {"left": l, "top": t, "right": r, "bottom": b, "page": page}
+                return {"left": left, "top": ph - top, "right": right, "bottom": ph - bottom, "page": page}
+            return {"left": left, "top": top, "right": right, "bottom": bottom, "page": page}
     return None
 
 
@@ -688,17 +688,25 @@ class RealDiffEngineStream:
     ) -> Optional[DocumentReference]:
         page = int(fallback.get("page_number") or fallback.get("page") or 0)
         if chunk_id and self.neo4j is not None:
-            citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
-            if citation:
-                source_text = self._reference_source_text(fallback) or str(
-                    citation.get("sourceText") or ""
+            try:
+                citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
+                if citation:
+                    source_text = self._reference_source_text(fallback) or str(
+                        citation.get("sourceText") or ""
+                    )
+                    citation["sourceText"] = source_text
+                    citation.setdefault("nodeId", str(chunk_id))
+                    if not citation.get("bbox"):
+                        bbox_refs = list(fallback.get("bbox_refs") or [])
+                        citation["bbox"] = _bbox_for_pdfjs(bbox_refs, page)
+                    return DocumentReference(**citation)
+            except Exception as exc:
+                logger.warning(
+                    "Neo4j citation lookup failed during stream compare — using canonical fallback citation error_type=%s error=%s",
+                    type(exc).__name__,
+                    exc,
                 )
-                citation["sourceText"] = source_text
-                citation.setdefault("nodeId", str(chunk_id))
-                if not citation.get("bbox"):
-                    bbox_refs = list(fallback.get("bbox_refs") or [])
-                    citation["bbox"] = _bbox_for_pdfjs(bbox_refs, page)
-                return DocumentReference(**citation)
+                self.neo4j = None
 
         bbox_refs = list(fallback.get("bbox_refs") or [])
         node_id = str(fallback.get("node_id") or chunk_id or "") or None
@@ -1159,31 +1167,45 @@ class RealDiffEngineStream:
         return None
 
     def _extract_table_changes(self, left: dict, right: dict) -> List[ChangeDetail]:
-        """Extract cell-level changes between two tables."""
+        """Extract cell-level changes between two tables.
+
+        Applies unit normalization (dBµV/m vs V/m equivalence) and column-role
+        severity tags (CRITICAL for PASS→FAIL, HIGH for margin drops > 3 dB).
+        """
+        from grc_policy_server.services.ingestion.table_normalization import (
+            cell_values_equivalent,
+            classify_result_transition,
+        )
+
         changes: List[ChangeDetail] = []
 
         left_rows = left.get("table_num_rows", 0)
         right_rows = right.get("table_num_rows", 0)
 
-        # Dimension changes
         if left_rows != right_rows:
             if right_rows > left_rows:
-                changes.append(
-                    ChangeDetail(
-                        type="added",
-                        text=f"{right_rows - left_rows} row(s) added",
-                        location=f"Rows {left_rows + 1}-{right_rows}",
-                    )
-                )
+                changes.append(ChangeDetail(
+                    type="added",
+                    text=f"{right_rows - left_rows} row(s) added",
+                    location=f"Rows {left_rows + 1}-{right_rows}",
+                ))
             else:
-                changes.append(
-                    ChangeDetail(
-                        type="removed",
-                        text=f"{left_rows - right_rows} row(s) removed",
-                    )
-                )
+                changes.append(ChangeDetail(
+                    type="removed",
+                    text=f"{left_rows - right_rows} row(s) removed",
+                ))
 
-        # Cell-level changes
+        left_meta = left.get("canonical_metadata") or {}
+        right_meta = right.get("canonical_metadata") or {}
+        col_roles: dict[int, str] = {
+            int(k): v
+            for k, v in (
+                left_meta.get("table_column_roles")
+                or right_meta.get("table_column_roles")
+                or {}
+            ).items()
+        }
+
         left_cells = left.get("table_cells") or []
         right_cells = right.get("table_cells") or []
 
@@ -1196,32 +1218,80 @@ class RealDiffEngineStream:
             for c in right_cells
         }
 
-        # Modified cells
         for pos, left_val in left_cell_map.items():
             right_val = right_cell_map.get(pos)
-            if right_val is not None and left_val != right_val:
-                row, col = pos
-                changes.append(
-                    ChangeDetail(
+            if right_val is None or left_val == right_val:
+                continue
+            row, col = pos
+            col_role = col_roles.get(col, "other")
+
+            if cell_values_equivalent(left_val, right_val, col_role):
+                continue
+
+            if col_role == "result":
+                transition = classify_result_transition(left_val, right_val)
+                if transition == "pass_to_fail":
+                    changes.append(ChangeDetail(
                         type="modified",
-                        text="Cell changed",
+                        text="PASS → FAIL (critical result change)",
                         oldValue=left_val,
                         newValue=right_val,
-                        location=f"Row {row + 1}, Col {col + 1}",
-                    )
-                )
+                        location=f"Row {row + 1}, Col {col + 1} [result_column:CRITICAL]",
+                    ))
+                    continue
+                if transition == "fail_to_pass":
+                    changes.append(ChangeDetail(
+                        type="modified",
+                        text="FAIL → PASS (result improvement)",
+                        oldValue=left_val,
+                        newValue=right_val,
+                        location=f"Row {row + 1}, Col {col + 1} [result_column]",
+                    ))
+                    continue
 
-        # New cells in added rows
+            if col_role == "margin":
+                try:
+                    lf = float(left_val.replace(",", "."))
+                    rf = float(right_val.replace(",", "."))
+                    drop = lf - rf
+                    if rf <= 0:
+                        changes.append(ChangeDetail(
+                            type="modified",
+                            text=f"Margin at/below zero ({rf} dB) [CRITICAL]",
+                            oldValue=left_val,
+                            newValue=right_val,
+                            location=f"Row {row + 1}, Col {col + 1} [margin_column:CRITICAL]",
+                        ))
+                        continue
+                    if drop > 3.0:
+                        changes.append(ChangeDetail(
+                            type="modified",
+                            text=f"Margin dropped by {drop:.1f} dB [HIGH]",
+                            oldValue=left_val,
+                            newValue=right_val,
+                            location=f"Row {row + 1}, Col {col + 1} [margin_column:HIGH]",
+                        ))
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            location_tag = f"[{col_role}_column]" if col_role != "other" else ""
+            changes.append(ChangeDetail(
+                type="modified",
+                text="Cell changed" + (f" ({col_role})" if col_role != "other" else ""),
+                oldValue=left_val,
+                newValue=right_val,
+                location=f"Row {row + 1}, Col {col + 1} {location_tag}".strip(),
+            ))
+
         for pos, right_val in right_cell_map.items():
             if pos not in left_cell_map and right_val:
                 row, col = pos
                 if row >= left_rows:
-                    changes.append(
-                        ChangeDetail(
-                            type="added",
-                            text=right_val,
-                            location=f"Row {row + 1}, Col {col + 1}",
-                        )
-                    )
+                    changes.append(ChangeDetail(
+                        type="added",
+                        text=right_val,
+                        location=f"Row {row + 1}, Col {col + 1}",
+                    ))
 
         return changes

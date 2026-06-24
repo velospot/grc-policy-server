@@ -74,7 +74,7 @@ class DoclingAdapter:
         pdf_options.do_ocr = auto_ocr
         pdf_options.do_table_structure = do_table_structure
         pdf_options.table_structure_options = TableStructureOptions(
-            do_cell_matching=False
+            do_cell_matching=True
         )
         pdf_options.images_scale = 2
         try:

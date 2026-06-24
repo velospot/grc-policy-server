@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from itertools import combinations
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import (
@@ -24,6 +25,7 @@ from grc_policy_server.services.comparison.change_records import (
     detect_numeric_changes,
     detect_requirement_verb_change,
     detect_test_procedure_change,
+    detect_numeric_changes_formula,
     detect_test_setup_change,
     is_cosmetic_text_change,
     is_formatting_only_change,
@@ -38,7 +40,6 @@ from grc_policy_server.services.comparison.clause_matcher import (
 )
 from grc_policy_server.services.comparison.comparison_trace import ComparisonTraceStore
 from grc_policy_server.services.comparison.diff_postprocessor import (
-    filter_key_differences,
     random_diff_subset,
 )
 from grc_policy_server.services.comparison.policy_semantics import (
@@ -281,6 +282,9 @@ class RealDiffEngine:
     thresholds: MatchThresholds = MatchThresholds()
     topk: int = 5
     max_diffs: int = 40
+    max_llm_explanations: int = 40
+    max_llm_markdown_summaries: int = 40
+    suppress_low_diffs: bool = True
     severity_classifier: SeverityClassifier = field(default_factory=SeverityClassifier)
     # Phase 4: optional audit log and evidence extraction agent
     audit_log: "Any | None" = field(default=None)     # AuditLogStore | None
@@ -373,6 +377,12 @@ class RealDiffEngine:
         matching = self._detect_moves(
             matching,
             matcher=matcher,
+        )
+        matching = self._detect_graph_semantic_matches(
+            matching,
+            matcher=matcher,
+            left_document_id=doc1.id,
+            right_document_id=doc2.id,
         )
         matching, grouped_alignments = self._detect_split_merge_alignments(
             matching,
@@ -491,7 +501,10 @@ class RealDiffEngine:
         )
 
         await self._populate_markdown_diff_summaries(
-            diffs, change_records, language=language
+            diffs,
+            change_records,
+            language=language,
+            testing_department=testing_department,
         )
 
         summary = await self._summary_from_change_records(
@@ -501,12 +514,14 @@ class RealDiffEngine:
             key_differences=diffs,
             llm_payload=llm_payload,
             language=language,
+            testing_department=testing_department,
         )
         follow_up_questions = await self._follow_ups(
             doc1_name=doc1.name,
             doc2_name=doc2.name,
             diffs=diffs,
             language=language,
+            testing_department=testing_department,
         )
         accuracy_metrics = self._compute_accuracy_metrics(matching.matches)
 
@@ -543,8 +558,16 @@ class RealDiffEngine:
                 return False
             return True
 
-        suppressed_low = [d for d in diffs if _is_suppressable_low(d)]
-        active_diffs = [d for d in diffs if not _is_suppressable_low(d)]
+        suppressed_low = (
+            [d for d in diffs if _is_suppressable_low(d)]
+            if self.suppress_low_diffs
+            else []
+        )
+        active_diffs = (
+            [d for d in diffs if not _is_suppressable_low(d)]
+            if self.suppress_low_diffs
+            else diffs
+        )
         suppressed_count = len(suppressed_low)
         diffs = active_diffs
 
@@ -674,6 +697,12 @@ class RealDiffEngine:
             target_document_id=doc2.id,
         )
         matching = self._detect_moves(matching, matcher=matcher)
+        matching = self._detect_graph_semantic_matches(
+            matching,
+            matcher=matcher,
+            left_document_id=doc1.id,
+            right_document_id=doc2.id,
+        )
         matching, grouped_alignments = self._detect_split_merge_alignments(
             matching, matcher=matcher
         )
@@ -1012,6 +1041,209 @@ class RealDiffEngine:
             alignments,
         )
 
+    def _detect_graph_semantic_matches(
+        self,
+        matching: ClauseMatchingResult,
+        *,
+        matcher: ClauseMatcher,
+        left_document_id: str,
+        right_document_id: str,
+    ) -> ClauseMatchingResult:
+        """Pair remaining nodes using Neo4j compliance-graph signatures.
+
+        This is intentionally conservative and additive. Existing clause, table,
+        section, movement, and Qdrant matching run first. The graph layer only
+        resolves nodes still classified as ADDED/REMOVED, and only when typed
+        compliance facts overlap strongly enough to indicate the same logical
+        requirement/table despite section renumbering or structural drift.
+        """
+        if self.neo4j is None or not matching.removed or not matching.added:
+            return matching
+
+        left_graph = self._load_graph_signatures(left_document_id)
+        right_graph = self._load_graph_signatures(right_document_id)
+        if not left_graph or not right_graph:
+            return matching
+
+        candidate_edges: list[tuple[float, float, str, str, dict, dict]] = []
+        for left_node in matching.removed:
+            left_id = str(left_node.get("node_id") or left_node.get("chunk_id") or "")
+            if not left_id or self._is_non_semantic_node(left_node):
+                continue
+            left_signatures = self._node_graph_signatures(left_node, left_graph)
+            if not left_signatures:
+                continue
+            for right_node in matching.added:
+                right_id = str(
+                    right_node.get("node_id") or right_node.get("chunk_id") or ""
+                )
+                if not right_id or self._is_non_semantic_node(right_node):
+                    continue
+                if not self._node_types_compatible(left_node, right_node):
+                    continue
+                graph_score = self._graph_signature_score(
+                    left_signatures,
+                    self._node_graph_signatures(right_node, right_graph),
+                    node_type=str(left_node.get("node_type") or ""),
+                )
+                if graph_score < 0.74:
+                    continue
+                clause_score = matcher._clause_score(left_node, right_node)  # noqa: SLF001
+                if clause_score < 0.20:
+                    continue
+                candidate_edges.append(
+                    (
+                        graph_score,
+                        clause_score,
+                        left_id,
+                        right_id,
+                        left_node,
+                        right_node,
+                    )
+                )
+
+        if not candidate_edges:
+            return matching
+
+        candidate_edges.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        graph_matches: list[ClauseMatch] = []
+        matched_left: set[str] = set()
+        matched_right: set[str] = set()
+        for graph_score, clause_score, left_id, right_id, left_node, right_node in candidate_edges:
+            if left_id in matched_left or right_id in matched_right:
+                continue
+            graph_matches.append(
+                ClauseMatch(
+                    distance=max(0.0, min(1.0, 1.0 - clause_score)),
+                    matched_by="graph_semantic",
+                    left=left_node,
+                    right=right_node,
+                )
+            )
+            matched_left.add(left_id)
+            matched_right.add(right_id)
+
+        if not graph_matches:
+            return matching
+
+        return ClauseMatchingResult(
+            matches=[*matching.matches, *graph_matches],
+            removed=[
+                node
+                for node in matching.removed
+                if str(node.get("node_id") or node.get("chunk_id") or "")
+                not in matched_left
+            ],
+            added=[
+                node
+                for node in matching.added
+                if str(node.get("node_id") or node.get("chunk_id") or "")
+                not in matched_right
+            ],
+            section_matches=matching.section_matches,
+        )
+
+    def _load_graph_signatures(
+        self,
+        document_id: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        if self.neo4j is None:
+            return {}
+        try:
+            getter = getattr(self.neo4j, "get_compliance_signatures_by_source")
+            return getter(document_id=document_id) or {}
+        except AttributeError:
+            return {}
+        except Exception as exc:
+            logger.warning(
+                "Neo4j graph signature lookup failed during compare — continuing without graph fallback error_type=%s error=%s",
+                type(exc).__name__,
+                exc,
+            )
+            self.neo4j = None
+            return {}
+
+    def _node_graph_signatures(
+        self,
+        node: dict,
+        graph_by_source: dict[str, list[dict[str, Any]]],
+    ) -> set[str]:
+        source_ids = {
+            str(node.get("node_id") or ""),
+            str(node.get("chunk_id") or ""),
+            str(node.get("canonical_node_id") or ""),
+        }
+        signatures: set[str] = set()
+        for source_id in source_ids:
+            if not source_id:
+                continue
+            for graph_node in graph_by_source.get(source_id, []):
+                signatures.update(self._graph_node_signatures(graph_node))
+        return signatures
+
+    @staticmethod
+    def _graph_node_signatures(graph_node: dict[str, Any]) -> set[str]:
+        properties = graph_node.get("properties") or {}
+        ontology_type = str(
+            graph_node.get("ontology_type") or graph_node.get("label") or ""
+        ).strip().lower()
+        signatures: set[str] = set()
+
+        fact_type = str(properties.get("fact_type") or "").strip().lower()
+        name = str(properties.get("name") or graph_node.get("title") or "").strip().lower()
+        unit = str(properties.get("unit") or "").strip().lower()
+        header = str(properties.get("column_header") or "").strip().lower()
+        row_key = str(properties.get("row_semantic_key") or "").strip().lower()
+        domain = str(properties.get("domain") or "").strip().lower()
+        clause = str(properties.get("clause") or "").strip().lower()
+        subject = str(properties.get("subject") or "").strip().lower()
+        action = str(properties.get("action") or "").strip().lower()
+        obj = str(properties.get("object") or "").strip().lower()
+
+        if fact_type and (name or header or row_key):
+            signatures.add(
+                "|".join(
+                    (
+                        "fact",
+                        ontology_type,
+                        domain,
+                        fact_type,
+                        name,
+                        header,
+                        row_key,
+                        unit,
+                    )
+                )
+            )
+        if ontology_type and clause:
+            signatures.add(f"clause|{ontology_type}|{clause}")
+        if ontology_type and (subject or action or obj):
+            signatures.add(f"meaning|{ontology_type}|{subject}|{action}|{obj}")
+        return {sig for sig in signatures if len(sig) > 3}
+
+    @staticmethod
+    def _graph_signature_score(
+        left_signatures: set[str],
+        right_signatures: set[str],
+        *,
+        node_type: str,
+    ) -> float:
+        if not left_signatures or not right_signatures:
+            return 0.0
+        common = left_signatures & right_signatures
+        if not common:
+            return 0.0
+        union_size = len(left_signatures | right_signatures)
+        jaccard = len(common) / union_size if union_size else 0.0
+        if node_type == "table":
+            fact_common = [sig for sig in common if sig.startswith("fact|")]
+            if len(fact_common) >= 2:
+                return max(0.78, jaccard)
+            return jaccard
+        if any(sig.startswith(("clause|", "meaning|")) for sig in common):
+            return max(0.76, jaccard)
+        return jaccard
+
     def _best_group_alignment(
         self,
         *,
@@ -1123,12 +1355,15 @@ class RealDiffEngine:
             return False
         node_type = str(prev.get("node_type") or "")
         if node_type == "table":
-            # Allow up to 1-column discrepancy to handle Docling merged-cell artifacts
-            # where continuation pages may report N±1 columns.  Larger differences
-            # indicate structurally distinct tables and block stitching.
+            # Allow up to 2-column discrepancy: cell-matching enabled in Docling can
+            # cause minor column count variance across continuation pages.  Low-confidence
+            # tables keep the stricter ±1 guard to avoid merging unrelated tables.
+            prev_low = bool(prev.get("low_confidence_table", False))
+            curr_low = bool(curr.get("low_confidence_table", False))
+            col_tolerance = 1 if (prev_low or curr_low) else 2
             prev_cols = int(prev.get("table_num_cols") or 0)
             curr_cols = int(curr.get("table_num_cols") or 0)
-            if prev_cols > 0 and curr_cols > 0 and abs(prev_cols - curr_cols) > 1:
+            if prev_cols > 0 and curr_cols > 0 and abs(prev_cols - curr_cols) > col_tolerance:
                 return False
             # A continuation fragment has NO header cells at row 0 (the header is on the
             # previous page). An independent new table always starts with is_header=True at row 0.
@@ -1443,6 +1678,17 @@ class RealDiffEngine:
         left_src = self._source_text(left)
         right_src = self._source_text(right)
         numeric_changes = detect_numeric_changes(left_src, right_src)
+        # For formula nodes, supplement with LaTeX-aware numeric extraction
+        if node_type == "formula":
+            left_latex = str((left or {}).get("formula_latex") or "")
+            right_latex = str((right or {}).get("formula_latex") or "")
+            latex_numeric = detect_numeric_changes_formula(left_latex, right_latex)
+            if latex_numeric:
+                # Merge: latex changes are more precise; deduplicate by old/new pair
+                existing = {(c.get("old"), c.get("new")) for c in numeric_changes}
+                for lc in latex_numeric:
+                    if (lc.get("old"), lc.get("new")) not in existing:
+                        numeric_changes.append(lc)
         requirement_verb_change = detect_requirement_verb_change(left_src, right_src)
         # Supplement text-level verb detection with fact-level normative strength check
         if requirement_verb_change is None:
@@ -1577,6 +1823,9 @@ class RealDiffEngine:
             classification.audit_disposition == AuditDisposition.REQUIRES_HUMAN_REVIEW
             or (severity == "high" and severity_confidence < 0.85)
             or (severity == "medium" and severity_confidence < 0.70)
+            # Formula numeric changes and caption changes always warrant review
+            or (node_type == "formula" and bool(numeric_changes))
+            or node_type == "table_caption"
         )
         section = (
             (left_ref.section if left_ref else None)
@@ -2620,13 +2869,21 @@ class RealDiffEngine:
     def _citation_from_neo4j_or_fallback(self, chunk: dict) -> DocumentReference:
         chunk_id = chunk.get("chunk_id")
         if chunk_id and self.neo4j is not None:
-            citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
-            if citation:
-                source_text = self._reference_source_text(chunk) or str(
-                    citation.get("sourceText") or ""
+            try:
+                citation = self.neo4j.get_chunk_citation(chunk_id=str(chunk_id))
+                if citation:
+                    source_text = self._reference_source_text(chunk) or str(
+                        citation.get("sourceText") or ""
+                    )
+                    citation["sourceText"] = source_text
+                    return DocumentReference(**citation)
+            except Exception as exc:
+                logger.warning(
+                    "Neo4j citation lookup failed during compare — using canonical fallback citation error_type=%s error=%s",
+                    type(exc).__name__,
+                    exc,
                 )
-                citation["sourceText"] = source_text
-                return DocumentReference(**citation)
+                self.neo4j = None
         page = chunk.get("page_number")
         if page is None:
             page = chunk.get("page")
@@ -2780,6 +3037,7 @@ class RealDiffEngine:
         doc2_name: str,
         diffs: List[KeyDifference],
         language: str,
+        testing_department: str = "",
     ) -> List[str]:
         sampled_diffs = random_diff_subset(diffs, max_items=10)
         if not sampled_diffs:
@@ -2795,6 +3053,7 @@ class RealDiffEngine:
                 key_differences=sampled_diffs,
                 max_questions=4,
                 language=language,
+                testing_department=testing_department,
             )
             questions = [question.strip() for question in questions if question.strip()]
             if questions:
@@ -2814,6 +3073,7 @@ class RealDiffEngine:
         doc2_name: str,
         key_differences: List[KeyDifference],
         language: str,
+        testing_department: str = "",
     ) -> str:
         if not key_differences:
             return "No material differences were detected."
@@ -2832,12 +3092,26 @@ class RealDiffEngine:
         except Exception:
             logger.exception("failed two-step summary aggregation, falling back")
 
-        return await self.llm.summarize_changes(
-            doc1_name=doc1_name,
-            doc2_name=doc2_name,
-            key_differences=key_differences,
-            language=language,
-        )
+        try:
+            return await self.llm.summarize_changes(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                key_differences=key_differences,
+                language=language,
+                testing_department=testing_department,
+            )
+        except Exception as exc:
+            logger.warning(
+                "failed LLM change summary, using deterministic fallback error_type=%s error=%s",
+                type(exc).__name__,
+                exc,
+            )
+            return self._deterministic_summary_from_diffs(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                key_differences=key_differences,
+                testing_department=testing_department,
+            )
 
     async def _summary_from_change_records(
         self,
@@ -2848,6 +3122,7 @@ class RealDiffEngine:
         key_differences: list[KeyDifference],
         llm_payload: dict,
         language: str,
+        testing_department: str = "",
     ) -> str:
         if not change_records:
             return "No material differences were detected."
@@ -2871,6 +3146,29 @@ class RealDiffEngine:
             doc2_name=doc2_name,
             key_differences=key_differences,
             language=language,
+            testing_department=testing_department,
+        )
+
+    def _deterministic_summary_from_diffs(
+        self,
+        *,
+        doc1_name: str,
+        doc2_name: str,
+        key_differences: list[KeyDifference],
+        testing_department: str = "",
+    ) -> str:
+        counts = Counter(diff.changeType for diff in key_differences)
+        top_sections = [
+            str(diff.section or "Unknown Section")
+            for diff in key_differences[:5]
+        ]
+        top = "; ".join(top_sections) if top_sections else "none"
+        department = testing_department or "general"
+        return (
+            f"Comparison completed for {doc1_name} versus {doc2_name}. "
+            f"Department={department}. Differences: added={counts.get('ADDED', 0)}, "
+            f"removed={counts.get('REMOVED', 0)}, modified={counts.get('MODIFIED', 0)}. "
+            f"Top cited sections: {top}."
         )
 
     async def _explain_differences(
@@ -2879,7 +3177,7 @@ class RealDiffEngine:
         *,
         language: str,
     ) -> list[dict[str, str]]:
-        capped = key_differences[: self.max_diffs]
+        capped = key_differences[: self.max_llm_explanations]
         tasks = [
             self.llm.summarize_diff(
                 old_text=self._diff_text(diff.doc1Reference, diff.doc1Content),
@@ -3144,6 +3442,7 @@ class RealDiffEngine:
         change_records: list[ChangeRecord] | None = None,
         *,
         language: str = "",
+        testing_department: str = "",
     ) -> None:
         """Generate markdownDiffSummary for every diff in parallel via LLM."""
         _records: list[ChangeRecord | None] = list(change_records or [])
@@ -3190,13 +3489,15 @@ class RealDiffEngine:
                     if is_table
                     else None,
                     language=language,
+                    testing_department=testing_department,
                 )
 
+        llm_diffs = diffs[: self.max_llm_markdown_summaries]
         results = await asyncio.gather(
-            *[_generate_one(diff, i) for i, diff in enumerate(diffs)],
+            *[_generate_one(diff, i) for i, diff in enumerate(llm_diffs)],
             return_exceptions=True,
         )
-        for diff, result in zip(diffs, results, strict=False):
+        for diff, result in zip(llm_diffs, results, strict=False):
             if isinstance(result, Exception):
                 logger.warning(
                     "markdownDiffSummary generation failed for section=%s: %s",
@@ -3286,7 +3587,14 @@ class RealDiffEngine:
 
         Caption rows are stripped and rows re-indexed before comparison so that
         a table with an embedded caption does not appear to have an extra row.
+        Column roles (limit/measured/margin/result/frequency) from ingestion-time
+        classification are used to apply unit normalization and severity escalation.
         """
+        from grc_policy_server.services.ingestion.table_normalization import (
+            cell_values_equivalent,
+            classify_result_transition,
+        )
+
         changes: List[ChangeDetail] = []
 
         left_rows = max(
@@ -3318,6 +3626,18 @@ class RealDiffEngine:
                     )
                 )
 
+        # Resolve column roles from ingestion metadata (prefer left table's roles)
+        left_meta = left.get("canonical_metadata") or {}
+        right_meta = right.get("canonical_metadata") or {}
+        col_roles: dict[int, str] = {
+            int(k): v
+            for k, v in (
+                left_meta.get("table_column_roles")
+                or right_meta.get("table_column_roles")
+                or {}
+            ).items()
+        }
+
         # Cell-level changes using caption-normalised cells
         left_cells = self._normalize_cells_for_comparison(left)
         right_cells = self._normalize_cells_for_comparison(right)
@@ -3334,23 +3654,80 @@ class RealDiffEngine:
         # Find modified cells (same position, different content)
         for pos, left_val in left_cell_map.items():
             right_val = right_cell_map.get(pos)
-            if right_val is not None and left_val != right_val:
-                row, col = pos
-                changes.append(
-                    ChangeDetail(
+            if right_val is None or left_val == right_val:
+                continue
+            row, col = pos
+            col_role = col_roles.get(col, "other")
+
+            # Unit-normalization equivalence check: skip if values are numerically
+            # equivalent in different representations (e.g. 30 dBµV/m vs 0.032 V/m)
+            if cell_values_equivalent(left_val, right_val, col_role):
+                continue
+
+            # PASS→FAIL / FAIL→PASS transition detection for result columns
+            if col_role == "result":
+                transition = classify_result_transition(left_val, right_val)
+                if transition == "pass_to_fail":
+                    changes.append(ChangeDetail(
                         type="modified",
-                        text="Cell changed",
+                        text="PASS → FAIL (critical result change)",
                         oldValue=left_val,
                         newValue=right_val,
-                        location=f"Row {row + 1}, Col {col + 1}",
-                    )
-                )
+                        location=f"Row {row + 1}, Col {col + 1} [result_column:CRITICAL]",
+                    ))
+                    continue
+                if transition == "fail_to_pass":
+                    changes.append(ChangeDetail(
+                        type="modified",
+                        text="FAIL → PASS (result improvement)",
+                        oldValue=left_val,
+                        newValue=right_val,
+                        location=f"Row {row + 1}, Col {col + 1} [result_column]",
+                    ))
+                    continue
+
+            # Margin drop detection
+            if col_role == "margin":
+                try:
+                    lf = float(left_val.replace(",", "."))
+                    rf = float(right_val.replace(",", "."))
+                    drop = lf - rf
+                    if rf <= 0:
+                        changes.append(ChangeDetail(
+                            type="modified",
+                            text=f"Margin at/below zero ({rf} dB) [CRITICAL]",
+                            oldValue=left_val,
+                            newValue=right_val,
+                            location=f"Row {row + 1}, Col {col + 1} [margin_column:CRITICAL]",
+                        ))
+                        continue
+                    if drop > 3.0:
+                        changes.append(ChangeDetail(
+                            type="modified",
+                            text=f"Margin dropped by {drop:.1f} dB [HIGH]",
+                            oldValue=left_val,
+                            newValue=right_val,
+                            location=f"Row {row + 1}, Col {col + 1} [margin_column:HIGH]",
+                        ))
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            # Limit column: any numeric change is high-severity
+            location_tag = f"[{col_role}_column]" if col_role != "other" else ""
+            changes.append(ChangeDetail(
+                type="modified",
+                text="Cell changed" + (f" ({col_role})" if col_role != "other" else ""),
+                oldValue=left_val,
+                newValue=right_val,
+                location=f"Row {row + 1}, Col {col + 1} {location_tag}".strip(),
+            ))
 
         # Find cells in new rows
         for pos, right_val in right_cell_map.items():
             if pos not in left_cell_map and right_val:
                 row, col = pos
-                if row >= left_rows:  # New row
+                if row >= left_rows:
                     changes.append(
                         ChangeDetail(
                             type="added",

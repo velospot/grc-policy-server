@@ -527,27 +527,38 @@ def delete_documents(
                 deleted_chunks = qdrant.delete_chunks_by_document(document_id)
             except Exception:
                 logger.warning(
-                    "qdrant delete failed document_id=%s — continuing with other stores",
+                    "qdrant delete failed document_id=%s",
                     document_id,
                     exc_info=True,
                 )
+                results.append(
+                    DeleteDocumentResult(
+                        documentId=document_id,
+                        deleted=False,
+                        deletedChunks=None,
+                        error="Failed to delete document records from Qdrant",
+                    )
+                )
+                continue
         else:
             logger.debug(
                 "qdrant unavailable — vector records not deleted for document_id=%s",
                 document_id,
             )
 
-        # Neo4j — optional
+        # Neo4j — optional; failure is non-fatal and must not block local deletion
         deleted_graph_nodes = 0
+        neo4j_warning: str | None = None
         if neo4j is not None:
             try:
                 deleted_graph_nodes = neo4j.delete_document_subgraph(document_id)
             except Exception:
                 logger.warning(
-                    "neo4j delete failed document_id=%s — continuing with filesystem delete",
+                    "neo4j delete failed document_id=%s",
                     document_id,
                     exc_info=True,
                 )
+                neo4j_warning = "Neo4j graph records could not be deleted; document files and vector records were removed"
 
         try:
             deleted_local = repository.delete_document(document_id)
@@ -573,7 +584,7 @@ def delete_documents(
             )
             continue
 
-        if not deleted_local and deleted_chunks == 0 and deleted_graph_nodes == 0:
+        if not deleted_local and deleted_chunks == 0 and deleted_graph_nodes == 0 and not neo4j_warning:
             results.append(
                 DeleteDocumentResult(
                     documentId=document_id,
@@ -589,6 +600,7 @@ def delete_documents(
                 documentId=document_id,
                 deleted=True,
                 deletedChunks=deleted_chunks,
+                warnings=[neo4j_warning] if neo4j_warning else None,
             )
         )
 

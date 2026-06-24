@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from grc_policy_server.services.documents.canonical_table_model import CanonicalTable, TableCell
+from grc_policy_server.services.documents.canonical_table_model import CanonicalTable
 from grc_policy_server.services.ingestion.ontology.emc_ontology import (
     EMC_DOMAIN_ROW_KEYS,
     EMCTestClassifier,

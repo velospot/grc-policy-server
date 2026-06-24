@@ -19,7 +19,7 @@ local Ollama. See docs/agentic_limitations.md for guidance.
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncIterator, Dict, List
+from typing import AsyncIterator, Dict, List
 
 from grc_policy_server.models.schemas import KeyDifference
 from grc_policy_server.services.llm.base import BaseLLM

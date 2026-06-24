@@ -17,6 +17,10 @@ from grc_policy_server.services.ingestion.ocr_fallback import build_ocr_fallback
 from grc_policy_server.services.ingestion.policy_preprocessor import (
     preprocess_parsed_chunks,
 )
+from grc_policy_server.services.ingestion.document_ingestion_service import (
+    DocumentIngestionService,
+    _IngestionContext,
+)
 from grc_policy_server.services.ingestion.section_summary_backfill import (
     SectionSummaryBackfillService,
 )
@@ -81,6 +85,35 @@ def test_build_document_hierarchy_excludes_toc_from_indexing():
     toc_node = next(node for node in hierarchy.nodes if node.section_path == "Contents")
     assert toc_node.excluded_from_index is True
     assert toc_node.exclusion_reason == "table_of_contents"
+
+
+@pytest.mark.anyio
+async def test_build_relationships_keeps_upload_success_on_neo4j_failure(caplog, tmp_path):
+    class FailingNeo4j:
+        def upsert_document_hierarchy(self, **kwargs):
+            raise RuntimeError("auth failed")
+
+    service = DocumentIngestionService(
+        docling_adapter=None,  # type: ignore[arg-type]
+        qdrant=None,
+        neo4j=FailingNeo4j(),  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        upload_root=tmp_path,
+    )
+    context = _IngestionContext(
+        filename="policy.pdf",
+        content=b"pdf",
+        content_type="application/pdf",
+        document_id="doc-1",
+        content_hash="hash",
+        normalized_tree={"nodes": [], "metadata": {}},
+    )
+
+    returned = await service._stage_build_relationships(context)
+
+    assert returned is context
+    assert "canonical nodes already saved, upload will succeed" in caplog.text
+    assert "auth failed" in caplog.text
 
 
 def test_build_document_hierarchy_uses_version_safe_stable_ids():
@@ -442,3 +475,217 @@ def test_section_summary_backfill_updates_existing_hierarchy(tmp_path):
     assert "section_summary_backfill_at" in hierarchy["metadata"]
     assert section_node["metadata"]["summary_text"] == "admins must use mfa every 12 months."
     assert section_node["metadata"]["summary_numbers"] == ["12"]
+
+
+def test_clause_matcher_calls_search_fn_for_unmatched_nodes():
+    """search_fn is invoked for each unmatched left node in a mapped section."""
+    search_calls: list[dict] = []
+
+    def search_fn(**kwargs):
+        search_calls.append(kwargs)
+        return []
+
+    matcher = ClauseMatcher(search_fn=search_fn, thresholds=MatchThresholds(), topk=3)
+    result = matcher.match(
+        left_nodes=[
+            # Section node — establishes the section in section_map via stable_id
+            {
+                "chunk_id": "sec-l-safety",
+                "stable_id": "sec-safety",
+                "node_type": "section",
+                "section_path": "5.1 Safety Requirements",
+                "title": "5.1 Safety Requirements",
+                "clean_text": "safety requirements",
+                "page_number": 1,
+                "chunk_index": 0,
+            },
+            # L1 — matched to R1 by stable_id
+            {
+                "chunk_id": "l-1",
+                "stable_id": "sid-matched",
+                "node_type": "clause",
+                "section_path": "5.1 Safety Requirements",
+                "text": "Admins must use multi-factor authentication.",
+                "clean_text": "admins must use multi-factor authentication.",
+                "page_number": 1,
+                "chunk_index": 1,
+            },
+            # L2 — no stable_id, low text similarity to any right node
+            {
+                "chunk_id": "l-2",
+                "node_type": "clause",
+                "section_path": "5.1 Safety Requirements",
+                "text": "Capacitor discharge rate shall not exceed 10 nanofarads.",
+                "clean_text": "capacitor discharge rate shall not exceed 10 nanofarads.",
+                "page_number": 1,
+                "chunk_index": 2,
+            },
+            # L3 — no stable_id, low text similarity to any right node
+            {
+                "chunk_id": "l-3",
+                "node_type": "clause",
+                "section_path": "5.1 Safety Requirements",
+                "text": "All connectors must pass IP67 ingress protection testing.",
+                "clean_text": "all connectors must pass ip67 ingress protection testing.",
+                "page_number": 2,
+                "chunk_index": 3,
+            },
+        ],
+        right_nodes=[
+            {
+                "chunk_id": "sec-r-safety",
+                "stable_id": "sec-safety",
+                "node_type": "section",
+                "section_path": "5.1 Safety Requirements",
+                "title": "5.1 Safety Requirements",
+                "clean_text": "safety requirements",
+                "page_number": 1,
+                "chunk_index": 0,
+            },
+            # R1 — matched to L1 by stable_id
+            {
+                "chunk_id": "r-1",
+                "stable_id": "sid-matched",
+                "node_type": "clause",
+                "section_path": "5.1 Safety Requirements",
+                "text": "Administrators must use MFA for all logins.",
+                "clean_text": "administrators must use mfa for all logins.",
+                "page_number": 1,
+                "chunk_index": 1,
+            },
+            # R2 — no match candidate for L2 or L3 (unrelated vocabulary)
+            {
+                "chunk_id": "r-2",
+                "node_type": "clause",
+                "section_path": "5.1 Safety Requirements",
+                "text": "Mechanical vibration resistance per IEC 60068-2-6.",
+                "clean_text": "mechanical vibration resistance per iec 60068-2-6.",
+                "page_number": 2,
+                "chunk_index": 2,
+            },
+        ],
+        target_document_id="doc-right",
+    )
+
+    # L1 matched to R1; L2 and L3 are unmatched (2 left, 1 right → no orphan fallback)
+    assert any(m.left["chunk_id"] == "l-1" and m.right["chunk_id"] == "r-1" for m in result.matches)
+    unmatched_left_ids = {n["chunk_id"] for n in result.removed}
+    assert "l-2" in unmatched_left_ids
+    assert "l-3" in unmatched_left_ids
+    assert any(n["chunk_id"] == "r-2" for n in result.added)
+    # search_fn invoked once per unmatched left node in the mapped section
+    assert len(search_calls) == 2
+    queried_ids = {c.get("query_text") for c in search_calls}
+    assert any("capacitor" in (t or "") for t in queried_ids)
+    assert any("ip67" in (t or "").lower() for t in queried_ids)
+
+
+def test_clause_matcher_stable_id_priority_in_matched_section():
+    """stable_id match takes priority over high lexical similarity within a section."""
+    matcher = ClauseMatcher(search_fn=None, thresholds=MatchThresholds(), topk=3)
+    result = matcher.match(
+        left_nodes=[
+            {
+                "chunk_id": "sec-l",
+                "stable_id": "sec-req",
+                "node_type": "section",
+                "section_path": "5.1 Requirements",
+                "title": "5.1 Requirements",
+                "clean_text": "requirements",
+                "page_number": 1,
+                "chunk_index": 0,
+            },
+            {
+                "chunk_id": "l-1",
+                "stable_id": "shared-sid",
+                "node_type": "clause",
+                "section_path": "5.1 Requirements",
+                "text": "Voltage must be 12V DC with tolerance 5%.",
+                "clean_text": "voltage must be 12v dc with tolerance 5%.",
+                "page_number": 1,
+                "chunk_index": 1,
+            },
+        ],
+        right_nodes=[
+            {
+                "chunk_id": "sec-r",
+                "stable_id": "sec-req",
+                "node_type": "section",
+                "section_path": "5.1 Requirements",
+                "title": "5.1 Requirements",
+                "clean_text": "requirements",
+                "page_number": 1,
+                "chunk_index": 0,
+            },
+            # R1 — stable_id matches L1; text is different
+            {
+                "chunk_id": "r-1",
+                "stable_id": "shared-sid",
+                "node_type": "clause",
+                "section_path": "5.1 Requirements",
+                "text": "DC supply voltage: 12 Volt ±5% tolerance.",
+                "clean_text": "dc supply voltage 12 volt 5 percent tolerance.",
+                "page_number": 1,
+                "chunk_index": 1,
+            },
+            # R2 — different stable_id but identical text to L1 (lexically perfect match)
+            {
+                "chunk_id": "r-2",
+                "stable_id": "other-sid",
+                "node_type": "clause",
+                "section_path": "5.1 Requirements",
+                "text": "Voltage must be 12V DC with tolerance 5%.",
+                "clean_text": "voltage must be 12v dc with tolerance 5%.",
+                "page_number": 2,
+                "chunk_index": 2,
+            },
+        ],
+        target_document_id="doc-right",
+    )
+
+    # L1 must match R1 (via stable_id), not R2 (via lexical similarity)
+    assert len(result.matches) == 1
+    assert result.matches[0].matched_by == "stable_id"
+    assert result.matches[0].left["chunk_id"] == "l-1"
+    assert result.matches[0].right["chunk_id"] == "r-1"
+    # R2 is left unmatched (ADDED) because L1 was already consumed by stable_id match
+    assert len(result.added) == 1
+    assert result.added[0]["chunk_id"] == "r-2"
+    assert result.removed == []
+
+
+def test_compare_v5_service_decorates_done_event_with_hybrid_signals():
+    """done SSE event contains hybridSignals.matchingStrategy; non-done events do not."""
+    from grc_policy_server.services.comparison.compare_v5_service import CompareV5Service
+
+    class _StreamEngine:
+        qdrant = object()  # truthy → qdrantAvailable = True
+        neo4j = None       # falsy  → neo4jAvailable = False
+        canonical_store = object()
+
+    class _DocRef:
+        def __init__(self, id_: str):
+            self.id = id_
+
+    class _Payload:
+        testingDepartment = "Safety"
+
+    service = CompareV5Service(document_repo=None, stream_engine=_StreamEngine())  # type: ignore[arg-type]
+    doc1, doc2, payload = _DocRef("doc-1"), _DocRef("doc-2"), _Payload()
+
+    done_event = service._decorate_stream_event(
+        {"type": "done"}, doc1=doc1, doc2=doc2, payload=payload  # type: ignore[arg-type]
+    )
+    assert "hybridSignals" in done_event
+    assert done_event["hybridSignals"]["matchingStrategy"] == "canonical+qdrant+neo4j_graph_fallback"
+    assert done_event["hybridSignals"]["qdrantAvailable"] is True
+    assert done_event["hybridSignals"]["neo4jAvailable"] is False
+    assert done_event["hybridSignals"]["canonicalStoreAvailable"] is True
+    assert done_event["apiVersion"] == "v5"
+    assert done_event["serviceVersion"] == "compare-v5"
+
+    progress_event = service._decorate_stream_event(
+        {"type": "progress", "pct": 50}, doc1=doc1, doc2=doc2, payload=payload  # type: ignore[arg-type]
+    )
+    assert "hybridSignals" not in progress_event
+    assert progress_event["apiVersion"] == "v5"

@@ -86,7 +86,80 @@ _CLAUSE_MARKER_RE = re.compile(
 _VERSION_SUFFIX_RE = re.compile(
     r"(?i)(?:[-_ ](?:v(?:ersion)?[-_ ]?)?\d+(?:\.\d+)*)$"
 )
+# Strips date and locale suffixes so document families are edition-independent.
+# "TL_81000_2018-03_GER_p063" → "TL_81000_p063" (same family as 2021-09_GER edition).
+_DATE_INFIX_RE = re.compile(r"[-_]\d{4}[-_]\d{2}(?:[-_]\d{2})?")
+# Strips standalone 2–4 letter uppercase locale/language codes: _GER, _ENG, _DE, _EN, _FR
+_LOCALE_INFIX_RE = re.compile(r"(?<=[_-])[A-Z]{2,4}(?=[_-]|$)")
 _MAX_SECTION_TEXT = 5000
+
+# ---------------------------------------------------------------------------
+# Content-based standard family detection
+# ---------------------------------------------------------------------------
+# Each entry: (compiled_pattern, canonical_family_id)
+# Ordered from most-specific to least-specific to avoid false positives.
+_CONTENT_FAMILY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # VW/Audi automotive EMC standard — matches "TL 81000", "TL81000", "TL-81000"
+    (re.compile(r"TL[\s_-]?81000", re.IGNORECASE), "tl_81000"),
+    # DNV maritime EMC requirements — matches "DNVGL-CG-0339", "DNV-CG-0339", "CG-0339"
+    (re.compile(r"DNV(?:GL)?[-\s]CG[-\s]0339|CG[-\s]0339\b", re.IGNORECASE), "dnv_cg_0339"),
+    # IEC environmental testing (vibration/shock/temp) — "IEC 60068", "EN 60068", "DIN EN 60068"
+    (re.compile(r"(?:DIN\s+)?EN\s+(?:IEC\s+)?60068|IEC\s+60068", re.IGNORECASE), "din_en_60068"),
+    # IEC 61000 EMC immunity/emission
+    (re.compile(r"IEC[\s_-]61000", re.IGNORECASE), "iec_61000"),
+    # CISPR emission standards
+    (re.compile(r"CISPR[\s_-]\d+", re.IGNORECASE), "cispr"),
+    # ISO 11452 automotive EMC — radiated immunity
+    (re.compile(r"ISO[\s_-]11452", re.IGNORECASE), "iso_11452"),
+    # ISO 7637 automotive transient immunity
+    (re.compile(r"ISO[\s_-]7637", re.IGNORECASE), "iso_7637"),
+]
+# Max chunks scanned: cover page + scope section is well within 50 chunks
+_CONTENT_SCAN_CHUNK_LIMIT = 50
+
+
+def _detect_family_from_chunks(chunks: list["ParsedChunk"]) -> str | None:
+    """Scan document content for known standard identifiers.
+
+    Checks chunk titles first (most reliable), then early chunk body text.
+    Stops at the first match and returns the canonical family_id.
+    Returns None if no known standard is identified.
+    """
+    scan_chunks = chunks[:_CONTENT_SCAN_CHUNK_LIMIT]
+
+    # Pass 1: scan titles only (headings are the most reliable signal)
+    for chunk in scan_chunks:
+        title = (chunk.title or "").strip()
+        if not title:
+            continue
+        for pattern, family_id in _CONTENT_FAMILY_PATTERNS:
+            if pattern.search(title):
+                return family_id
+
+    # Pass 2: scan body text of early chunks
+    for chunk in scan_chunks:
+        text = (chunk.text or "").strip()
+        if not text:
+            continue
+        for pattern, family_id in _CONTENT_FAMILY_PATTERNS:
+            if pattern.search(text):
+                return family_id
+
+    return None
+
+
+def _detect_family_from_filename_patterns(filename: str) -> str | None:
+    """Match filename stem against known standard identifier patterns.
+
+    Uses the same regex patterns as content detection so partial-extract
+    documents (page ranges) that lack a cover page still resolve correctly.
+    Returns None if no known standard is identified.
+    """
+    stem = Path(filename).stem
+    for pattern, family_id in _CONTENT_FAMILY_PATTERNS:
+        if pattern.search(stem):
+            return family_id
+    return None
 
 # Section number hierarchy expansion -------------------------------------------
 # Matches titles that start with a multi-level dotted numeric prefix:
@@ -170,7 +243,7 @@ def filter_header_footer_chunks(chunks: Iterable["ParsedChunk"]) -> list["Parsed
 
     return [
         c for c in pass1
-        if not ((c.text or "").strip() in frequent_texts)
+        if (c.text or "").strip() not in frequent_texts
     ]
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _SUMMARY_OBLIGATION_RE = re.compile(
@@ -190,6 +263,20 @@ _STD_REF_IN_TITLE_RE = re.compile(
     r"\b(CISPR|IEC|ISO|EN|FCC)\s*[\d/]+",
     re.IGNORECASE,
 )
+
+
+def _extract_clause_number_from_section(section_titles: tuple[str, ...] | list[str]) -> str:
+    """Extract the most specific clause number from the section path.
+
+    Returns e.g. "5.3.1" if the deepest title starts with a dotted number.
+    Returns "" when no numeric clause prefix is found, so the caller falls back
+    to the section-path-based stable_id.
+    """
+    for title in reversed(list(section_titles)):
+        m = _SEC_NUM_PREFIX_RE.match(str(title).strip())
+        if m:
+            return m.group(1)
+    return ""
 
 
 def _stable_id_for_section(
@@ -230,7 +317,19 @@ def build_document_hierarchy(
     parsed_chunks: Iterable[ParsedChunk],
     content_hash: str,
 ) -> DocumentHierarchy:
-    doc_family = document_family_from_filename(filename)
+    # filter_header_footer_chunks returns a list — safe to scan twice
+    filtered_chunks = filter_header_footer_chunks(parsed_chunks)
+
+    # Detection priority:
+    # 1. Document body / headings — most reliable; stable across filename conventions.
+    # 2. Filename pattern matching against known standard IDs — catches page-range
+    #    extracts whose cover page (with the standard number) was not included.
+    # 3. Legacy strip-based filename parsing — generic fallback for unknown documents.
+    doc_family = (
+        _detect_family_from_chunks(filtered_chunks)
+        or _detect_family_from_filename_patterns(filename)
+        or document_family_from_filename(filename)
+    )
     document_stable_id = stable_uuid(f"document::{doc_family}")
 
     nodes: list[HierarchyNode] = []
@@ -240,7 +339,6 @@ def build_document_hierarchy(
     section_leaf_ordinals: dict[tuple[str, ...], int] = defaultdict(int)
     section_ordinal = 0
 
-    filtered_chunks = filter_header_footer_chunks(parsed_chunks)
     for chunk in sorted(filtered_chunks, key=lambda item: (item.page_number or 0, item.ordinal)):
         section_titles = _normalize_section_titles(chunk)
         section_path = " / ".join(section_titles) if section_titles else "Unknown Section"
@@ -321,7 +419,9 @@ def build_document_hierarchy(
             elif inherited_reason is None:
                 inherited_reason = _get_inherited_exclusion(section_titles, section_exclusions)
 
-        if chunk.chunk_type == "heading":
+        if chunk.chunk_type == "heading" and not chunk.text:
+            # Headings without body text only contribute to the section hierarchy above.
+            # Headings with text (rare OCR/VLM artifacts) become heading comparison nodes.
             continue
 
         if not section_titles:
@@ -377,9 +477,17 @@ def build_document_hierarchy(
             node_text = chunk.markdown_text.strip()
         content_digest = sha256_hex(normalized_text.encode("utf-8")) if normalized_text else ""
         pure_hash = _pure_text_hash(clean_text or chunk.text)
-        stable_id = stable_uuid(
-            f"{chunk.chunk_type}::{doc_family}::{section_path}::{anchor_text}"
-        )
+        # Encode clause number into stable_id so that renumbered-but-content-stable
+        # clauses still produce a matching stable_id across document editions.
+        clause_num = _extract_clause_number_from_section(section_titles)
+        if clause_num:
+            stable_id = stable_uuid(
+                f"{chunk.chunk_type}::{doc_family}::clause::{clause_num}::{anchor_text}"
+            )
+        else:
+            stable_id = stable_uuid(
+                f"{chunk.chunk_type}::{doc_family}::{section_path}::{anchor_text}"
+            )
         node_id = stable_uuid(
             "::".join(
                 [
@@ -397,8 +505,12 @@ def build_document_hierarchy(
             text=chunk.text,
             labels=chunk.labels,
         )
+        _INDEXABLE_CHUNK_TYPES = {
+            "clause", "table", "formula", "list_item",
+            "note", "warning", "definition", "heading",
+        }
         indexable = (
-            chunk.chunk_type in {"clause", "table"}
+            chunk.chunk_type in _INDEXABLE_CHUNK_TYPES
             and bool(normalized_text)
             and exclusion_reason is None
         )
@@ -439,7 +551,10 @@ def build_document_hierarchy(
         )
         nodes.append(node)
 
-        if node.node_type in {"clause", "table"} and not node.excluded_from_index and node.text:
+        _SECTION_BUFFER_TYPES = {
+            "clause", "table", "formula", "list_item", "note", "warning", "definition",
+        }
+        if node.node_type in _SECTION_BUFFER_TYPES and not node.excluded_from_index and node.text:
             for depth in range(1, len(section_titles) + 1):
                 section_buffers[section_titles[:depth]].append(clean_text or node.text)
 
@@ -460,10 +575,14 @@ def build_document_hierarchy(
         section_node.metadata["summary_numbers"] = summary["numbers"]
         section_node.metadata["summary_sentences"] = summary["sentence_count"]
 
+    _INDEXABLE_NODE_TYPES = {
+        "section", "clause", "table", "formula", "list_item",
+        "note", "warning", "definition", "heading",
+    }
     indexable_nodes = [
         node
         for node in nodes
-        if node.node_type in {"section", "clause", "table"}
+        if node.node_type in _INDEXABLE_NODE_TYPES
         and node.indexable
         and node.text
         and not node.excluded_from_index
@@ -489,7 +608,11 @@ def document_family_from_filename(filename: str) -> str:
     stem = Path(filename).stem.strip()
     if not stem:
         return "document"
-    simplified = _VERSION_SUFFIX_RE.sub("", stem).strip() or stem
+    # Strip edition-specific tokens so that different versions of the same standard
+    # produce the same family slug and can share stable_ids for cross-version matching.
+    simplified = _DATE_INFIX_RE.sub("", stem)          # remove YYYY-MM date patterns
+    simplified = _LOCALE_INFIX_RE.sub("", simplified)  # remove GER / ENG / EN / DE locale codes
+    simplified = _VERSION_SUFFIX_RE.sub("", simplified).strip() or stem
     return slugify_text(simplified) or "document"
 
 

@@ -9,6 +9,7 @@ from grc_policy_server.api.routes import (
     compare_v2,
     compare_v3_stream,
     compare_v4_stream,
+    compare_v5,
     documents,
     graph_compare,
     health,
@@ -77,6 +78,7 @@ app.include_router(with_summary.router)
 app.include_router(compare_v2.router)
 app.include_router(compare_v3_stream.router)
 app.include_router(compare_v4_stream.router)
+app.include_router(compare_v5.router)
 app.include_router(graph_compare.router)
 app.include_router(storage_providers.router)
 

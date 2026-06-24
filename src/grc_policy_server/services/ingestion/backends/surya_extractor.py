@@ -6,7 +6,6 @@ Useful for scanned PDFs and visually complex documents.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from grc_policy_server.services.ingestion.backends.base_extractor import TableExtractor

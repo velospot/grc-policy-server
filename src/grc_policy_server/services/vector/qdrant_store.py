@@ -36,8 +36,11 @@ class QdrantVectorClient:
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
             timeout=30,
+            check_compatibility=False,
         )
         self._schema_ensured = False
+        self._embedding_unavailable_reason: str | None = None
+        self._search_embedding_unavailable_reason: str | None = None
 
     def close(self) -> None:
         try:
@@ -59,6 +62,51 @@ class QdrantVectorClient:
         )
         r.raise_for_status()
         return r.json()["embeddings"][0]
+
+    def _try_embed_for_ingest(self, text: str, *, chunk_id: Any) -> list[float] | None:
+        """Best-effort embedding for ingestion.
+
+        Upload ingestion must persist canonical nodes even when the local LLM
+        embedding endpoint is down or misconfigured.  Once an embedding request
+        fails, skip the remaining vectors for this client instance to avoid
+        emitting the same connection traceback for every chunk in the document.
+        """
+        if self._embedding_unavailable_reason is not None:
+            return None
+        try:
+            return self._embed(text)
+        except Exception as exc:
+            self._embedding_unavailable_reason = str(exc)
+            logger.warning(
+                "ollama embedding unavailable for qdrant ingest "
+                "url=%s model=%s chunk_id=%s — skipping vector indexing for this document",
+                settings.ollama_embedding_url,
+                settings.ollama_embed_model,
+                chunk_id,
+            )
+            return None
+
+    def _try_embed_for_search(self, text: str, *, document_id: str) -> list[float] | None:
+        """Best-effort embedding for compare/search paths.
+
+        Comparison already has a canonical local substrate. If the embedding
+        endpoint is unavailable, Qdrant should become an optional signal rather
+        than fail the compare job or emit stack traces for every candidate.
+        """
+        if self._search_embedding_unavailable_reason is not None:
+            return None
+        try:
+            return self._embed(text)
+        except Exception as exc:
+            self._search_embedding_unavailable_reason = str(exc)
+            logger.warning(
+                "ollama embedding unavailable for qdrant search "
+                "url=%s model=%s document_id=%s — continuing without vector search",
+                settings.ollama_embedding_url,
+                settings.ollama_embed_model,
+                document_id,
+            )
+            return None
 
     def _ensure_collection(self) -> None:
         if self._schema_ensured:
@@ -105,14 +153,8 @@ class QdrantVectorClient:
                 or chunk.get("text")
                 or ""
             )
-            try:
-                vector = self._embed(text)
-            except Exception:
-                logger.warning(
-                    "qdrant embed failed chunk_id=%s — skipping vector upsert for this chunk",
-                    chunk.get("chunk_id"),
-                    exc_info=True,
-                )
+            vector = self._try_embed_for_ingest(text, chunk_id=chunk.get("chunk_id"))
+            if vector is None:
                 continue
             uid = str(uuid5(NAMESPACE_URL, str(chunk["chunk_id"])))
             points.append(PointStruct(id=uid, vector=vector, payload=dict(chunk)))
@@ -149,16 +191,16 @@ class QdrantVectorClient:
         limit: int = 3,
         node_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        hits = self._client.search(
+        result = self._client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=self._doc_filter(target_document_id, node_types),
             limit=limit,
             with_payload=True,
         )
         return [
             {**h.payload, "_score": h.score, "_distance": 1.0 - h.score}
-            for h in hits
+            for h in result.points
             if h.payload
         ]
 
@@ -169,7 +211,12 @@ class QdrantVectorClient:
         target_document_id: str,
         limit: int = 3,
     ) -> list[dict[str, Any]]:
-        vector = self._embed(query_string)
+        vector = self._try_embed_for_search(
+            query_string,
+            document_id=target_document_id,
+        )
+        if vector is None:
+            return []
         return self.semantic_search_in_document(
             query_vector=vector,
             target_document_id=target_document_id,
@@ -185,7 +232,12 @@ class QdrantVectorClient:
         limit: int = 3,
         node_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        vector = self._embed(query_text or query_string)
+        vector = self._try_embed_for_search(
+            query_text or query_string,
+            document_id=target_document_id,
+        )
+        if vector is None:
+            return []
         return self.semantic_search_in_document(
             query_vector=vector,
             target_document_id=target_document_id,

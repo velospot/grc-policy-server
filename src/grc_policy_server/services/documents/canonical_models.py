@@ -28,6 +28,8 @@ TEXT_COMPARISON_NODE_TYPES = {
     "warning",
     "definition",
     "formula",
+    "heading",
+    "table_caption",
 }
 COMPARISON_NODE_TYPES = TEXT_COMPARISON_NODE_TYPES | {"table"}
 
@@ -244,8 +246,11 @@ class CanonicalNode:
             "table_num_cols": int(table_structure.get("num_cols") or 0),
             "table_cells": list(table_structure.get("cells") or []),
             "table_schema_signature": str(metadata.get("table_schema_signature") or ""),
+            "table_headers": list(metadata.get("table_headers") or []),
             "table_row_fingerprints": list(metadata.get("table_row_fingerprints") or []),
             "table_normalized_caption": str(metadata.get("normalized_caption") or ""),
+            "table_quality_flags": list(metadata.get("table_quality_flags") or []),
+            "low_confidence_table": bool(metadata.get("low_confidence_table", False)),
             "canonical_metadata": metadata,
             "pure_text_hash": _pure_text_hash(self.raw_text or ""),
             "formula_latex": str(metadata.get("formula_latex") or ""),
@@ -402,7 +407,7 @@ def _merge_table_run(run: list[CanonicalNode]) -> CanonicalNode:
 
 
 def _canonical_node_type(record: dict[str, Any], metadata: dict[str, Any]) -> str:
-    raw_type = str(record.get("node_type") or "paragraph").strip().lower()
+    raw_type = str(record.get("node_type") or "clause").strip().lower()
     if raw_type == "clause":
         labels = " ".join(str(label).lower() for label in metadata.get("source_labels") or [])
         title = str(record.get("title") or "").lower()
@@ -414,7 +419,7 @@ def _canonical_node_type(record: dict[str, Any], metadata: dict[str, Any]) -> st
         if _NOTE_LABEL_RE.search(f"{labels} {title}"):
             label = _NOTE_LABEL_RE.search(f"{labels} {title}")
             return "warning" if label and label.group(1).lower() in {"warning", "caution"} else "note"
-        return "paragraph"
+        return "clause"
     return raw_type
 
 

@@ -93,6 +93,7 @@ class OfflineDiffEngine(RealDiffEngine):
         change_records: list[ChangeRecord] | None = None,
         *,
         language: str = "",
+        testing_department: str = "",
     ) -> None:
         """Skip LLM markdown generation in offline mode.
 
@@ -110,6 +111,7 @@ class OfflineDiffEngine(RealDiffEngine):
         key_differences: list[KeyDifference],
         llm_payload: dict,
         language: str,
+        testing_department: str = "",
     ) -> str:
         return _deterministic_summary(doc1_name, doc2_name, key_differences)
 
@@ -120,6 +122,7 @@ class OfflineDiffEngine(RealDiffEngine):
         doc2_name: str,
         diffs: List[KeyDifference],
         language: str,
+        testing_department: str = "",
     ) -> List[str]:
         return _deterministic_followups(diffs)
 

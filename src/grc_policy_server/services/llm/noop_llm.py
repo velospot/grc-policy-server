@@ -115,7 +115,7 @@ class NoOpLLM(BaseLLM):
     ) -> AsyncIterator[str]:
         # Async generator that yields nothing (empty stream).
         return
-        yield  # noqa: unreachable — makes this an async generator, not a coroutine
+        yield  # pragma: no cover
 
     async def generate_change_record_json_stream(  # type: ignore[override]
         self,
@@ -129,4 +129,4 @@ class NoOpLLM(BaseLLM):
         testing_department: str | None = None,
     ) -> AsyncIterator[str]:
         return
-        yield  # noqa: unreachable — makes this an async generator
+        yield  # pragma: no cover

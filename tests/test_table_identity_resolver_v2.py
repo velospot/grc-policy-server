@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from grc_policy_server.services.ingestion.table_extraction_ensemble import TableCandidate
 from grc_policy_server.services.ingestion.table_identity_resolver import TableIdentityResolver
 

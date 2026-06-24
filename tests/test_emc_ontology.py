@@ -5,14 +5,11 @@ Covers EMCTestClassifier, UnitNormalizer, NormalizedFactExtractor.
 
 from __future__ import annotations
 
-import pytest
-
 from grc_policy_server.services.ingestion.ontology.emc_ontology import (
     EMC_DOMAIN_ROW_KEYS,
     EMCTestClassifier,
     EMCTestType,
     NormalizedFactExtractor,
-    OntologyEntityType,
     UnitNormalizer,
 )
 

@@ -11,8 +11,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-import numpy as np
-
 logger = logging.getLogger(__name__)
 
 

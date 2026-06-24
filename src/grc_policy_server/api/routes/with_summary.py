@@ -4,7 +4,6 @@ from grc_policy_server.api.deps import (
     get_diff_engine_stream,
     require_api_bearer_token,
 )
-from grc_policy_server.core.config import settings
 from grc_policy_server.models.schemas import (
     ActionItem,
     ComparisonAccuracyMetrics,

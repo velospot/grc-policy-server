@@ -268,6 +268,55 @@ class Neo4jClient:
             "sourceText": record["source_text"],
         }
 
+    def get_compliance_signatures_by_source(
+        self,
+        *,
+        document_id: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return Docling compliance-graph signals grouped by source node.
+
+        The comparison engine uses this as a best-effort alignment signal only.
+        It is deliberately read-only and returns plain dictionaries so callers can
+        continue when Neo4j is unavailable or when a document has no graph layer.
+        """
+        recs, _, _ = self._driver.execute_query(
+            """
+            MATCH (n:DoclingGraphNode)
+            WHERE n.document_id = $document_id
+              AND n.layer = 'compliance'
+              AND n.source_node_id IS NOT NULL
+            RETURN
+              n.source_node_id AS source_node_id,
+              n.label AS label,
+              n.ontology_type AS ontology_type,
+              n.title AS title,
+              n.text AS text,
+              n.properties_json AS properties_json
+            """,
+            document_id=document_id,
+            database_=self.settings.database,
+        )
+
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for record in recs:
+            source_node_id = str(record["source_node_id"] or "")
+            if not source_node_id:
+                continue
+            try:
+                properties = json.loads(record["properties_json"] or "{}")
+            except Exception:
+                properties = {}
+            grouped[source_node_id].append(
+                {
+                    "label": record["label"],
+                    "ontology_type": record["ontology_type"],
+                    "title": record["title"],
+                    "text": record["text"],
+                    "properties": properties,
+                }
+            )
+        return dict(grouped)
+
     def _serialize_node(self, node: dict[str, Any]) -> dict[str, Any]:
         serialized = dict(node)
         serialized["metadata_json"] = json.dumps(serialized.pop("metadata", {}), sort_keys=True)

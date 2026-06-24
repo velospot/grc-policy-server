@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from grc_policy_server.services.ingestion.ontology.column_mapper import map_header
 from grc_policy_server.services.ingestion.ontology.emc_ontology import OntologyEntityType
 

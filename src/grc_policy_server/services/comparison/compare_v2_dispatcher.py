@@ -27,8 +27,9 @@ class CeleryTaskFailureError(RuntimeError):
 class CompareV2Dispatcher:
     task_name = "grc_policy_server.tasks.compare_v2"
 
-    def __init__(self, *, upload_root: Path):
+    def __init__(self, *, upload_root: Path, allow_offline_fallback: bool = True):
         self.upload_root = upload_root
+        self.allow_offline_fallback = allow_offline_fallback
         self.cache_store = ComparisonCacheStore(upload_root=upload_root)
         if settings.comparison_backend == "offline":
             self._celery = None
@@ -48,6 +49,10 @@ class CompareV2Dispatcher:
     def enqueue_compare(self, payload: CompareTaskPayload) -> str:
         # Always use offline path when configured, or when Celery init failed.
         if settings.comparison_backend == "offline" or self._celery is None:
+            if not self.allow_offline_fallback:
+                raise CeleryNotAvailableError(
+                    "Celery queue is required for this compare endpoint"
+                )
             return self._enqueue_offline(payload)
 
         celery_app = self._celery
@@ -61,7 +66,7 @@ class CompareV2Dispatcher:
                 queue=settings.celery_default_queue,
             )
         except Exception as exc:
-            if settings.offline_fallback:
+            if self.allow_offline_fallback and settings.offline_fallback:
                 logger.warning(
                     "Celery dispatch failed — falling back to offline sync comparison: %s",
                     _format_exception(exc),

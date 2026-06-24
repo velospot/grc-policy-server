@@ -38,10 +38,10 @@ _ensure_stdin_open()
 
 from celery.signals import worker_process_init, worker_shutdown, worker_ready  # noqa: E402
 
-from grc_policy_server.core.celery_app import celery_app
-from grc_policy_server.core.config import settings
-from grc_policy_server.core.logging import logging
-from grc_policy_server.services.observability import tracing
+from grc_policy_server.core.celery_app import celery_app  # noqa: E402
+from grc_policy_server.core.config import settings  # noqa: E402
+from grc_policy_server.core.logging import logging  # noqa: E402
+from grc_policy_server.services.observability import tracing  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

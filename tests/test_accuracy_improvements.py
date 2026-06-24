@@ -9,7 +9,6 @@
 """
 
 import re
-import pytest
 
 from grc_policy_server.services.ingestion.docling_chunker import _normalize_table_caption
 from grc_policy_server.services.comparison.change_records import is_cosmetic_text_change, is_structural_label_change
@@ -367,7 +366,6 @@ class TestIsStructuralLabelChangeFuzzy:
 
 class TestRenderCellsPreview:
     def _engine(self):
-        from unittest.mock import MagicMock, AsyncMock
         from grc_policy_server.services.comparison.real_diff_engine import RealDiffEngine
         engine = object.__new__(RealDiffEngine)
         return engine
@@ -464,7 +462,6 @@ class TestPureTextHashPunctuation:
 
 class TestCacheVersion:
     def _make_store(self, version: str):
-        from unittest.mock import patch
         from pathlib import Path
         from grc_policy_server.services.comparison.comparison_cache import ComparisonCacheStore
         store = ComparisonCacheStore(upload_root=Path("/tmp"))
@@ -573,3 +570,116 @@ class TestNumericEntityOverlap:
         matcher = ClauseMatcher.__new__(ClauseMatcher)
         result = matcher._entity_overlap("Class A limits", "Class B limits")
         assert result == 0.0
+
+
+class TestBenchmarkDrivenTableQualityFlags:
+    def test_sparse_placeholder_table_is_low_confidence(self):
+        from grc_policy_server.services.ingestion.document_ingestion_service import (
+            _table_quality_flags,
+        )
+
+        cells = [
+            {"row": 0, "col": 0, "text": ""},
+            {"row": 0, "col": 1, "text": ""},
+            {"row": 0, "col": 2, "text": ""},
+            {"row": 3, "col": 1, "text": "max. 1 octave/minute"},
+        ]
+        flags = _table_quality_flags(
+            cells=cells,
+            num_rows=8,
+            num_cols=3,
+            headers=["column_1", "_row_label_1", "column_3"],
+        )
+
+        assert "sparse_cells" in flags
+        assert "placeholder_headers" in flags
+        assert "mostly_placeholder_headers" in flags
+
+    def test_placeholder_schema_signature_is_unreliable(self):
+        from grc_policy_server.services.comparison.clause_matcher import ClauseMatcher
+
+        matcher = ClauseMatcher.__new__(ClauseMatcher)
+        node = {
+            "table_schema_signature": "abc123",
+            "table_headers": ["column_1", "_row_label_1", "result"],
+            "table_quality_flags": ["placeholder_headers"],
+            "table_cells": [{"row": 0, "col": 0, "text": ""}],
+        }
+
+        assert matcher._is_reliable_schema_signature(node) is False
+
+    def test_sparse_placeholder_metadata_triggers_rescue(self):
+        from grc_policy_server.services.ingestion.document_ingestion_service import (
+            _is_sparse_placeholder_table_metadata,
+        )
+
+        metadata = {
+            "table_headers": ["column_1", "_row_label_1", "column_3"],
+            "table_structure": {
+                "num_rows": 4,
+                "num_cols": 3,
+                "cells": [
+                    {"row": 0, "col": 0, "text": ""},
+                    {"row": 3, "col": 1, "text": "max. 1 octave/minute"},
+                ],
+            },
+        }
+
+        assert _is_sparse_placeholder_table_metadata(metadata) is True
+
+    def test_low_confidence_table_identity_uses_subject_and_row_keys(self):
+        from grc_policy_server.services.comparison.clause_matcher import ClauseMatcher
+
+        matcher = ClauseMatcher.__new__(ClauseMatcher)
+        matcher.language = "en"
+        left = {
+            "node_type": "table",
+            "title": "Table 6 General vibration strain, class A",
+            "section_path": "6 / 6.2 / 6.2.4 Test levels",
+            "table_normalized_caption": "general vibration strain class a",
+            "table_quality_flags": ["sparse_cells", "placeholder_headers"],
+            "table_num_rows": 4,
+            "table_num_cols": 3,
+            "table_cells": [{"row": 1, "col": 0, "text": "2 Hz"}],
+        }
+        right = {
+            "node_type": "table",
+            "title": "Table 11 General vibration strain, class A",
+            "section_path": "7 / 7.2 / 7.2.4 Test levels",
+            "table_normalized_caption": "general vibration strain class a",
+            "table_num_rows": 5,
+            "table_num_cols": 3,
+            "table_cells": [{"row": 1, "col": 0, "text": "2 Hz"}],
+        }
+
+        assert matcher._table_score(left, right) >= 0.58
+
+
+class TestBenchmarkDrivenSectionAlignment:
+    def test_disjoint_title_anchors_penalise_false_section_match(self):
+        from grc_policy_server.services.comparison.clause_matcher import (
+            ClauseMatcher,
+            MatchThresholds,
+            _SectionBucket,
+        )
+
+        matcher = ClauseMatcher(thresholds=MatchThresholds())
+        left = _SectionBucket(
+            key="4 / 4.3 Equipment under test (EUT)",
+            stable_id="left",
+            title="4.3 Equipment under test (EUT)",
+            order=10,
+            clean_text="The equipment under test shall be configured for inspection.",
+            items=[],
+        )
+        right = _SectionBucket(
+            key="3 / 3.2 Test result",
+            stable_id="right",
+            title="3.2 Test result",
+            order=11,
+            clean_text="The test result shall be recorded after completion.",
+            items=[],
+        )
+
+        assert matcher._title_anchor_overlap("equipment under test", "test result") == 0.0
+        assert matcher._section_score(left, right) < matcher.thresholds.min_section_score

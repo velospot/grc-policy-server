@@ -10,8 +10,8 @@ Replaces Markdown representation with semantic cell graph that preserves:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
 from enum import Enum
+from typing import Any
 
 
 class CellType(str, Enum):

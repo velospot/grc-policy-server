@@ -4,10 +4,10 @@ dev:
 	./scripts/dev.sh
 
 test:
-	uv run pytest
+	uv run --extra dev pytest
 
 lint:
-	uv run ruff check src tests
+	uv run --extra dev ruff check src tests
 
 install-table-extraction:
 	uv sync --extra table-extraction

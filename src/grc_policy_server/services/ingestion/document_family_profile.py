@@ -16,10 +16,6 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from grc_policy_server.services.ingestion.ontology.emc_ontology import OntologyEntityType
 
 
 @dataclass(frozen=True)
@@ -279,12 +275,28 @@ _DNV_CG_0339_FILENAME_HINTS = ("dnvgl-cg-0339", "dnv-cg-0339", "dnv_cg_0339", "c
 def get_profile_for_document(
     filename: str = "",
     section_path: list[str] | None = None,
+    body_texts: list[str] | None = None,
 ) -> DocumentFamilyProfile | None:
-    """Heuristically identify which profile applies to a document.
+    """Identify which profile applies to a document.
 
-    Checks filename first (fast path), then section headings.
-    Returns None when no profile can be determined.
+    Detection order (most reliable first):
+    1. Body text / section headings — standard identifiers found in content are
+       stable across filename convention changes and document editions.
+    2. Filename hints — fast fallback when content lacks recognisable identifiers.
+    3. Domain-keyword scoring on section headings (TL 81000 signal words).
     """
+    # 1. Content-based: scan section headings and early body text
+    combined_content = " ".join(section_path or []) + " " + " ".join(body_texts or [])
+    if combined_content.strip():
+        c = combined_content.lower()
+        if "tl 81000" in c or "tl81000" in c or "tl-81000" in c or "tl_81000" in c:
+            return TL81000_PROFILE
+        if "dnvgl-cg-0339" in c or "dnv-cg-0339" in c or "cg-0339" in c or "cg 0339" in c:
+            return DNV_CG_0339_PROFILE
+        if "60068" in c:
+            return DIN_EN_60068_PROFILE
+
+    # 2. Filename hints (fallback)
     name_lower = (filename or "").lower()
     if any(hint in name_lower for hint in _TL81000_FILENAME_HINTS):
         return TL81000_PROFILE
@@ -293,10 +305,9 @@ def get_profile_for_document(
     if any(hint in name_lower for hint in _DNV_CG_0339_FILENAME_HINTS):
         return DNV_CG_0339_PROFILE
 
+    # 3. Domain-keyword scoring on section headings
     if section_path:
         combined = " ".join(section_path).lower()
-        # TL 81000 section headings frequently mention "prüfschärfe", "fpsc",
-        # "störfestigkeit", "störaussendung" — check for ≥2 signal words
         hits = sum(1 for word in _TL81000_CAPTION_SIGNALS if word in combined)
         if hits >= 2:
             return TL81000_PROFILE

@@ -143,7 +143,6 @@ HEADER_TO_ENTITY: dict[str, OntologyEntityType] = {
     "f in mhz": OntologyEntityType.FREQUENCY_RANGE,
     "f in khz": OntologyEntityType.FREQUENCY_RANGE,
     "e in v/m": OntologyEntityType.FIELD_STRENGTH,
-    "u in v": OntologyEntityType.FIELD_STRENGTH,
     "feld in v/m": OntologyEntityType.FIELD_STRENGTH,
     "messempfänger": OntologyEntityType.TEST_METHOD,
     "messempfaenger": OntologyEntityType.TEST_METHOD,

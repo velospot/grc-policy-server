@@ -88,6 +88,39 @@ class _FailingFetchQdrant:
         return []
 
 
+class _StubNeo4jSignatures:
+    def __init__(self, signatures_by_document: dict[str, dict[str, list[dict]]]) -> None:
+        self.signatures_by_document = signatures_by_document
+
+    def get_compliance_signatures_by_source(
+        self,
+        *,
+        document_id: str,
+    ) -> dict[str, list[dict]]:
+        return self.signatures_by_document.get(document_id, {})
+
+    def get_chunk_citation(self, *, chunk_id: str) -> None:
+        return None
+
+
+class _FailingNeo4j:
+    def __init__(self) -> None:
+        self.signature_calls = 0
+        self.citation_calls = 0
+
+    def get_compliance_signatures_by_source(
+        self,
+        *,
+        document_id: str,
+    ) -> dict[str, list[dict]]:
+        self.signature_calls += 1
+        raise RuntimeError("neo4j auth failed")
+
+    def get_chunk_citation(self, *, chunk_id: str) -> None:
+        self.citation_calls += 1
+        raise RuntimeError("neo4j auth rate limited")
+
+
 class _StubLLM:
     async def detect_language(self, text_sample: str) -> str:
         return "en"
@@ -179,7 +212,7 @@ def test_canonical_store_writes_raw_docling_and_normalized_nodes(tmp_path: Path)
     assert artifacts["rawDoclingJson"] == {"body": "raw"}
     assert artifacts["normalizedTreeJson"]["retrievalArtifacts"]["retrievalChunkCount"] == 1
     assert loaded[1]["canonical_node_id"] == "para-1"
-    assert loaded[1]["node_type"] == "paragraph"
+    assert loaded[1]["node_type"] == "clause"
     assert loaded[1]["section_label"] == "5.2"
     assert loaded[1]["canonical_text"] == "admins must use mfa."
 
@@ -241,6 +274,144 @@ async def test_real_diff_engine_compares_canonical_nodes_not_qdrant_chunks():
     assert result.keyDifferences[0].changeType == "MODIFIED"
     assert result.keyDifferences[0].doc1Reference is not None
     assert result.keyDifferences[0].doc1Reference.sourceText == "Admins should use MFA."
+
+
+@pytest.mark.anyio
+async def test_real_diff_engine_uses_graph_signatures_as_additive_fallback():
+    left = _node(
+        node_id="doc-1-table",
+        document_id="doc-1",
+        section="14.4 Obsolete EMC table",
+        text="Legacy table: LF limit 40 dBuV and MF limit 42 dBuV.",
+        stable_id="left-table",
+    )
+    left["node_type"] = "table"
+    left["table_num_rows"] = 2
+    left["table_num_cols"] = 2
+    right = _node(
+        node_id="doc-2-table",
+        document_id="doc-2",
+        section="8.9 Renumbered EMC evidence",
+        text="Reworked evidence grid: LF limit 38 dBuV and MF limit 41 dBuV.",
+        stable_id="right-table",
+    )
+    right["node_type"] = "table"
+    right["table_num_rows"] = 2
+    right["table_num_cols"] = 2
+
+    def _fact(name: str) -> dict:
+        return {
+            "ontology_type": "Threshold",
+            "label": "Threshold",
+            "title": name,
+            "properties": {
+                "domain": "EMC",
+                "fact_type": "emission_limit",
+                "name": name,
+                "unit": "dBuV",
+                "column_header": "Limit",
+                "row_semantic_key": f"emc:{name.lower()}",
+            },
+        }
+
+    neo4j = _StubNeo4jSignatures(
+        {
+            "doc-1": {"doc-1-table": [_fact("LF"), _fact("MF")]},
+            "doc-2": {"doc-2-table": [_fact("LF"), _fact("MF")]},
+        }
+    )
+    engine = RealDiffEngine(
+        qdrant=None,
+        neo4j=neo4j,  # type: ignore[arg-type]
+        llm=_StubLLM(),  # type: ignore[arg-type]
+        canonical_store=_StubCanonicalStore({"doc-1": [left], "doc-2": [right]}),  # type: ignore[arg-type]
+    )
+
+    result = await engine.compare(_doc("doc-1"), _doc("doc-2"))
+
+    assert len(result.keyDifferences) == 1
+    diff = result.keyDifferences[0]
+    assert diff.changeType == "MODIFIED"
+    assert diff.doc1Reference is not None
+    assert diff.doc2Reference is not None
+    assert result.accuracyMetrics is not None
+    assert result.accuracyMetrics.confidence_breakdown["graph_semantic"] == 1
+
+
+@pytest.mark.anyio
+async def test_real_diff_engine_falls_back_when_neo4j_auth_fails():
+    left = _node(
+        node_id="doc-1-node",
+        document_id="doc-1",
+        section="Access Control",
+        text="Admins should use MFA.",
+        obligation="should",
+    )
+    right = _node(
+        node_id="doc-2-node",
+        document_id="doc-2",
+        section="Access Control",
+        text="Admins must use MFA.",
+        obligation="must",
+    )
+    neo4j = _FailingNeo4j()
+    engine = RealDiffEngine(
+        qdrant=None,
+        neo4j=neo4j,  # type: ignore[arg-type]
+        llm=_StubLLM(),  # type: ignore[arg-type]
+        canonical_store=_StubCanonicalStore({"doc-1": [left], "doc-2": [right]}),  # type: ignore[arg-type]
+    )
+
+    result = await engine.compare(_doc("doc-1"), _doc("doc-2"))
+
+    assert len(result.keyDifferences) == 1
+    diff = result.keyDifferences[0]
+    assert diff.doc1Reference is not None
+    assert diff.doc1Reference.sourceText == "Admins should use MFA."
+    assert diff.doc2Reference is not None
+    assert diff.doc2Reference.sourceText == "Admins must use MFA."
+    assert neo4j.signature_calls == 0
+    assert neo4j.citation_calls == 1
+    assert engine.neo4j is None
+
+
+def test_real_diff_engine_citation_falls_back_when_neo4j_auth_fails():
+    node = _node(
+        node_id="doc-1-node",
+        document_id="doc-1",
+        section="Access Control",
+        text="Admins should use MFA.",
+    )
+    neo4j = _FailingNeo4j()
+    engine = RealDiffEngine(
+        qdrant=None,
+        neo4j=neo4j,  # type: ignore[arg-type]
+        llm=_StubLLM(),  # type: ignore[arg-type]
+        canonical_store=None,
+    )
+
+    ref = engine._citation_from_neo4j_or_fallback(node)
+
+    assert ref.sourceText == "Admins should use MFA."
+    assert ref.section == "Access Control"
+    assert neo4j.citation_calls == 1
+    assert engine.neo4j is None
+
+
+def test_real_diff_engine_graph_signature_failure_disables_neo4j():
+    neo4j = _FailingNeo4j()
+    engine = RealDiffEngine(
+        qdrant=None,
+        neo4j=neo4j,  # type: ignore[arg-type]
+        llm=_StubLLM(),  # type: ignore[arg-type]
+        canonical_store=None,
+    )
+
+    signatures = engine._load_graph_signatures("doc-1")
+
+    assert signatures == {}
+    assert neo4j.signature_calls == 1
+    assert engine.neo4j is None
 
 
 @pytest.mark.anyio

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from grc_policy_server.api.deps import (
@@ -27,6 +29,81 @@ def _celery_exc_to_http(exc: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
     return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
+
+def enqueue_compare_request(
+    payload: CompareRequest,
+    *,
+    dispatcher: CompareV2Dispatcher,
+    cache_store: ComparisonCacheStore,
+    api_version: Literal["v2", "v5"] = "v2",
+    testing_department: str | None = None,
+) -> CompareV2JobCreateResponse:
+    doc1_id = payload.doc1.id.strip()
+    doc2_id = payload.doc2.id.strip()
+    if not doc1_id or not doc2_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="doc1.id and doc2.id must not be empty",
+        )
+    if doc1_id == doc2_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="doc1.id and doc2.id must be different",
+        )
+
+    cache_key = cache_store.cache_key_for_pair(
+        doc1_id=doc1_id,
+        doc2_id=doc2_id,
+        api_version=api_version,
+        testing_department=testing_department,
+    )
+
+    if not payload.forceReExtract:
+        load_for_key = getattr(cache_store, "load_for_key", None)
+        cached_result = (
+            load_for_key(cache_key)
+            if load_for_key is not None
+            else cache_store.load_for_pair(doc1_id=doc1_id, doc2_id=doc2_id)
+        )
+        if cached_result is not None:
+            return CompareV2JobCreateResponse(
+                jobId=cache_store.cached_job_id_for_pair(
+                    doc1_id=doc1_id,
+                    doc2_id=doc2_id,
+                    api_version=api_version,
+                    testing_department=testing_department,
+                ),
+                status="finished",
+                cacheHit=True,
+                result=cached_result,
+            )
+
+    task_payload = CompareTaskPayload(
+        doc1=payload.doc1,
+        doc2=payload.doc2,
+        force_re_extract=payload.forceReExtract,
+        cache_key=cache_key,
+        audit_mode=payload.auditMode,
+        save_to_db=payload.saveToDb,
+        api_version=api_version,
+        testing_department=testing_department,
+    )
+
+    try:
+        job_id = dispatcher.enqueue_compare(task_payload)
+        return CompareV2JobCreateResponse(
+            jobId=job_id,
+            status="queued",
+            cacheHit=False,
+        )
+    except (
+        CeleryNotAvailableError,
+        CeleryWorkerUnavailableError,
+        CeleryTaskFailureError,
+    ) as exc:
+        raise _celery_exc_to_http(exc) from exc
+
+
 router = APIRouter(
     prefix="/v2/compare",
     tags=["compare"],
@@ -45,51 +122,11 @@ def compare_v2_enqueue(
     dispatcher: CompareV2Dispatcher = Depends(get_compare_v2_dispatcher),
     cache_store: ComparisonCacheStore = Depends(get_comparison_cache_store),
 ):
-    doc1_id = payload.doc1.id.strip()
-    doc2_id = payload.doc2.id.strip()
-    if not doc1_id or not doc2_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="doc1.id and doc2.id must not be empty",
-        )
-    if doc1_id == doc2_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="doc1.id and doc2.id must be different",
-        )
-
-    if not payload.forceReExtract:
-        cached_result = cache_store.load_for_pair(doc1_id=doc1_id, doc2_id=doc2_id)
-        if cached_result is not None:
-            return CompareV2JobCreateResponse(
-                jobId=cache_store.cached_job_id_for_pair(
-                    doc1_id=doc1_id,
-                    doc2_id=doc2_id,
-                ),
-                status="finished",
-                cacheHit=True,
-                result=cached_result,
-            )
-
-    cache_key = cache_store.cache_key_for_pair(doc1_id=doc1_id, doc2_id=doc2_id)
-    task_payload = CompareTaskPayload(
-        doc1=payload.doc1,
-        doc2=payload.doc2,
-        force_re_extract=payload.forceReExtract,
-        cache_key=cache_key,
-        audit_mode=payload.auditMode,
-        save_to_db=payload.saveToDb,
+    return enqueue_compare_request(
+        payload,
+        dispatcher=dispatcher,
+        cache_store=cache_store,
     )
-
-    try:
-        job_id = dispatcher.enqueue_compare(task_payload)
-        return CompareV2JobCreateResponse(
-            jobId=job_id,
-            status="queued",
-            cacheHit=False,
-        )
-    except (CeleryNotAvailableError, CeleryWorkerUnavailableError, CeleryTaskFailureError) as exc:
-        raise _celery_exc_to_http(exc) from exc
 
 
 @router.get(

@@ -12,7 +12,6 @@ Event types emitted by the comparison pipeline:
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from datetime import UTC, datetime

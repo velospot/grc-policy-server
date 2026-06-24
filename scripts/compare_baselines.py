@@ -46,7 +46,7 @@ def compare(before_path: Path, after_path: Path) -> None:
     before = json.loads(before_path.read_text())
     after = json.loads(after_path.read_text())
 
-    print(f"\n=== Baseline comparison ===")
+    print("\n=== Baseline comparison ===")
     print(f"Before : {before.get('run_timestamp','?')[:19]}  commit={before.get('git_commit','?')}")
     print(f"After  : {after.get('run_timestamp','?')[:19]}  commit={after.get('git_commit','?')}")
     print()
