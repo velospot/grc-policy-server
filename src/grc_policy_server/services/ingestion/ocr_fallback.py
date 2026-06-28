@@ -109,6 +109,22 @@ def build_ocr_fallback_chunks(
                     lang=languages,
                     config=f"--psm {page_segmentation_mode}",
                 )
+
+                # Extract OCR confidence per word (0–100 scale)
+                try:
+                    data = pytesseract.image_to_data(
+                        pil_image,
+                        lang=languages,
+                        config=f"--psm {page_segmentation_mode}",
+                        output_type="dataframe",
+                    )
+                    # Filter out empty/low-confidence words, normalize to 0.0–1.0
+                    word_confidences = data[data["conf"] > 0]["conf"].tolist()
+                    page_ocr_confidence = sum(word_confidences) / (100 * len(word_confidences)) if word_confidences else 0.0
+                except Exception:
+                    # Fallback: if confidence extraction fails, assume moderate confidence
+                    page_ocr_confidence = 0.75
+
                 normalized = _normalize_ocr_text(text)
                 if len(normalized) < min_chars_per_page:
                     continue
@@ -133,6 +149,8 @@ def build_ocr_fallback_chunks(
                                 "ocr_block_index": block_index,
                                 "ocr_page_number": page_number,
                                 "ocr_engine": "pytesseract",
+                                "ocr_page_confidence": page_ocr_confidence,
+                                "ocr_confidence_flag": "low" if page_ocr_confidence < 0.70 else "acceptable",
                             },
                             source="pytesseract",
                         )

@@ -195,6 +195,118 @@ def _is_sparse_placeholder_table_metadata(metadata: dict[str, Any]) -> bool:
     return has_placeholder and fill < 0.50
 
 
+def _score_cell_confidence(cell_data: dict, column_role: str | None) -> "CellConfidence":
+    """Score confidence for individual cell extraction (0.0–1.0).
+
+    Factors:
+    - cell_fill: 1.0 if text present, 0.0 if empty
+    - cell_type_match: 1.0 if type matches role (numeric for limit/result, etc.)
+    - unit_validity: 1.0 if unit present and recognized (for limit columns)
+    - ocr_confidence: OCR confidence if OCR was used, else 1.0 (native text)
+
+    Weights: 0.30 * fill + 0.35 * type_match + 0.20 * unit + 0.15 * ocr
+    """
+    import re
+    from grc_policy_server.models.schemas import CellConfidence
+
+    text = str(cell_data.get("text") or "").strip()
+    flags = []
+
+    # Factor 1: cell_fill
+    cell_fill = 1.0 if text else 0.0
+
+    # Factor 2: cell_type_match (by column_role)
+    cell_type_match = 1.0
+    if column_role in ("limit", "result"):
+        # Expect numeric value
+        if text:
+            numeric_match = bool(re.search(r'\d+[\.,]?\d*', text))
+            cell_type_match = 0.9 if numeric_match else 0.5
+            if not numeric_match:
+                flags.append("unparseable_number")
+        else:
+            cell_type_match = 0.0
+            flags.append("missing_limit_value")
+    elif column_role == "condition":
+        # Expect text with semantic signal
+        cell_type_match = 0.95 if text else 0.0
+    elif column_role == "row_key":
+        cell_type_match = 1.0 if text else 0.3
+
+    # Factor 3: unit_validity (for limit columns)
+    unit_validity = 1.0
+    if column_role == "limit" and text:
+        # Check if unit-like pattern exists
+        unit_match = bool(re.search(r'(dB\w+|[MkGT]?Hz|[muMnp]?[VACWΩ]|%|°C)', text))
+        unit_validity = 0.95 if unit_match else 0.7
+        if not unit_match:
+            flags.append("missing_unit")
+
+    # Factor 4: ocr_confidence
+    ocr_confidence = cell_data.get("ocr_confidence", 1.0) if cell_data.get("ocr_used") else 1.0
+
+    # Weighted score
+    confidence = (
+        0.30 * cell_fill
+        + 0.35 * cell_type_match
+        + 0.20 * unit_validity
+        + 0.15 * ocr_confidence
+    )
+
+    return CellConfidence(
+        chunk_id=cell_data.get("chunk_id", ""),
+        column_name=cell_data.get("column_name"),
+        column_role=column_role,
+        confidence=max(0.0, min(1.0, confidence)),
+        confidence_factors={
+            "cell_fill": cell_fill,
+            "cell_type_match": cell_type_match,
+            "unit_validity": unit_validity,
+            "ocr_confidence": ocr_confidence,
+        },
+        flags=flags if flags else None,
+    )
+
+
+def _score_row_confidence(
+    row_data: dict,
+    table_confidence: float,
+    cell_confidences: list["CellConfidence"],
+    footnote_scope_confidence: float = 1.0,
+) -> "RequirementConfidence":
+    """Score confidence for row/requirement extraction.
+
+    Row confidence = min(key cell confidences, table confidence, footnote scope).
+    Flags for review if any key cell confidence < 0.70 or missing key cells.
+    """
+    from grc_policy_server.models.schemas import RequirementConfidence
+
+    key_cell_confidences = {
+        cc.column_name or cc.column_role: cc.confidence
+        for cc in cell_confidences
+        if cc.column_role in ("limit", "result", "condition", "row_key")
+    }
+
+    if not key_cell_confidences:
+        row_confidence = table_confidence * 0.5
+        review_reason = "missing_key_cells"
+    else:
+        row_confidence = min(key_cell_confidences.values())
+
+    # Apply table and footnote modifiers
+    row_confidence = min(row_confidence, table_confidence, footnote_scope_confidence)
+
+    return RequirementConfidence(
+        row_id=row_data.get("row_id", ""),
+        row_key=row_data.get("row_key"),
+        confidence=row_confidence,
+        key_cell_confidences=key_cell_confidences,
+        applicability_confidence=footnote_scope_confidence,
+        requires_review=row_confidence < 0.70,
+        review_reason="low_key_cell_confidence" if row_confidence < 0.70 else None,
+    )
+
+
 def _merge_table_extractions(docling_chunk: Any, camelot_cand: Any) -> dict:
     """Merge cell data from Docling and Camelot when quality scores are tied.
 

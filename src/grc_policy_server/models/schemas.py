@@ -371,3 +371,53 @@ class GraphComparisonResult(BaseModel):
     summary: GraphComparisonSummary
     changes: List[GraphChangeRecord]
     warnings: List[str] = Field(default_factory=list)
+
+
+class ExtractionFlag(BaseModel):
+    """Alert for human review during extraction."""
+    flag_type: str  # "low_ocr_confidence", "ambiguous_section", "stitching_ambiguity", etc.
+    severity: Literal["warning", "error"]
+    description: str
+    affected_object: Optional[str] = None  # table_id, row_id, section_path, etc.
+    confidence_if_applicable: Optional[float] = None
+
+
+class CellConfidence(BaseModel):
+    """Per-cell extraction confidence."""
+    chunk_id: str
+    column_name: Optional[str] = None
+    column_role: Optional[str] = None  # "limit", "result", "measured", "condition", etc.
+    confidence: float  # 0.0–1.0
+    confidence_factors: dict[str, float] = Field(
+        default_factory=lambda: {
+            "cell_fill": 0.0,
+            "cell_type_match": 0.0,
+            "unit_validity": 0.0,
+            "ocr_confidence": 0.0,
+        }
+    )
+    flags: Optional[List[str]] = None  # ["missing_unit", "unparseable_number", etc.]
+
+
+class RequirementConfidence(BaseModel):
+    """Per-row/requirement extraction confidence."""
+    row_id: str
+    row_key: Optional[str] = None
+    confidence: float  # 0.0–1.0 (min of key cell confidences)
+    key_cell_confidences: dict[str, float] = Field(default_factory=dict)
+    applicability_confidence: float = 1.0  # confidence in footnote/condition scope
+    requires_review: bool = False
+    review_reason: Optional[str] = None
+
+
+class ConfidenceMetrics(BaseModel):
+    """Document-level confidence summary for ingestion."""
+    document_id: str
+    table_confidence_avg: float = 0.0
+    cell_confidence_avg: float = 0.0
+    requirement_confidence_avg: float = 0.0
+    extraction_flags: List[ExtractionFlag] = Field(default_factory=list)
+    high_confidence_cells: int = 0  # confidence >= 0.85
+    medium_confidence_cells: int = 0  # 0.50–0.85
+    low_confidence_cells: int = 0  # < 0.50
+    requires_human_review_count: int = 0
