@@ -7,9 +7,11 @@ from typing import Any, Optional
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
+    HeadingHierarchyOptions,
     OcrAutoOptions,
     PdfPipelineOptions,
     TableStructureOptions,
+    TableStructureV2Options,
     TesseractCliOcrOptions,
 )
 from docling.document_converter import (
@@ -73,14 +75,19 @@ class DoclingAdapter:
         pdf_options = PdfPipelineOptions()
         pdf_options.do_ocr = auto_ocr
         pdf_options.do_table_structure = do_table_structure
-        pdf_options.table_structure_options = TableStructureOptions(
-            do_cell_matching=True
-        )
+        if settings.docling_table_structure_v2:
+            pdf_options.table_structure_options = TableStructureV2Options()
+        else:
+            pdf_options.table_structure_options = TableStructureOptions(
+                do_cell_matching=True
+            )
         pdf_options.images_scale = 2
-        try:
-            pdf_options.do_formula_enrichment = True
-        except AttributeError:
-            pass  # older docling version without formula enrichment support
+        pdf_options.do_formula_enrichment = True
+        pdf_options.heading_hierarchy_options = HeadingHierarchyOptions(
+            enabled=True,
+            use_numbering=True,
+            use_style=True,
+        )
 
         # pdf_options.generate_table_images = False
         # pdf_options.generate_page_images = True
