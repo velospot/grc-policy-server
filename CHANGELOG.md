@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-06-29: Celery soft time limit handling
+
+**WHY:** `compare_v2` Celery task hit the 2700-second (45-minute) soft time limit and crashed with `SoftTimeLimitExceeded`. Root cause: LLM markdown summarisation runs up to 40 calls via `asyncio.gather()` with 600-second per-call timeouts, easily exceeding the task lifetime. No graceful timeout handling existed — the exception was never caught, the `finally` block for service cleanup might not execute, and clients were left dangling.
+
+#### Changed
+
+- **`compare_v2()` task in `tasks/compare_v2.py`:**
+  - Wrapped `asyncio.run(_compare_payload(parsed))` in `try/except SoftTimeLimitExceeded`
+  - Returns structured timeout response with `"status": "timeout"` when soft limit fires (100% backstop)
+  
+- **`_compare_payload()` async function in `tasks/compare_v2.py`:**
+  - Extracted engine.compare() logic into separate `_run_compare()` helper with service cleanup in `finally`
+  - Wrapped `_run_compare()` with `asyncio.wait_for(timeout=async_budget)` where budget = `soft_time_limit - 120s`
+  - Catches `asyncio.TimeoutError` at 2580s (well before 2700s OS signal) and returns structured timeout response
+  - This allows cancellation machinery to run cleanly and the `finally` block to execute
+
+#### Added
+
+- **`llm_markdown_phase_timeout_sec` setting** in `AppSettings` (default: 600.0s) — global budget for all markdown summarisation regardless of diff count
+- **`asyncio.wait_for()` wrapper** around `asyncio.gather()` in `_populate_markdown_diff_summaries` with `llm_markdown_phase_timeout_sec` timeout
+  - Catches `asyncio.TimeoutError` and logs warning; diffs without summaries retain their structured change records
+
+#### Adjusted
+
+- **`ollama_timeout_sec` default:** Lowered from 600s → 90s per-request read timeout
+  - 40 LLM calls through `Semaphore(4)`: worst-case `10 batches × 90s = 900s` (15 minutes), well within 2700s task limit
+  - Stuck/slow Ollama calls fail fast rather than blocking semaphore slots for 10 minutes
+
+**Impact:** Tasks now gracefully handle timeouts at 2580s (asyncio budget) before hitting the 2700s OS signal. Partial results are returned structured, service clients are cleaned up properly, and timeout responses are distinguishable from errors in the API.
+
+---
+
 ### 2026-06-28: Extraction confidence scoring & human review triggers
 
 **WHY:** The LLM-based compliance comparison needs to know which cells, rows, and requirements it can trust and which require human review. Previously, only table-level confidence existed. Without per-cell confidence, the LLM treats all extracted text equally — risking analysis built on a cell with an OCR artefact or a missing unit being treated the same as a perfectly extracted limit value.

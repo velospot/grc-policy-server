@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 from grc_policy_server.core.celery_app import celery_app
 from grc_policy_server.core.config import settings
 from grc_policy_server.services.comparison.auditor_v5 import (
@@ -75,8 +77,14 @@ def _build_diff_engine(
     return engine, qdrant, neo4j, llm
 
 
-async def _compare_payload(payload: CompareTaskPayload) -> dict[str, Any]:
-    engine, qdrant, neo4j, llm = _build_diff_engine(api_version=payload.api_version)
+async def _run_compare(
+    payload: CompareTaskPayload,
+    engine: RealDiffEngine,
+    qdrant: QdrantVectorClient | None,
+    neo4j: Neo4jClient | None,
+    llm: BaseLLM,
+) -> dict[str, Any]:
+    """Run the actual comparison and save results."""
     try:
         effective_save_to_db = payload.save_to_db or settings.save_comparison_to_db
         testing_department = payload.testing_department or infer_testing_department(
@@ -135,7 +143,46 @@ async def _compare_payload(payload: CompareTaskPayload) -> dict[str, Any]:
             logger.exception("failed to close LLM client in compare_v2 task")
 
 
+async def _compare_payload(payload: CompareTaskPayload) -> dict[str, Any]:
+    """Wrap comparison with timeout budget and service initialization."""
+    engine, qdrant, neo4j, llm = _build_diff_engine(api_version=payload.api_version)
+    # Budget: soft_time_limit minus 120s for startup + result serialisation.
+    async_budget = max(60.0, settings.celery_task_soft_time_limit_sec - 120.0)
+    try:
+        return await asyncio.wait_for(
+            _run_compare(payload, engine, qdrant, neo4j, llm),
+            timeout=async_budget,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "compare_v2 async budget exhausted doc1=%s doc2=%s budget=%.0fs",
+            payload.doc1.id,
+            payload.doc2.id,
+            async_budget,
+        )
+        return {
+            "status": "timeout",
+            "error": f"Comparison exceeded internal async budget of {async_budget:.0f}s.",
+            "doc1Id": payload.doc1.id,
+            "doc2Id": payload.doc2.id,
+        }
+
+
 @celery_app.task(name="grc_policy_server.tasks.compare_v2")
 def compare_v2(payload: dict[str, Any]) -> dict[str, Any]:
     parsed = CompareTaskPayload.model_validate(payload)
-    return asyncio.run(_compare_payload(parsed))
+    try:
+        return asyncio.run(_compare_payload(parsed))
+    except SoftTimeLimitExceeded:
+        logger.warning(
+            "compare_v2 soft time limit exceeded task_id=%s doc1=%s doc2=%s",
+            compare_v2.request.id,
+            parsed.doc1.id,
+            parsed.doc2.id,
+        )
+        return {
+            "status": "timeout",
+            "error": "Comparison exceeded the time limit. Partial results may be available.",
+            "doc1Id": parsed.doc1.id,
+            "doc2Id": parsed.doc2.id,
+        }

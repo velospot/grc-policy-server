@@ -8,6 +8,7 @@ from difflib import SequenceMatcher
 from itertools import combinations
 from typing import Any, List, Optional
 
+from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import (
     ActionItem,
@@ -3493,10 +3494,21 @@ class RealDiffEngine:
                 )
 
         llm_diffs = diffs[: self.max_llm_markdown_summaries]
-        results = await asyncio.gather(
-            *[_generate_one(diff, i) for i, diff in enumerate(llm_diffs)],
-            return_exceptions=True,
-        )
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[_generate_one(diff, i) for i, diff in enumerate(llm_diffs)],
+                    return_exceptions=True,
+                ),
+                timeout=settings.llm_markdown_phase_timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "LLM markdown phase hit %.0fs total budget — %d diffs may lack summaries",
+                settings.llm_markdown_phase_timeout_sec,
+                len(llm_diffs),
+            )
+            return
         for diff, result in zip(llm_diffs, results, strict=False):
             if isinstance(result, Exception):
                 logger.warning(

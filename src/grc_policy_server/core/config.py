@@ -150,11 +150,12 @@ class Settings(BaseSettings):
         default="qwen3-embedding:0.6b",
         validation_alias=AliasChoices("OLLAMA_EMBED_MODEL", "OLLAMA_EMBEDDING_MODEL"),
     )
-    ollama_timeout_sec: float = 600.0
+    ollama_timeout_sec: float = 90.0
     ollama_connect_timeout_sec: float = 10.0
     ollama_write_timeout_sec: float = 60.0
 
     llm_enrichment_enabled: bool = False  # LLM semantic extraction — rule-based by default
+    llm_markdown_phase_timeout_sec: float = 600.0
 
     # Offline / degradation settings
     # "offline" — pure local processing (PostgreSQL + files, no external services)
