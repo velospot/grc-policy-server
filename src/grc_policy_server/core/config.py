@@ -239,7 +239,7 @@ class Settings(BaseSettings):
     docling_accelerator_device: str = _default_docling_accelerator_device()
     docling_accelerator_threads: int = _default_docling_accelerator_threads()
     docling_cuda_use_flash_attention2: bool = False
-    docling_table_structure_v2: bool = False
+    docling_table_structure_v2: bool = True
     ocr_fallback_enabled: bool = True
     ocr_fallback_min_chars_per_page: int = 80
     ocr_fallback_min_total_chars: int = 250
@@ -251,6 +251,10 @@ class Settings(BaseSettings):
     docling_table_ocr_enabled: bool = False
     docling_table_ocr_min_density: float = 0.3
     docling_table_ocr_page_margin: int = 1
+
+    # Extraction confidence below this marks evidence for human review
+    # (matches the ingestion row-confidence review threshold).
+    extraction_review_threshold: float = 0.70
 
     # Streaming diff settings
     llm_stream_inter_diff_delay_ms: int = 0

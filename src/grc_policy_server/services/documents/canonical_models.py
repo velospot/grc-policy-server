@@ -197,6 +197,38 @@ class CanonicalNode:
             "ontology_confidence": self.ontology_confidence,
         }
 
+    def extraction_confidence(self) -> float:
+        """Node-level extraction confidence for review gating in comparison.
+
+        Resolution order: explicit metadata score (tables/formulas), table
+        structural quality, OCR page confidence for OCR-sourced nodes, else 1.0
+        (born-digital text is trusted).
+        """
+        metadata = self.metadata or {}
+        value = metadata.get("extraction_confidence")
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+        if self.node_type == "table":
+            quality = metadata.get("extraction_quality_score")
+            if quality is not None:
+                try:
+                    return float(quality)
+                except (TypeError, ValueError):
+                    pass
+        if self.ocr_used:
+            ocr_conf = metadata.get("ocr_confidence") or metadata.get(
+                "ocr_page_confidence"
+            )
+            if ocr_conf is not None:
+                try:
+                    return float(ocr_conf)
+                except (TypeError, ValueError):
+                    pass
+        return 1.0
+
     def to_comparison_record(self) -> dict[str, Any]:
         metadata = dict(self.metadata)
         table_structure = metadata.get("table_structure") or {}
@@ -251,6 +283,13 @@ class CanonicalNode:
             "table_normalized_caption": str(metadata.get("normalized_caption") or ""),
             "table_quality_flags": list(metadata.get("table_quality_flags") or []),
             "low_confidence_table": bool(metadata.get("low_confidence_table", False)),
+            "extraction_confidence": self.extraction_confidence(),
+            "confidence_flags": list(metadata.get("confidence_flags") or []),
+            "ocr_used": self.ocr_used,
+            "ocr_confidence": _coerce_float(
+                metadata.get("ocr_confidence") or metadata.get("ocr_page_confidence")
+            ),
+            "requires_extraction_review": bool(metadata.get("requires_review", False)),
             "canonical_metadata": metadata,
             "pure_text_hash": _pure_text_hash(self.raw_text or ""),
             "formula_latex": str(metadata.get("formula_latex") or ""),

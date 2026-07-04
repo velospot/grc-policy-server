@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Optional
 
+from grc_policy_server.core.config import settings
 from grc_policy_server.core.logging import logging
 from grc_policy_server.models.schemas import (
     ActionItem,
@@ -130,6 +131,8 @@ class RealDiffEngineStream:
     thresholds: MatchThresholds = MatchThresholds()
     topk: int = 5
     inter_diff_delay_ms: int = 0
+    # Lazily constructed on first v5 low-confidence diff (see _enqueue_review).
+    review_queue: object | None = None
 
     async def compare_stream(
         self,
@@ -555,6 +558,376 @@ class RealDiffEngineStream:
             "requires_human_review": requires_human_review,
             "accuracy_metrics": accuracy_metrics.model_dump() if accuracy_metrics else None,
         }
+
+    async def compare_stream_v5(
+        self,
+        doc1: Document,
+        doc2: Document,
+        force_re_extract: bool = False,
+        testing_department: str | None = None,
+    ) -> AsyncIterator[Dict]:
+        """Confidence-aware streaming contract for V5.
+
+        Extends the v4 two-stage contract with:
+        - ``extraction_quality`` event per document (ingestion confidence summary)
+        - ``extraction_confidence`` + ``review_reasons`` on diff_start/diff_complete
+        - confidence/severity-gated LLM usage: Low-impact diffs and diffs built on
+          low-confidence evidence get a deterministic row instead of an LLM call
+          (the LLM cannot repair bad extraction, and skipping it keeps 200+ page
+          comparisons tractable)
+        - low-confidence diffs enqueued to the human review queue
+        - ``done`` event splits review counts by cause (extraction vs semantic)
+        """
+        review_threshold = settings.extraction_review_threshold
+        yield {
+            "type": "payload",
+            "doc1_id": doc1.id,
+            "doc2_id": doc2.id,
+            "testing_department": testing_department or "EMC",
+        }
+        yield {"type": "progress", "stage": "loading", "message": "Loading canonical nodes"}
+
+        quality_summaries: dict[str, dict] = {}
+        for doc in (doc1, doc2):
+            summary = self._extraction_quality_summary(doc.id)
+            if summary:
+                quality_summaries[doc.id] = summary
+                yield {
+                    "type": "extraction_quality",
+                    "document_id": doc.id,
+                    **summary,
+                }
+
+        engine = RealDiffEngine(
+            qdrant=self.qdrant,
+            neo4j=self.neo4j,
+            llm=self.llm,
+            canonical_store=self.canonical_store,
+            trace_store=self.trace_store,
+            thresholds=self.thresholds,
+            topk=self.topk,
+        )
+
+        (
+            key_diffs,
+            doc1_name,
+            doc2_name,
+            language,
+            no_change_coverage,
+            accuracy_metrics,
+        ) = await engine.compare_records_only(
+            doc1,
+            doc2,
+            force_re_extract=force_re_extract,
+            testing_department=testing_department or "",
+        )
+        key_diffs = _sort_by_severity(key_diffs)
+
+        yield {
+            "type": "progress",
+            "stage": "streaming_diffs",
+            "message": f"Analysing {len(key_diffs)} differences",
+            "total": len(key_diffs),
+        }
+
+        collected_rows: list[str] = []
+        skipped_count = 0
+        review_count = 0
+        extraction_review_count = 0
+        semantic_review_count = 0
+        llm_calls = 0
+
+        for diff in key_diffs:
+            change_id = str(
+                (diff.doc1Reference.nodeId if diff.doc1Reference else None)
+                or (diff.doc2Reference.nodeId if diff.doc2Reference else None)
+                or id(diff)
+            )
+            section = (
+                (diff.doc1Reference.section if diff.doc1Reference else None)
+                or (diff.doc2Reference.section if diff.doc2Reference else None)
+                or diff.section
+                or "—"
+            )
+            page = (
+                (diff.doc1Reference.page if diff.doc1Reference else None)
+                or (diff.doc2Reference.page if diff.doc2Reference else None)
+            )
+            node_type = str(diff.nodeType or "clause")
+            doc1_source = diff.doc1Reference.sourceText if diff.doc1Reference else None
+            doc2_source = diff.doc2Reference.sourceText if diff.doc2Reference else None
+            extraction_confidence = diff.extractionConfidence
+            review_reasons = list(diff.reviewReasons or [])
+            low_confidence_evidence = bool(review_reasons) or (
+                extraction_confidence is not None
+                and extraction_confidence < review_threshold
+            )
+
+            yield {
+                "type": "diff_start",
+                "change_id": change_id,
+                "section": section,
+                "page": page,
+                "change_type": str(diff.changeType or "MODIFIED"),
+                "node_type": node_type,
+                "doc1_preview": (doc1_source or "")[:120] or None,
+                "doc2_preview": (doc2_source or "")[:120] or None,
+                "extraction_confidence": extraction_confidence,
+                "review_reasons": review_reasons,
+            }
+
+            use_llm = diff.impact in ("High", "Medium") and not low_confidence_evidence
+            full_text = ""
+            if use_llm:
+                tokens: list[str] = []
+                try:
+                    llm_calls += 1
+                    async for token in self.llm.generate_diff_table_row_stream(
+                        section=section,
+                        page=page,
+                        change_type=str(diff.changeType or "MODIFIED"),
+                        node_type=node_type,
+                        doc1_text=doc1_source,
+                        doc2_text=doc2_source,
+                        testing_department=testing_department,
+                        language=language,
+                    ):
+                        if token:
+                            tokens.append(token)
+                            if token.strip().upper() != "SKIP":
+                                yield {
+                                    "type": "diff_token",
+                                    "change_id": change_id,
+                                    "token": token,
+                                }
+                except Exception as exc:
+                    logger.warning(
+                        "diff table row stream failed change_id=%s: %s", change_id, exc
+                    )
+                full_text = "".join(tokens).strip()
+            if not use_llm or not full_text or full_text.upper() == "SKIP":
+                # Deterministic row: structured change records already carry the
+                # facts; used for Low-impact diffs, low-confidence evidence, and
+                # as fallback when the LLM skips or fails.
+                deterministic = self._deterministic_row_text(diff)
+                if use_llm and (not full_text or full_text.upper() == "SKIP"):
+                    full_text = ""
+                else:
+                    full_text = deterministic
+
+            skipped = not full_text
+            requires_review = (
+                full_text.upper().startswith("HUMAN_REVIEW:")
+                or diff.requiresHumanReview
+            )
+
+            row_markdown = ""
+            if not skipped:
+                row_markdown = _build_table_row(
+                    section,
+                    page,
+                    str(diff.changeType or "MODIFIED"),
+                    full_text,
+                    requires_review,
+                )
+                collected_rows.append(row_markdown)
+                if requires_review:
+                    review_count += 1
+                    if review_reasons:
+                        extraction_review_count += 1
+                    else:
+                        semantic_review_count += 1
+            else:
+                skipped_count += 1
+
+            if review_reasons:
+                self._enqueue_review(
+                    document_id=doc2.id,
+                    change_id=change_id,
+                    section=section,
+                    change_type=str(diff.changeType or "MODIFIED"),
+                    node_type=node_type,
+                    review_reasons=review_reasons,
+                    extraction_confidence=extraction_confidence,
+                )
+
+            yield {
+                "type": "diff_complete",
+                "change_id": change_id,
+                "row_markdown": row_markdown,
+                "requires_review": requires_review,
+                "skipped": skipped,
+                "extraction_confidence": extraction_confidence,
+                "review_reasons": review_reasons,
+                "analysis_source": "llm" if use_llm and full_text else "deterministic",
+            }
+
+            if self.inter_diff_delay_ms > 0:
+                await asyncio.sleep(self.inter_diff_delay_ms / 1000.0)
+
+        table_md = _assemble_table(collected_rows)
+        yield {
+            "type": "table_complete",
+            "markdown": table_md,
+            "rows_analyzed": len(collected_rows),
+            "rows_skipped": skipped_count,
+            "review_count": review_count,
+        }
+
+        yield {"type": "progress", "stage": "summarizing", "message": "Generating summary"}
+        non_skipped_diffs = [
+            d for d in key_diffs
+            if (d.doc1Reference.sourceText if d.doc1Reference else None)
+            or (d.doc2Reference.sourceText if d.doc2Reference else None)
+        ]
+        try:
+            summary = await self.llm.summarize_changes(
+                doc1_name=doc1_name,
+                doc2_name=doc2_name,
+                key_differences=non_skipped_diffs or key_diffs,
+                language=language,
+                testing_department=testing_department,
+            )
+        except Exception:
+            logger.exception("summary generation failed in compare_stream_v5")
+            summary = "No summary available."
+
+        yield {"type": "summary_token", "token": summary}
+        yield {"type": "summary_complete", "text": summary}
+
+        requires_human_review = review_count > 0 or any(
+            d.requiresHumanReview for d in key_diffs
+        )
+        yield {
+            "type": "done",
+            "total_diffs": len(key_diffs),
+            "analyzed": len(collected_rows),
+            "skipped": skipped_count,
+            "review_count": review_count,
+            "extraction_review_count": extraction_review_count,
+            "semantic_review_count": semantic_review_count,
+            "llm_calls": llm_calls,
+            "requires_human_review": requires_human_review,
+            "accuracy_metrics": accuracy_metrics.model_dump() if accuracy_metrics else None,
+            "extraction_quality": quality_summaries or None,
+        }
+
+    def _extraction_quality_summary(self, document_id: str) -> dict | None:
+        """Aggregate node-level extraction confidence for one document.
+
+        Computed from canonical comparison nodes (storage-independent); also
+        attaches the ingestion-time document ConfidenceMetrics when stored.
+        """
+        if self.canonical_store is None:
+            return None
+        try:
+            nodes = self.canonical_store.load_comparison_nodes(document_id)
+        except Exception:
+            return None
+        if not nodes:
+            return None
+        confidences = []
+        for node in nodes:
+            try:
+                confidences.append(float(node.get("extraction_confidence", 1.0)))
+            except (TypeError, ValueError):
+                confidences.append(1.0)
+        summary: dict = {
+            "node_count": len(nodes),
+            "avg_extraction_confidence": round(sum(confidences) / len(confidences), 3),
+            "high_confidence_nodes": sum(1 for c in confidences if c >= 0.85),
+            "medium_confidence_nodes": sum(1 for c in confidences if 0.50 <= c < 0.85),
+            "low_confidence_nodes": sum(1 for c in confidences if c < 0.50),
+            "ocr_nodes": sum(1 for n in nodes if n.get("ocr_used")),
+            "low_confidence_tables": sum(
+                1 for n in nodes if n.get("low_confidence_table")
+            ),
+            "nodes_flagged_for_review": sum(
+                1 for n in nodes if n.get("requires_extraction_review")
+            ),
+        }
+        try:
+            artifacts = self.canonical_store.load_debug_artifacts(document_id)
+            hierarchy = artifacts.get("hierarchyJson") or {}
+            metadata = hierarchy.get("metadata") or {}
+            metrics = metadata.get("confidence_metrics")
+            if metrics:
+                summary["ingestion_confidence_metrics"] = metrics
+            docling_confidence = metadata.get("docling_confidence") or (
+                metrics or {}
+            ).get("docling_confidence")
+            if docling_confidence:
+                summary["docling_mean_grade"] = docling_confidence.get("mean_grade")
+                summary["docling_low_grade"] = docling_confidence.get("low_grade")
+                summary["docling_scores"] = {
+                    key: docling_confidence.get(key)
+                    for key in (
+                        "parse_score",
+                        "layout_score",
+                        "table_score",
+                        "ocr_score",
+                        "mean_score",
+                        "low_score",
+                    )
+                }
+        except Exception:
+            pass
+        return summary
+
+    def _deterministic_row_text(self, diff: KeyDifference) -> str:
+        """Build a semantic-difference cell without an LLM call."""
+        parts: list[str] = []
+        for change in (diff.changes or [])[:3]:
+            if change.oldValue or change.newValue:
+                parts.append(f"{change.oldValue or '—'} → {change.newValue or '—'}")
+            elif change.text:
+                parts.append(self._short(change.text, 80))
+        if not parts:
+            base = diff.doc2Content or diff.doc1Content or ""
+            if str(base).strip():
+                parts.append(self._short(str(base), 100))
+        if not parts:
+            return ""
+        detail = "; ".join(part for part in parts if part)
+        prefix = f"{str(diff.changeType or 'MODIFIED').capitalize()} {diff.nodeType}"
+        if diff.reviewReasons:
+            detail = f"{detail} [evidence: {', '.join(diff.reviewReasons)}]"
+        return f"{prefix}: {detail}"
+
+    def _enqueue_review(
+        self,
+        *,
+        document_id: str,
+        change_id: str,
+        section: str,
+        change_type: str,
+        node_type: str,
+        review_reasons: list[str],
+        extraction_confidence: float | None,
+    ) -> None:
+        try:
+            if self.review_queue is None:
+                from grc_policy_server.repositories.human_review import (
+                    HumanReviewQueue,
+                )
+
+                self.review_queue = HumanReviewQueue()
+            self.review_queue.enqueue(
+                node_id=change_id,
+                document_id=document_id,
+                classification={
+                    "source": "compare_v5",
+                    "section": section,
+                    "change_type": change_type,
+                    "node_type": node_type,
+                    "review_reasons": review_reasons,
+                },
+                confidence=float(extraction_confidence or 0.0),
+            )
+        except Exception:
+            logger.warning(
+                "human review enqueue failed change_id=%s", change_id, exc_info=True
+            )
 
     async def _make_modified(
         self,

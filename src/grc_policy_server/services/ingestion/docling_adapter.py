@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from io import BytesIO
 from typing import Any, Optional
@@ -10,6 +11,7 @@ from docling.datamodel.pipeline_options import (
     HeadingHierarchyOptions,
     OcrAutoOptions,
     PdfPipelineOptions,
+    TableFormerMode,
     TableStructureOptions,
     TableStructureV2Options,
     TesseractCliOcrOptions,
@@ -25,6 +27,54 @@ from grc_policy_server.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+_SCORE_FIELDS = ("parse_score", "layout_score", "table_score", "ocr_score")
+
+
+def _safe_score(value: Any) -> float | None:
+    """NaN-safe float conversion — docling uses np.nan for unavailable scores."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(score) else round(score, 4)
+
+
+def confidence_report_to_dict(report: Any) -> dict[str, Any] | None:
+    """Serialize a docling ConfidenceReport to a JSON-safe dict.
+
+    Not model_dump(mode="json"): NaN scores would produce invalid JSON.
+    Shape: document-level scores/grades plus per-page entries keyed by the
+    1-indexed page number docling uses in ``report.pages``.
+    """
+    if report is None:
+        return None
+
+    def _scores(scores: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            field: _safe_score(getattr(scores, field, None))
+            for field in _SCORE_FIELDS
+        }
+        payload["mean_score"] = _safe_score(getattr(scores, "mean_score", None))
+        payload["low_score"] = _safe_score(getattr(scores, "low_score", None))
+        payload["mean_grade"] = str(
+            getattr(getattr(scores, "mean_grade", None), "value", "") or ""
+        )
+        payload["low_grade"] = str(
+            getattr(getattr(scores, "low_grade", None), "value", "") or ""
+        )
+        return payload
+
+    try:
+        result = _scores(report)
+        result["pages"] = {
+            int(page_no): _scores(page_scores)
+            for page_no, page_scores in (getattr(report, "pages", None) or {}).items()
+        }
+        return result
+    except Exception:
+        logger.warning("failed to serialize docling confidence report", exc_info=True)
+        return None
+
 
 def _build_vlm_converter() -> DocumentConverter:
     """Build a Docling converter backed by granite-docling VLM via Ollama API.
@@ -32,7 +82,7 @@ def _build_vlm_converter() -> DocumentConverter:
     Uses VlmPipeline which sends each page image to the granite-docling model
     for layout + table extraction, improving accuracy on dense/complex tables.
     """
-    from docling.datamodel.pipeline_options import VlmPipelineOptions, VlmConvertOptions
+    from docling.datamodel.pipeline_options import VlmConvertOptions, VlmPipelineOptions
     from docling.datamodel.vlm_engine_options import ApiVlmEngineOptions, VlmEngineType
     from docling.pipeline.vlm_pipeline import VlmPipeline
 
@@ -79,14 +129,14 @@ class DoclingAdapter:
             pdf_options.table_structure_options = TableStructureV2Options()
         else:
             pdf_options.table_structure_options = TableStructureOptions(
-                do_cell_matching=True
+                do_cell_matching=True,
+                mode=TableFormerMode.ACCURATE,
             )
         pdf_options.images_scale = 2
         pdf_options.do_formula_enrichment = True
+        pdf_options.do_code_enrichment = True
         pdf_options.heading_hierarchy_options = HeadingHierarchyOptions(
-            enabled=True,
-            use_numbering=True,
-            use_style=True,
+            enabled=True, use_numbering=True, use_style=True, max_level=5
         )
 
         # pdf_options.generate_table_images = False
@@ -106,7 +156,10 @@ class DoclingAdapter:
                 )
                 flash_attention2 = False
         pdf_options.accelerator_options.cuda_use_flash_attention2 = flash_attention2
-        pdf_options.ocr_options = OcrAutoOptions(force_full_page_ocr=True)
+        # Auto OCR must not force full-page OCR: born-digital PDFs keep their
+        # native text layer (µ, ±, superscripts survive) and OCR only fills
+        # bitmap regions. Full-page OCR is reserved for the explicit force path.
+        pdf_options.ocr_options = OcrAutoOptions(force_full_page_ocr=False)
         pdf_options.layout_batch_size = 64
         pdf_options.table_batch_size = 4
         if force_full_page_ocr:
@@ -153,10 +206,12 @@ class DoclingAdapter:
                 doc = result.document
                 continuation_hints = self._detect_multi_page_continuations(doc)
                 doc._continuation_hints = continuation_hints
+                doc._confidence_report = getattr(result, "confidence", None)
                 return doc
         except Exception:
             logger.warning(
-                "VLM conversion failed for %s; falling back to standard pipeline", filename,
+                "VLM conversion failed for %s; falling back to standard pipeline",
+                filename,
                 exc_info=True,
             )
         return self.convert_bytes(
@@ -202,6 +257,7 @@ class DoclingAdapter:
                 continuation_hints,
             )
         doc._continuation_hints = continuation_hints
+        doc._confidence_report = getattr(result, "confidence", None)
         return doc
 
     def convert_bytes_page_range(
@@ -228,7 +284,9 @@ class DoclingAdapter:
             result = converter.convert(source, page_range=page_range)
             if not result.document:
                 return None
-            return result.document
+            doc = result.document
+            doc._confidence_report = getattr(result, "confidence", None)
+            return doc
         except Exception:
             logger.exception(
                 "convert_bytes_page_range failed filename=%s page_range=%s",

@@ -12,6 +12,9 @@ from grc_policy_server.services.comparison.policy_semantics import (
     starts_with_lowercase,
 )
 from grc_policy_server.services.ingestion.hierarchy_models import ParsedChunk
+from grc_policy_server.services.ingestion.ocr_error_normalizer import (
+    normalize_ocr_errors,
+)
 from grc_policy_server.utils.hashing import normalize_for_comparison
 
 _DOUBLE_DASH_BULLET_RE = re.compile(r"(?:(?<=\s)|^)- -\s*")
@@ -93,6 +96,8 @@ def preprocess_parsed_chunks(parsed_chunks: list[ParsedChunk]) -> list[ParsedChu
             clean_source = str(chunk.metadata.get("table_clean_text") or chunk.text)
         else:
             clean_source = _normalize_list_text(chunk.text, chunk.labels)
+        if chunk.metadata.get("ocr_used") or chunk.metadata.get("ocr"):
+            clean_source = normalize_ocr_errors(clean_source)
         clean_text = clean_policy_text(clean_source)
         if chunk.chunk_type in {"clause", "table"} and (
             not clean_text

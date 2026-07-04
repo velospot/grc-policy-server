@@ -67,6 +67,10 @@ class ChangeRecord:
     severity: Literal["low", "medium", "high"] = "medium"
     requires_human_review: bool = False
     significance_reasons: list[str] = field(default_factory=list)
+    # Extraction confidence of the underlying evidence (min over involved nodes)
+    # and the reason codes when it forces human review.
+    extraction_confidence: float = 1.0
+    review_reasons: list[str] = field(default_factory=list)
     # Evidence pack: source location for each version (doc1 = v1, doc2 = v2)
     v1_evidence: list[dict[str, Any]] = field(default_factory=list)
     v2_evidence: list[dict[str, Any]] = field(default_factory=list)
@@ -89,6 +93,8 @@ class ChangeRecord:
             "changeSeverity": self.severity,
             "significance": self.significance,
             "significanceReasons": self.significance_reasons,
+            "extractionConfidence": self.extraction_confidence,
+            "reviewReasons": self.review_reasons,
             "numericChanges": self.numeric_changes,
             "requirementVerbChange": self.requirement_verb_change,
             "tableChanges": self.table_changes,
@@ -112,6 +118,51 @@ class ChangeRecord:
         payload["doc1Content"] = self.doc1_content
         payload["doc2Content"] = self.doc2_content
         return payload
+
+
+def evidence_extraction_confidence(
+    nodes: list[dict[str, Any] | None],
+    *,
+    review_threshold: float = 0.70,
+) -> tuple[float, list[str]]:
+    """Aggregate extraction confidence over the nodes backing a diff.
+
+    Returns (min confidence, review reason codes). A diff's evidence is only as
+    trustworthy as its weakest node. Nodes without confidence data (legacy
+    ingestions) are treated as trusted and contribute nothing.
+    """
+    confidences: list[float] = []
+    reasons: list[str] = []
+    for node in nodes:
+        if not node:
+            continue
+        raw = node.get("extraction_confidence")
+        if raw is None:
+            continue
+        try:
+            conf = float(raw)
+        except (TypeError, ValueError):
+            continue
+        confidences.append(conf)
+        if conf >= review_threshold:
+            continue
+        for flag in node.get("confidence_flags") or []:
+            if str(flag) not in reasons:
+                reasons.append(str(flag))
+        if node.get("ocr_used"):
+            if "low_ocr_confidence" not in reasons:
+                reasons.append("low_ocr_confidence")
+        if node.get("low_confidence_table"):
+            if "low_confidence_table" not in reasons:
+                reasons.append("low_confidence_table")
+        if str(node.get("node_type") or "") == "formula":
+            if "unparsed_formula" not in reasons:
+                reasons.append("unparsed_formula")
+        if not reasons:
+            reasons.append("low_extraction_confidence")
+    if not confidences:
+        return 1.0, []
+    return min(confidences), reasons
 
 
 def detect_requirement_verb_change(

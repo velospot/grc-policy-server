@@ -28,7 +28,10 @@ class CompareV5Service:
     """Versioned stream comparison service for `/v5/compare/stream`.
 
     Synchronous `/v5/compare` intentionally reuses the v2 queued-job contract.
-    This service only owns stream-specific ID lookup and event decoration.
+    Streaming uses the confidence-aware `compare_stream_v5` engine contract:
+    per-document `extraction_quality` events, per-diff extraction confidence and
+    review reasons, confidence/severity-gated LLM usage, and human-review-queue
+    enqueueing for low-confidence evidence.
     """
 
     document_repo: DocumentRepository
@@ -45,7 +48,7 @@ class CompareV5Service:
         async def _events() -> AsyncIterator[dict[str, Any]]:
             if self.stream_engine is None:
                 raise RuntimeError("CompareV5Service requires stream_engine for stream")
-            async for event in self.stream_engine.compare_stream_v4(
+            async for event in self.stream_engine.compare_stream_v5(
                 doc1,
                 doc2,
                 force_re_extract=payload.forceReExtract,

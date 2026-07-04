@@ -101,6 +101,23 @@ async def compare_v5_stream(
     payload: CompareStreamV5Request,
     service: CompareV5Service = Depends(get_compare_v5_stream_service),
 ) -> StreamingResponse:
+    """Confidence-aware v5 stream (extends the v4 two-stage contract).
+
+    | Event | Key fields | Notes |
+    |---|---|---|
+    | `payload` | `doc1_id`, `doc2_id`, `testing_department` | First event |
+    | `extraction_quality` | `document_id`, `avg_extraction_confidence`, `low_confidence_nodes`, `ocr_nodes`, `ingestion_confidence_metrics`, `docling_mean_grade`, `docling_low_grade`, `docling_scores` | One per document; docling fields from the native ConfidenceReport |
+    | `progress` | `stage`, `message`, `total` | Pipeline stages |
+    | `diff_start` | v4 fields + `extraction_confidence`, `review_reasons` | Per diff |
+    | `diff_token` | `change_id`, `token` | Only for LLM-analysed diffs |
+    | `diff_complete` | v4 fields + `extraction_confidence`, `review_reasons`, `analysis_source` (`llm`/`deterministic`) | Per diff |
+    | `table_complete` / `summary_*` | as v4 | |
+    | `done` | v4 fields + `extraction_review_count`, `semantic_review_count`, `llm_calls`, `extraction_quality` | Final event |
+
+    Low-impact diffs and diffs whose evidence extraction confidence is below
+    `extraction_review_threshold` are analysed deterministically (no LLM call);
+    low-confidence diffs are also enqueued to the human review queue.
+    """
     try:
         events = service.stream_events(payload)
     except (

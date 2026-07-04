@@ -23,6 +23,7 @@ from grc_policy_server.models.schemas import (
 from grc_policy_server.services.comparison.change_records import (
     ChangeRecord,
     detect_emc_entity_type,
+    evidence_extraction_confidence,
     detect_numeric_changes,
     detect_requirement_verb_change,
     detect_test_procedure_change,
@@ -1828,6 +1829,21 @@ class RealDiffEngine:
             or (node_type == "formula" and bool(numeric_changes))
             or node_type == "table_caption"
         )
+        # Extraction-confidence gate: a diff built on low-confidence evidence
+        # (OCR noise, sparse table grid, unparseable formula) cannot be trusted
+        # for automatic compliance decisions regardless of semantic severity.
+        extraction_confidence, extraction_review_reasons = (
+            evidence_extraction_confidence(
+                [*left_nodes, *right_nodes],
+                review_threshold=settings.extraction_review_threshold,
+            )
+        )
+        if extraction_review_reasons:
+            requires_human_review = True
+            reasons = [
+                *reasons,
+                *(f"extraction:{reason}" for reason in extraction_review_reasons),
+            ]
         section = (
             (left_ref.section if left_ref else None)
             or (right_ref.section if right_ref else None)
@@ -1868,6 +1884,8 @@ class RealDiffEngine:
             significance_reasons=reasons,
             v1_evidence=v1_evidence,
             v2_evidence=v2_evidence,
+            extraction_confidence=round(extraction_confidence, 3),
+            review_reasons=extraction_review_reasons,
         )
 
     def _record_changes(
@@ -2022,6 +2040,8 @@ class RealDiffEngine:
             changes=record.changes,
             requiresHumanReview=record.requires_human_review,
             complianceExplanation=self._generate_compliance_explanation(record),
+            extractionConfidence=record.extraction_confidence,
+            reviewReasons=record.review_reasons,
         )
 
     def _alignment_type(self, match: ClauseMatch) -> str:

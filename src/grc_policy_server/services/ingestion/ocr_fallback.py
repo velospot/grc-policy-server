@@ -146,6 +146,12 @@ def build_ocr_fallback_chunks(
                             labels=("OCR",),
                             metadata={
                                 "ocr": True,
+                                # CanonicalNode provenance reads ocr_used / ocr_confidence —
+                                # keep both keys or OCR provenance is lost downstream.
+                                "ocr_used": True,
+                                "ocr_confidence": page_ocr_confidence,
+                                "has_native_text": False,
+                                "source_extractor": "pytesseract",
                                 "ocr_block_index": block_index,
                                 "ocr_page_number": page_number,
                                 "ocr_engine": "pytesseract",

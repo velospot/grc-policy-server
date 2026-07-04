@@ -69,7 +69,8 @@ def shape_v5_auditor_result(
             ),
             "comparisonMode": "auditor_grade",
             "requireHumanReview": risk in {"Critical", "High"}
-            or any(diff.requiresHumanReview for diff in key_differences),
+            or any(diff.requiresHumanReview for diff in key_differences)
+            or any(diff.reviewReasons for diff in key_differences),
             "hiddenDiffsCount": 0,
             "suppressedDiffsCount": 0,
             "warnings": _warnings(
@@ -78,6 +79,7 @@ def shape_v5_auditor_result(
                 risk_score=risk_score,
                 domain=domain,
                 testing_department=testing_department,
+                key_differences=key_differences,
             ),
         }
     )
@@ -222,14 +224,31 @@ def _warnings(
     risk_score: float,
     domain: str,
     testing_department: str,
+    key_differences: list[KeyDifference] | None = None,
 ) -> list[str]:
+    diffs = key_differences or []
+    low_confidence = [diff for diff in diffs if diff.reviewReasons]
+    confidences = [
+        diff.extractionConfidence
+        for diff in diffs
+        if diff.extractionConfidence is not None
+    ]
+    min_confidence = round(min(confidences), 3) if confidences else 1.0
     marker = (
         "v5_auditor_grade="
         f"domain:{domain};testingDepartment:{testing_department};"
         f"overallRisk:{risk};riskScore:{risk_score};"
-        "deterministic:true;llmDecision:false;hiddenDiffsCount:0;suppressedDiffsCount:0"
+        "deterministic:true;llmDecision:false;hiddenDiffsCount:0;suppressedDiffsCount:0;"
+        f"lowConfidenceDiffs:{len(low_confidence)};minExtractionConfidence:{min_confidence}"
     )
-    return [*existing, marker]
+    warnings = [*existing, marker]
+    if low_confidence:
+        warnings.append(
+            f"{len(low_confidence)} difference(s) rest on low-confidence extraction "
+            "evidence and were flagged for human review "
+            f"(reasons: {sorted({r for d in low_confidence for r in d.reviewReasons})})."
+        )
+    return warnings
 
 
 def _is_critical(diff: KeyDifference) -> bool:

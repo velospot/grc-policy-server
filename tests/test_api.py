@@ -258,6 +258,23 @@ class StubDiffEngineStream:
             "accuracy_metrics": None,
         }
 
+    async def compare_stream_v5(
+        self,
+        doc1,
+        doc2,
+        force_re_extract: bool = False,
+        testing_department: str | None = None,
+    ):
+        # v5 shares the v4 two-stage contract plus confidence events; the stub
+        # records calls in v4_calls so existing assertions keep working.
+        async for event in self.compare_stream_v4(
+            doc1,
+            doc2,
+            force_re_extract=force_re_extract,
+            testing_department=testing_department,
+        ):
+            yield event
+
 
 class StubCompareV2Dispatcher:
     def __init__(

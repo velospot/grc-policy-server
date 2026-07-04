@@ -1,0 +1,856 @@
+[
+  {
+    "document_id": "01915f64-ec2f-43f9-b168-e721e0465616",
+    "filename": "TL_81000_2021-09_GER_p053-062.pdf",
+    "total_tables": 2,
+    "tables_classified": 1,
+    "emc_type_distribution": {
+      "radiated_immunity": 1,
+      "unknown": 1
+    },
+    "overall_fact_coverage": 0.0,
+    "overall_row_key_coverage": 0.16666666666666666,
+    "overall_column_mapped_pct": 0.3333333333333333,
+    "total_normalized_facts": 0,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "5",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "detektor frequenzbereich in khz 9bis 150",
+          "peak bandbreite in khz 0.2",
+          "peak schrittweite in khz ≥ 0.1"
+        ],
+        "header_entity_types": [
+          "FrequencyRange",
+          "FrequencyRange",
+          ""
+        ],
+        "column_mapped_pct": 0.6666666666666666,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {},
+        "sample_row_keys": [
+          "9/10"
+        ]
+      },
+      {
+        "index": 1,
+        "caption": "5",
+        "emc_test_type": "unknown",
+        "headers": [
+          "strombelastbarkeit i max kurzzeitstrom (t s) peak",
+          "elektronischer schalter 25a 100a",
+          "elektronischer schalter 2.5a 10a"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.0,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      }
+    ]
+  },
+  {
+    "document_id": "3496fa7f-e4a7-4f06-a03f-65776aa108c4",
+    "filename": "DNVGL-CG-0339_Dez_2019_p033-042.pdf",
+    "total_tables": 7,
+    "tables_classified": 5,
+    "emc_type_distribution": {
+      "unknown": 2,
+      "transient_immunity": 1,
+      "maritime_installation": 2,
+      "esd": 1,
+      "radiated_immunity": 1
+    },
+    "overall_fact_coverage": 0.44,
+    "overall_row_key_coverage": 0.325,
+    "overall_column_mapped_pct": 0.75,
+    "total_normalized_facts": 47,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "14",
+        "emc_test_type": "unknown",
+        "headers": [
+          "test levels",
+          "_row_label_1"
+        ],
+        "header_entity_types": [
+          "ImmunityLevel",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.11764705882352941,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 2,
+          "frequency_range": 1
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 1,
+        "caption": "Table 21 Slow transient signal test levels",
+        "emc_test_type": "transient_immunity",
+        "headers": [
+          "test levels pulse amplitude",
+          "test levels 1.2/50us voltage surge 8/20us current surge 0.5kv, line to line 1kv, line to ground"
+        ],
+        "header_entity_types": [
+          "FieldStrength",
+          "FieldStrength"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 2,
+        "caption": "Table 22 Conducted radio frequencies: EMC class A",
+        "emc_test_type": "maritime_installation",
+        "headers": [
+          "_row_label_0",
+          "test levels"
+        ],
+        "header_entity_types": [
+          "",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.375,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "frequency_range": 2,
+          "field_strength": 1
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 3,
+        "caption": "Table 23 Conducted radio frequencies: EMC class B",
+        "emc_test_type": "maritime_installation",
+        "headers": [
+          "_row_label_0",
+          "test levels"
+        ],
+        "header_entity_types": [
+          "",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.75,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "normative_term": 1,
+          "frequency_range": 1,
+          "field_strength": 1
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 4,
+        "caption": "Table 24 Electromagnetic field sweep frequency test levels",
+        "emc_test_type": "unknown",
+        "headers": [
+          "_row_label_0",
+          "test levels"
+        ],
+        "header_entity_types": [
+          "",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.3076923076923077,
+        "row_key_coverage_pct": 0.14285714285714285,
+        "fact_type_counts": {
+          "frequency_range": 5,
+          "field_strength": 1,
+          "normative_term": 1
+        },
+        "sample_row_keys": [
+          "1.5"
+        ]
+      },
+      {
+        "index": 5,
+        "caption": "Table 25 Electrostatic discharge test levels",
+        "emc_test_type": "esd",
+        "headers": [
+          "test levels air indirect contact",
+          "test levels 2kv, 4kv and 8kv 6kv"
+        ],
+        "header_entity_types": [
+          "FieldStrength",
+          "FieldStrength"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.25,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "field_strength": 1
+        },
+        "sample_row_keys": [
+          "6kv",
+          "±"
+        ]
+      },
+      {
+        "index": 6,
+        "caption": "Table 26 Radiated emission test",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "enclosure port",
+          "frequency range",
+          "| | measuring bandwidth",
+          "limits (quasi peak)"
+        ],
+        "header_entity_types": [
+          "Phenomenon",
+          "FrequencyRange",
+          "FrequencyRange",
+          "EmissionLimit"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 1.0,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "frequency_range": 10,
+          "field_strength": 10,
+          "emission_limit": 10
+        },
+        "sample_row_keys": [
+          ":9khz",
+          ":120khz",
+          ":120khz"
+        ]
+      }
+    ]
+  },
+  {
+    "document_id": "6479672b-0ebb-4559-8b43-34e3af05db03",
+    "filename": "TL_81000_2021-09_GER_p043-052.pdf",
+    "total_tables": 2,
+    "tables_classified": 2,
+    "emc_type_distribution": {
+      "conducted_emissions": 2
+    },
+    "overall_fact_coverage": 0.20164609053497942,
+    "overall_row_key_coverage": 0.7241379310344828,
+    "overall_column_mapped_pct": 0.5217391304347826,
+    "total_normalized_facts": 49,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "5",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "_row_label_0",
+          "prüf- nr.",
+          "dienst oder band",
+          "frequenz in mhz u in dbuv klasse",
+          "frequenz in mhz",
+          "pk bw f in khz",
+          "pk klasse",
+          "qp grenzwert u in dbuv",
+          "qp f in khz",
+          "av grenzwert u in dbuv klasse",
+          "av"
+        ],
+        "header_entity_types": [
+          "",
+          "TestNumber",
+          "",
+          "FrequencyRange",
+          "FrequencyRange",
+          "FrequencyRange",
+          "AcceptanceCriterion",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          ""
+        ],
+        "column_mapped_pct": 0.7272727272727273,
+        "fact_bearing_cells_pct": 0.33613445378151263,
+        "row_key_coverage_pct": 0.7333333333333333,
+        "fact_type_counts": {
+          "frequency_range": 26,
+          "emission_limit": 14
+        },
+        "sample_row_keys": [
+          "4:5",
+          "9/10:120",
+          ":120"
+        ]
+      },
+      {
+        "index": 1,
+        "caption": "5",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "_row_label_0",
+          "prüf- dienst oder nr.",
+          "prüf- band",
+          "prüf- frequenz in mhz",
+          "prüf- grenzwert i in dbua klasse",
+          "prüf- pk",
+          "prüf- bw f in hz",
+          "prüf- qp grenzwert i in dbua klasse",
+          "prüfprüf- bw f in hz",
+          "",
+          "prüf- av grenzwert i in dbua klasse",
+          "_row_label_11"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          "",
+          "FrequencyRange",
+          "EmissionLimit",
+          "",
+          "",
+          "EmissionLimit",
+          "",
+          "",
+          "EmissionLimit",
+          ""
+        ],
+        "column_mapped_pct": 0.3333333333333333,
+        "fact_bearing_cells_pct": 0.07258064516129033,
+        "row_key_coverage_pct": 0.7142857142857143,
+        "fact_type_counts": {
+          "emission_limit": 7,
+          "frequency_range": 2
+        },
+        "sample_row_keys": [
+          "khz:khz::khz:3_4",
+          "-:-:...:-:-",
+          "-:-:...:-:-"
+        ]
+      }
+    ]
+  },
+  {
+    "document_id": "67c90978-0f70-427a-a830-b18e6167de2f",
+    "filename": "DNVGL-CG-0339_Nov_2016_p023-032.pdf",
+    "total_tables": 5,
+    "tables_classified": 1,
+    "emc_type_distribution": {
+      "unknown": 4,
+      "conducted_emissions": 1
+    },
+    "overall_fact_coverage": 0.03225806451612903,
+    "overall_row_key_coverage": 0.07142857142857142,
+    "overall_column_mapped_pct": 0.38461538461538464,
+    "total_normalized_facts": 1,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "9",
+        "emc_test_type": "unknown",
+        "headers": [
+          "_row_label_0",
+          "class a",
+          "+5°c"
+        ],
+        "header_entity_types": [
+          "",
+          "AcceptanceCriterion",
+          ""
+        ],
+        "column_mapped_pct": 0.3333333333333333,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 1,
+        "caption": "10",
+        "emc_test_type": "unknown",
+        "headers": [
+          "number of spraying",
+          "4"
+        ],
+        "header_entity_types": [
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.0,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.16666666666666666,
+        "fact_type_counts": {},
+        "sample_row_keys": [
+          "6.5"
+        ]
+      },
+      {
+        "index": 2,
+        "caption": "11",
+        "emc_test_type": "unknown",
+        "headers": [
+          "level",
+          "up to 22.5° in each direction"
+        ],
+        "header_entity_types": [
+          "FieldStrength",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 3,
+        "caption": "Table 15 Static test levels",
+        "emc_test_type": "unknown",
+        "headers": [
+          "level",
+          "22.5° in each direction"
+        ],
+        "header_entity_types": [
+          "FieldStrength",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 4,
+        "caption": "Table 16 Minimum insulation resistance",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "rated supply voltage",
+          "test voltage d.c.",
+          "minimum insulation resistance",
+          "_row_label_3"
+        ],
+        "header_entity_types": [
+          "FieldStrength",
+          "FieldStrength",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.16666666666666666,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 1
+        },
+        "sample_row_keys": []
+      }
+    ]
+  },
+  {
+    "document_id": "78b8d8df-594a-4531-83e0-c59d132061f1",
+    "filename": "TL_81000_2018-03_p043-052.pdf",
+    "total_tables": 2,
+    "tables_classified": 2,
+    "emc_type_distribution": {
+      "conducted_emissions": 2
+    },
+    "overall_fact_coverage": 0.5714285714285714,
+    "overall_row_key_coverage": 1.0,
+    "overall_column_mapped_pct": 0.7727272727272727,
+    "total_normalized_facts": 4,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "5",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "column_1",
+          "test nr.",
+          "dienst oder band",
+          "frequenz",
+          "pk grenzwert u in dbuv klasse 3f in",
+          "pk bw f in klasse 4",
+          "qp w",
+          "qp grenzwert u in dbuv klasse 5 klasse",
+          "av bw grenzwert u in dbuv klasse 6",
+          "av bw f in khz"
+        ],
+        "header_entity_types": [
+          "",
+          "TestNumber",
+          "",
+          "FrequencyRange",
+          "EmissionLimit",
+          "AcceptanceCriterion",
+          "",
+          "EmissionLimit",
+          "EmissionLimit",
+          "FrequencyRange"
+        ],
+        "column_mapped_pct": 0.7,
+        "fact_bearing_cells_pct": 0.5714285714285714,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {
+          "emission_limit": 3,
+          "frequency_range": 1
+        },
+        "sample_row_keys": [
+          "5:4"
+        ]
+      },
+      {
+        "index": 1,
+        "caption": "5",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "test nr.",
+          "pk dienst oder band",
+          "pk frequenz in mhz",
+          "pk grenzwert l in dbua klasse 3",
+          "pk bw f in khz",
+          "qp grenzwert l in dbua klasse 4hz",
+          "qp bw f in khz",
+          "qp grenzwert l in dbua klasse 5hz",
+          "qp bw f in khz",
+          "av klasse 4hz",
+          "av f in khz",
+          "av"
+        ],
+        "header_entity_types": [
+          "TestNumber",
+          "",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          "EmissionLimit",
+          "FrequencyRange",
+          "AcceptanceCriterion",
+          "FrequencyRange",
+          ""
+        ],
+        "column_mapped_pct": 0.8333333333333334,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      }
+    ]
+  },
+  {
+    "document_id": "ab73ff65-5d42-4973-bf1b-8df47bc2d475",
+    "filename": "DNVGL-CG-0339_Dez_2019_p023-032.pdf",
+    "total_tables": 6,
+    "tables_classified": 1,
+    "emc_type_distribution": {
+      "unknown": 5,
+      "conducted_emissions": 1
+    },
+    "overall_fact_coverage": 0.11363636363636363,
+    "overall_row_key_coverage": 0.05263157894736842,
+    "overall_column_mapped_pct": 0.5333333333333333,
+    "total_normalized_facts": 5,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "7",
+        "emc_test_type": "unknown",
+        "headers": [
+          "class",
+          "test temperature",
+          "test duration"
+        ],
+        "header_entity_types": [
+          "AcceptanceCriterion",
+          "NumericLimit",
+          "NumericLimit"
+        ],
+        "column_mapped_pct": 1.0,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 1,
+        "caption": "10",
+        "emc_test_type": "unknown",
+        "headers": [
+          "number of spraying",
+          "4"
+        ],
+        "header_entity_types": [
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.0,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.16666666666666666,
+        "fact_type_counts": {},
+        "sample_row_keys": [
+          "6.5"
+        ]
+      },
+      {
+        "index": 2,
+        "caption": "11",
+        "emc_test_type": "unknown",
+        "headers": [
+          "level",
+          "up to 22.5° in each direction"
+        ],
+        "header_entity_types": [
+          "FieldStrength",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 3,
+        "caption": "11",
+        "emc_test_type": "unknown",
+        "headers": [
+          "level",
+          "22.5° in each direction"
+        ],
+        "header_entity_types": [
+          "FieldStrength",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      },
+      {
+        "index": 4,
+        "caption": "Table 16 Minimum insulation resistance",
+        "emc_test_type": "conducted_emissions",
+        "headers": [
+          "rated supply voltage up to 65v",
+          "test voltage d.c. 2 × supply voltage minimum 24v",
+          "minimum insulation resistance test a 10mω",
+          "minimum insulation resistance test b 1mω"
+        ],
+        "header_entity_types": [
+          "FieldStrength",
+          "FieldStrength",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.5,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 2
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 5,
+        "caption": "Table 17 High voltage test level",
+        "emc_test_type": "unknown",
+        "headers": [
+          "rated voltage u$_{n}$ (v)",
+          "test voltage (v) ac"
+        ],
+        "header_entity_types": [
+          "",
+          "FieldStrength"
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.3,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 3
+        },
+        "sample_row_keys": []
+      }
+    ]
+  },
+  {
+    "document_id": "d080e820-0a87-4e6c-90c0-2c1b84f2eaee",
+    "filename": "DNVGL-CG-0339_Nov_2016_p033-044.pdf",
+    "total_tables": 4,
+    "tables_classified": 3,
+    "emc_type_distribution": {
+      "maritime_installation": 2,
+      "unknown": 1,
+      "esd": 1
+    },
+    "overall_fact_coverage": 0.3055555555555556,
+    "overall_row_key_coverage": 0.0,
+    "overall_column_mapped_pct": 0.5,
+    "total_normalized_facts": 15,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "Table 22 Conducted radio frequencies: EMC class A",
+        "emc_test_type": "maritime_installation",
+        "headers": [
+          "_row_label_0",
+          "test levels"
+        ],
+        "header_entity_types": [
+          "",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.375,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "frequency_range": 2,
+          "field_strength": 1
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 1,
+        "caption": "Table 23 Conducted radio frequencies: EMC class B",
+        "emc_test_type": "maritime_installation",
+        "headers": [
+          "_row_label_0",
+          "test levels"
+        ],
+        "header_entity_types": [
+          "",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.75,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "normative_term": 1,
+          "frequency_range": 1,
+          "field_strength": 1
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 2,
+        "caption": "14",
+        "emc_test_type": "unknown",
+        "headers": [
+          "_row_label_0",
+          "test levels"
+        ],
+        "header_entity_types": [
+          "",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.3076923076923077,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "frequency_range": 5,
+          "field_strength": 1,
+          "normative_term": 1
+        },
+        "sample_row_keys": []
+      },
+      {
+        "index": 3,
+        "caption": "Table 25 Electrostatic discharge test levels",
+        "emc_test_type": "esd",
+        "headers": [
+          "_row_label_0",
+          "test levels"
+        ],
+        "header_entity_types": [
+          "",
+          "ImmunityLevel"
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.09090909090909091,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {
+          "field_strength": 2
+        },
+        "sample_row_keys": []
+      }
+    ]
+  },
+  {
+    "document_id": "f8060c21-c7de-4176-aa00-e6dae2b63e25",
+    "filename": "TL_81000_2018-03_p053-062.pdf",
+    "total_tables": 2,
+    "tables_classified": 1,
+    "emc_type_distribution": {
+      "radiated_immunity": 1,
+      "unknown": 1
+    },
+    "overall_fact_coverage": 0.0,
+    "overall_row_key_coverage": 0.4,
+    "overall_column_mapped_pct": 0.2857142857142857,
+    "total_normalized_facts": 0,
+    "errors": [],
+    "tables": [
+      {
+        "index": 0,
+        "caption": "5",
+        "emc_test_type": "radiated_immunity",
+        "headers": [
+          "detektor frequenzbereich in khz",
+          "peak bandbreite in khz 0.2",
+          "peak schrittweite in khz ≥ 0.1",
+          "_row_label_3"
+        ],
+        "header_entity_types": [
+          "FrequencyRange",
+          "FrequencyRange",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.5,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 1.0,
+        "fact_type_counts": {},
+        "sample_row_keys": [
+          "0,_2",
+          "9/10"
+        ]
+      },
+      {
+        "index": 1,
+        "caption": "5",
+        "emc_test_type": "unknown",
+        "headers": [
+          "_row_label_0",
+          "elektronischer schalter",
+          "_row_label_2"
+        ],
+        "header_entity_types": [
+          "",
+          "",
+          ""
+        ],
+        "column_mapped_pct": 0.0,
+        "fact_bearing_cells_pct": 0.0,
+        "row_key_coverage_pct": 0.0,
+        "fact_type_counts": {},
+        "sample_row_keys": []
+      }
+    ]
+  }
+]

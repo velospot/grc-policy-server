@@ -360,18 +360,45 @@ def parse_docling_chunks(dl_doc, raw_chunks: Iterable[Any]) -> list[ParsedChunk]
             item.label == DocItemLabel.FORMULA for item in doc_chunk.meta.doc_items
         ):
             chunk_type = "formula"
-            # Extract LaTeX from docling formula enrichment — stored as item.text
-            formula_latex = ""
-            for item in doc_chunk.meta.doc_items:
-                if item.label == DocItemLabel.FORMULA:
-                    raw = str(getattr(item, "text", "") or "").strip()
-                    if raw:
-                        formula_latex = raw
-                        break
-            if formula_latex:
+            # Extract LaTeX from docling formula enrichment — stored as item.text.
+            # A chunk may aggregate several formula items; keep them all.
+            formula_latexes = [
+                raw
+                for item in doc_chunk.meta.doc_items
+                if item.label == DocItemLabel.FORMULA
+                and (raw := str(getattr(item, "text", "") or "").strip())
+            ]
+            if formula_latexes:
+                formula_latex = "\n".join(formula_latexes)
                 metadata["formula_latex"] = formula_latex
-                metadata["formula_display"] = f"$${formula_latex}$$"
+                metadata["formula_latex_all"] = formula_latexes
+                metadata["formula_display"] = "\n".join(
+                    f"$${latex}$$" for latex in formula_latexes
+                )
                 metadata["node_type_hint"] = "formula"
+                # Numeric facts + extraction confidence at ingest time so the
+                # comparison layer can diff values and gate human review
+                # without re-parsing LaTeX.
+                from grc_policy_server.services.comparison.change_records import (
+                    extract_numeric_from_latex,
+                )
+                from grc_policy_server.utils.math_text import (
+                    score_formula_confidence,
+                )
+
+                formula_facts = [
+                    {"value": value, "unit": unit}
+                    for latex in formula_latexes
+                    for value, unit in extract_numeric_from_latex(latex)
+                ]
+                if formula_facts:
+                    metadata["formula_facts"] = formula_facts
+                confidence = min(
+                    score_formula_confidence(latex) for latex in formula_latexes
+                )
+                metadata["extraction_confidence"] = confidence
+                if confidence < 0.70:
+                    metadata["confidence_flags"] = ["unparsed_formula"]
         elif any(
             item.label == DocItemLabel.LIST_ITEM for item in doc_chunk.meta.doc_items
         ):

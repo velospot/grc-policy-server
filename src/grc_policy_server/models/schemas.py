@@ -58,6 +58,13 @@ class KeyDifference(BaseModel):
     requiresHumanReview: bool = False
     severityConfidence: Optional[float] = None
     complianceExplanation: Optional[str] = None  # deterministic compliance-semantic narrative
+    # Extraction confidence of the underlying evidence (min of both sides);
+    # None when source nodes carry no confidence data.
+    extractionConfidence: Optional[float] = None
+    # Why this diff needs human review: extraction-driven codes
+    # ("low_ocr_confidence", "low_confidence_table", "unparsed_formula", ...)
+    # and/or semantic codes emitted by the severity classifier.
+    reviewReasons: List[str] = Field(default_factory=list)
 
 
 class ActionItem(BaseModel):
@@ -421,3 +428,6 @@ class ConfidenceMetrics(BaseModel):
     medium_confidence_cells: int = 0  # 0.50–0.85
     low_confidence_cells: int = 0  # < 0.50
     requires_human_review_count: int = 0
+    # Docling-native ConfidenceReport (document-level scores + grades, no pages):
+    # parse/layout/table/ocr_score, mean/low_score, mean/low_grade.
+    docling_confidence: Optional[dict] = None

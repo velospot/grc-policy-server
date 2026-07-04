@@ -5,6 +5,8 @@ import re
 import unicodedata
 from uuid import NAMESPACE_URL, uuid5
 
+from grc_policy_server.utils.math_text import normalize_math_text
+
 _WHITESPACE_RE = re.compile(r"\s+")
 _NON_WORD_RE = re.compile(r"[^a-z0-9]+")
 # Remove space between digit and unit symbol: "2 W" -> "2W", "100 MHz" -> "100MHz".
@@ -43,6 +45,9 @@ def normalize_for_comparison(value: str) -> str:
     text = _TRAILING_ESCAPE_RE.sub("", text)
     text = text.replace("­", "")  # soft hyphen
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Math canonicalization must precede NFKC: NFKC flattens 10⁶ to 106,
+    # destroying exponents; normalize_math_text rewrites them to 10^6 first.
+    text = normalize_math_text(text)
     text = unicodedata.normalize("NFKC", text or "")
     # Repair line-break hyphenation BEFORE collapsing whitespace so \n is still present
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)

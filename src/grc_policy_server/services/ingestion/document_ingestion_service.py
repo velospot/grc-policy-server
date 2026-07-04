@@ -16,7 +16,10 @@ from grc_policy_server.services.graph.docling_graph_adapter import (
     DoclingGraphAdapter,
     DoclingGraphArtifact,
 )
-from grc_policy_server.services.ingestion.docling_adapter import DoclingAdapter
+from grc_policy_server.services.ingestion.docling_adapter import (
+    DoclingAdapter,
+    confidence_report_to_dict,
+)
 from grc_policy_server.services.ingestion.docling_chunker import (
     chunk_document,
     parse_docling_chunks,
@@ -263,7 +266,10 @@ def _score_table_rows_confidence(
 
 
 def _build_document_confidence_metrics(
-    document_id: str, parsed_chunks: list[ParsedChunk]
+    document_id: str,
+    parsed_chunks: list[ParsedChunk],
+    *,
+    docling_confidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-cell/row confidence data into document-level ConfidenceMetrics.
 
@@ -340,6 +346,24 @@ def _build_document_confidence_metrics(
     )
     low_confidence_cells = sum(1 for cc in all_cell_confidences if cc.get("confidence", 0.0) < 0.50)
 
+    if docling_confidence:
+        low_grade = str(docling_confidence.get("low_grade") or "")
+        if low_grade == "poor":
+            requires_human_review_count += 1
+            extraction_flags.append(
+                ExtractionFlag(
+                    flag_type="docling_low_grade",
+                    severity="warning",
+                    description=(
+                        "Docling conversion low_grade is POOR "
+                        f"(low_score={docling_confidence.get('low_score')}); "
+                        "worst-performing pages need manual review"
+                    ),
+                    affected_object=document_id,
+                    confidence_if_applicable=docling_confidence.get("low_score"),
+                )
+            )
+
     return ConfidenceMetrics(
         document_id=document_id,
         table_confidence_avg=round(table_confidence_avg, 3),
@@ -350,7 +374,79 @@ def _build_document_confidence_metrics(
         medium_confidence_cells=medium_confidence_cells,
         low_confidence_cells=low_confidence_cells,
         requires_human_review_count=requires_human_review_count,
+        docling_confidence={
+            key: value
+            for key, value in (docling_confidence or {}).items()
+            if key != "pages"
+        }
+        or None,
     ).model_dump()
+
+
+_DOCLING_POOR_SCORE = 0.5  # QualityGrade.POOR threshold in docling
+_DOCLING_FAIR_SCORE = 0.8  # below this a page is FAIR at best
+
+
+def _annotate_chunks_with_page_confidence(
+    chunks: list[ParsedChunk],
+    docling_confidence: dict[str, Any],
+) -> list[ParsedChunk]:
+    """Attach docling per-page confidence to chunk metadata.
+
+    Every chunk gets its page's score dict (``docling_page_confidence``).
+    Text-bearing chunks on problem pages (ocr/parse score below FAIR) also get
+    an explicit ``extraction_confidence`` + flag so the review gate fires;
+    healthy pages keep the trusted default (1.0) to avoid flooding the review
+    queue. Tables are handled separately in _stage_normalize_tables where the
+    docling score is blended with the local structural quality.
+    """
+    from dataclasses import replace as dc_replace
+
+    pages = docling_confidence.get("pages") or {}
+    if not pages:
+        return chunks
+
+    annotated: list[ParsedChunk] = []
+    for chunk in chunks:
+        page_scores = pages.get(chunk.page_number) or pages.get(
+            str(chunk.page_number)
+        )
+        if not page_scores:
+            annotated.append(chunk)
+            continue
+        metadata = {**chunk.metadata, "docling_page_confidence": page_scores}
+        if chunk.chunk_type != "table":
+            ocr_score = page_scores.get("ocr_score")
+            parse_score = page_scores.get("parse_score")
+            flags = list(metadata.get("confidence_flags") or [])
+            page_confidence: float | None = None
+            if ocr_score is not None and ocr_score < _DOCLING_FAIR_SCORE:
+                page_confidence = ocr_score
+                if "docling_poor_ocr" not in flags:
+                    flags.append("docling_poor_ocr")
+            if parse_score is not None and parse_score < _DOCLING_FAIR_SCORE:
+                page_confidence = (
+                    parse_score
+                    if page_confidence is None
+                    else min(page_confidence, parse_score)
+                )
+                if "docling_poor_parse" not in flags:
+                    flags.append("docling_poor_parse")
+            if page_confidence is not None:
+                existing = metadata.get("extraction_confidence")
+                try:
+                    existing_val = float(existing) if existing is not None else None
+                except (TypeError, ValueError):
+                    existing_val = None
+                metadata["extraction_confidence"] = round(
+                    page_confidence
+                    if existing_val is None
+                    else min(existing_val, page_confidence),
+                    3,
+                )
+                metadata["confidence_flags"] = flags
+        annotated.append(dc_replace(chunk, metadata=metadata))
+    return annotated
 
 
 def _is_sparse_placeholder_table_metadata(metadata: dict[str, Any]) -> bool:
@@ -756,6 +852,7 @@ class _IngestionContext:
     chunks_stored: int = 0
     resolved_standards: dict[str, StandardResolution] = field(default_factory=dict)
     confidence_metrics: dict[str, Any] | None = None
+    docling_confidence: dict[str, Any] | None = None
 
 
 class DocumentIngestionService:
@@ -860,6 +957,7 @@ class DocumentIngestionService:
         context.ocr_metadata = ocr_metadata
         context.doc_json = doc_json
         context.docling_language = str(context.ocr_metadata.pop("_docling_language", "") or "")
+        context.docling_confidence = context.ocr_metadata.pop("_docling_confidence", None)
         return context
 
     async def _stage_extract_docling_graph(self, context: _IngestionContext) -> _IngestionContext:
@@ -878,8 +976,28 @@ class DocumentIngestionService:
         from dataclasses import replace as dc_replace
         from grc_policy_server.services.ingestion.ontology.emc_ontology import EMCTestClassifier
 
+        from grc_policy_server.services.ingestion.table_normalization import (
+            extract_footnote_markers,
+        )
+
         classifier = EMCTestClassifier()
+        # Footnote chunks by page — attached to tables on the same/next page so
+        # cell-scope footnotes ("1)", "a)") stay linked to their table.
+        footnotes_by_page: dict[int, list[str]] = {}
+        for chunk in context.parsed_chunks:
+            if chunk.chunk_type == "footnote" and chunk.page_number is not None:
+                text = (chunk.text or "").strip()
+                if text:
+                    footnotes_by_page.setdefault(chunk.page_number, []).append(text)
+
+        _CONTINUATION_MARKER_RE = __import__("re").compile(
+            r"\b(cont(?:inued)?|fortgesetzt|fortsetzung|suite)\b",
+            __import__("re").IGNORECASE,
+        )
+
         updated: list[ParsedChunk] = []
+        prev_table_type: str | None = None
+        prev_table_headers: list[str] = []
         for chunk in context.parsed_chunks:
             if chunk.chunk_type != "table":
                 updated.append(chunk)
@@ -890,6 +1008,18 @@ class DocumentIngestionService:
             table_type = classifier.classify_table(caption, headers).value
             if table_type == "unknown":
                 table_type = classifier.classify_from_section_path(section_path).value
+            table_type_inherited = False
+            if table_type == "unknown" and prev_table_type not in (None, "unknown"):
+                # Continuation fragments ("Tabelle 12 (fortgesetzt)") carry no
+                # classifiable caption of their own — inherit the parent
+                # fragment's type when the caption says continuation or the
+                # column schema is identical.
+                is_continuation = bool(_CONTINUATION_MARKER_RE.search(caption)) or (
+                    bool(headers) and headers == prev_table_headers
+                )
+                if is_continuation:
+                    table_type = prev_table_type
+                    table_type_inherited = True
             quality = float(chunk.metadata.get("extraction_quality_score") or 0.0)
             structure = chunk.metadata.get("table_structure") or {}
             cells = list(structure.get("cells") or [])
@@ -906,6 +1036,46 @@ class DocumentIngestionService:
             cell_confidences, row_confidences = _score_table_rows_confidence(
                 chunk.ordinal, structure, headers, quality
             )
+            # Compact node-level confidence for the comparison layer: blend of
+            # structural quality and average row confidence. Detailed per-cell
+            # scores stay in cell_confidences/row_confidences.
+            row_values = [rc.confidence for rc in row_confidences]
+            extraction_confidence = (
+                round(0.5 * quality + 0.5 * (sum(row_values) / len(row_values)), 3)
+                if row_values
+                else round(quality, 3)
+            )
+            confidence_flags = sorted(
+                {
+                    str(rc.review_reason)
+                    for rc in row_confidences
+                    if rc.requires_review and rc.review_reason
+                }
+            )
+            # Blend in docling's native page confidence: table_score when
+            # reported, else the mean of layout/parse scores for the page.
+            page_scores = chunk.metadata.get("docling_page_confidence") or {}
+            docling_component = page_scores.get("table_score")
+            if docling_component is None:
+                available = [
+                    score
+                    for score in (
+                        page_scores.get("layout_score"),
+                        page_scores.get("parse_score"),
+                    )
+                    if score is not None
+                ]
+                docling_component = (
+                    sum(available) / len(available) if available else None
+                )
+            if docling_component is not None:
+                extraction_confidence = round(
+                    0.7 * extraction_confidence + 0.3 * docling_component, 3
+                )
+            if page_scores.get("low_grade") == "poor":
+                confidence_flags = sorted(
+                    {*confidence_flags, "docling_low_confidence_page"}
+                )
             new_meta = {
                 **chunk.metadata,
                 "table_type": table_type,
@@ -915,11 +1085,32 @@ class DocumentIngestionService:
                 "cell_confidences": [cc.model_dump() for cc in cell_confidences],
                 "row_confidences": [rc.model_dump() for rc in row_confidences],
                 "requires_review": any(rc.requires_review for rc in row_confidences),
+                "extraction_confidence": extraction_confidence,
+                "confidence_flags": confidence_flags,
+                "low_confidence_cell_count": sum(
+                    1 for cc in cell_confidences if cc.confidence < 0.50
+                ),
             }
+            if table_type_inherited:
+                new_meta["table_type_inherited"] = True
+            footnote_markers = extract_footnote_markers(cells)
+            if footnote_markers:
+                new_meta["table_footnote_markers"] = footnote_markers
+                page = chunk.page_number
+                if page is not None:
+                    linked = footnotes_by_page.get(page, []) + footnotes_by_page.get(
+                        page + 1, []
+                    )
+                    if linked:
+                        new_meta["table_footnotes"] = linked
+            prev_table_type = table_type
+            prev_table_headers = headers
             updated.append(dc_replace(chunk, metadata=new_meta))
         context.parsed_chunks = updated
         context.confidence_metrics = _build_document_confidence_metrics(
-            context.document_id, updated
+            context.document_id,
+            updated,
+            docling_confidence=context.docling_confidence,
         )
         return context
 
@@ -1016,6 +1207,8 @@ class DocumentIngestionService:
         )
         if context.confidence_metrics is not None:
             context.normalized_tree["metadata"]["confidence_metrics"] = context.confidence_metrics
+        if context.docling_confidence is not None:
+            context.normalized_tree["metadata"]["docling_confidence"] = context.docling_confidence
         if self.canonical_store is not None:
             self.canonical_store.save_document(
                 document_id=context.document_id,
@@ -1230,6 +1423,11 @@ class DocumentIngestionService:
             chunk_document, dl_doc, merge_list_items=True
         )
         chunks = await asyncio.to_thread(parse_docling_chunks, doc_json, raw_chunks)
+        docling_confidence = confidence_report_to_dict(
+            getattr(dl_doc, "_confidence_report", None)
+        )
+        if docling_confidence:
+            chunks = _annotate_chunks_with_page_confidence(chunks, docling_confidence)
         page_count = len(getattr(dl_doc, "pages", {}) or {})
         chunks, ocr_metadata = self._apply_ocr_fallback(
             filename=filename,
@@ -1241,7 +1439,36 @@ class DocumentIngestionService:
         docling_langs = getattr(getattr(dl_doc, "meta", None), "languages", None) or []
         if docling_langs:
             ocr_metadata["_docling_language"] = str(docling_langs[0]).lower()[:2]
+        if docling_confidence:
+            ocr_metadata["_docling_confidence"] = docling_confidence
         return chunks, ocr_metadata, doc_json
+
+    @staticmethod
+    def _docling_table_quality(table: Any) -> float:
+        """Extraction-quality proxy for a raw Docling table (pre-chunking).
+
+        Reuses _score_table_extraction_quality on the grid, treating the first
+        row as headers. Returns 1.0 on unexpected structure so the trigger
+        stays conservative.
+        """
+        try:
+            grid = table.data.grid
+            if not grid:
+                return 0.0
+            num_rows = len(grid)
+            num_cols = max(len(row) for row in grid)
+            cells = [
+                {"text": (getattr(cell, "text", "") or "")}
+                for row in grid
+                for cell in row
+            ]
+            headers = [
+                (getattr(cell, "text", "") or "").strip() or f"column_{idx + 1}"
+                for idx, cell in enumerate(grid[0])
+            ]
+            return _score_table_extraction_quality(cells, num_rows, num_cols, headers)
+        except Exception:
+            return 1.0
 
     async def _apply_targeted_table_ocr(
         self,
@@ -1250,12 +1477,14 @@ class DocumentIngestionService:
         content: bytes,
         dl_doc: Any,
     ) -> Any:
-        """Re-run Docling with full-page OCR on pages containing low-density tables.
+        """Re-run Docling with full-page OCR on pages containing low-quality tables.
 
         Disabled by default (DOCLING_TABLE_OCR_ENABLED=false). When enabled,
-        tables with fewer than docling_table_ocr_min_density fraction of non-empty
-        cells trigger a second pass with force_full_page_ocr=True on the surrounding
-        page range. Improved cells are merged back into the original document.
+        tables trigger a second pass with force_full_page_ocr=True when either
+        their cell density falls below docling_table_ocr_min_density or their
+        extraction-quality proxy falls below extraction_review_threshold —
+        a dense grid full of empty headers/garbage still gets re-extracted.
+        Improved cells are merged back into the original document.
         """
         if not settings.docling_table_ocr_enabled:
             return dl_doc
@@ -1267,16 +1496,36 @@ class DocumentIngestionService:
 
             margin = settings.docling_table_ocr_page_margin
             min_density = settings.docling_table_ocr_min_density
+            min_quality = settings.extraction_review_threshold
 
-            # Collect page numbers of low-density tables
+            # Pages docling itself grades POOR for table/OCR extraction
+            docling_poor_pages: set[int] = set()
+            report = confidence_report_to_dict(
+                getattr(dl_doc, "_confidence_report", None)
+            )
+            for page_no, scores in ((report or {}).get("pages") or {}).items():
+                table_score = scores.get("table_score")
+                ocr_score = scores.get("ocr_score")
+                if (table_score is not None and table_score < _DOCLING_POOR_SCORE) or (
+                    ocr_score is not None and ocr_score < _DOCLING_POOR_SCORE
+                ):
+                    docling_poor_pages.add(int(page_no))
+
+            # Collect page numbers of low-density or low-quality tables
             page_numbers: list[int] = []
             for table in tables:
-                if self.docling_adapter._table_cell_density(table) < min_density:
-                    try:
-                        page_no = int(table.prov[0].page_no)
-                        page_numbers.append(page_no)
-                    except Exception:
-                        pass
+                density = self.docling_adapter._table_cell_density(table)
+                quality = self._docling_table_quality(table)
+                try:
+                    page_no = int(table.prov[0].page_no)
+                except Exception:
+                    continue
+                if (
+                    density < min_density
+                    or quality < min_quality
+                    or page_no in docling_poor_pages
+                ):
+                    page_numbers.append(page_no)
 
             if not page_numbers:
                 return dl_doc

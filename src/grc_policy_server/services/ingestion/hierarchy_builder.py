@@ -339,8 +339,25 @@ def build_document_hierarchy(
     section_leaf_ordinals: dict[tuple[str, ...], int] = defaultdict(int)
     section_ordinal = 0
 
+    last_section_titles: tuple[str, ...] = ()
+    last_section_page: int | None = None
+
     for chunk in sorted(filtered_chunks, key=lambda item: (item.page_number or 0, item.ordinal)):
         section_titles = _normalize_section_titles(chunk)
+        if section_titles:
+            last_section_titles = section_titles
+            last_section_page = chunk.page_number
+        elif last_section_titles and (
+            chunk.page_number is None
+            or last_section_page is None
+            or chunk.page_number - last_section_page <= 1
+        ):
+            # Orphan adoption: docling occasionally drops the heading linkage
+            # for a body chunk. In reading order it still belongs to the most
+            # recent section, so adopt it instead of dumping it into the
+            # synthetic "Unsectioned" bucket. True preamble (before any
+            # section) still falls through to "Unsectioned".
+            section_titles = last_section_titles
         section_path = " / ".join(section_titles) if section_titles else "Unknown Section"
         inherited_reason = _get_inherited_exclusion(section_titles, section_exclusions)
         section_lineage_ids = [document_id]

@@ -435,12 +435,74 @@ def extract_headers_from_cells(
     return headers, header_depth
 
 
+def expand_merged_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Materialize merged cells at every covered (row, col) position.
+
+    A condition cell spanning 3 rows applies to all 3 rows; without expansion
+    only the anchor row carries the value and the other rows compare as empty.
+    Copies are marked ``propagated`` so renderers/citations can ignore them.
+    Stored table_structure cells are NOT modified — expansion happens only where
+    row semantics are computed.
+    """
+    occupied = {
+        (int(cell.get("row") or 0), int(cell.get("col") or 0)) for cell in cells
+    }
+    expanded = list(cells)
+    for cell in cells:
+        row_span = int(cell.get("row_span") or 1)
+        col_span = int(cell.get("col_span") or 1)
+        if row_span <= 1 and col_span <= 1:
+            continue
+        row = int(cell.get("row") or 0)
+        col = int(cell.get("col") or 0)
+        for r in range(row, row + row_span):
+            for c in range(col, col + col_span):
+                if (r, c) in occupied:
+                    continue
+                expanded.append(
+                    {
+                        **cell,
+                        "row": r,
+                        "col": c,
+                        "row_span": 1,
+                        "col_span": 1,
+                        "propagated": True,
+                    }
+                )
+                occupied.add((r, c))
+    expanded.sort(key=lambda cell: (int(cell.get("row") or 0), int(cell.get("col") or 0)))
+    return expanded
+
+
+# Footnote markers in table cells: "1)", "a)", "*", "**", trailing "^a"/"^1"
+# (superscripts arrive as ^-notation after math normalization).
+_FOOTNOTE_MARKER_RE = re.compile(
+    r"(?:^|\s)(\*{1,3}|[a-z]\)|\d{1,2}\)|\^[a-z0-9]{1,2})\s*$"
+)
+
+
+def extract_footnote_markers(cells: list[dict[str, Any]]) -> list[str]:
+    """Collect distinct footnote markers referenced from table cell texts."""
+    markers: list[str] = []
+    for cell in cells:
+        text = str(cell.get("text") or "").strip()
+        if not text or len(text) > 120:
+            continue
+        m = _FOOTNOTE_MARKER_RE.search(text)
+        if m and m.group(1) != text:
+            marker = m.group(1)
+            if marker not in markers:
+                markers.append(marker)
+    return markers
+
+
 def rows_from_cells(
     cells: list[dict[str, Any]], headers: list[str], *, header_depth: int = 1
 ) -> list[dict[str, Any]]:
     if not cells:
         return []
 
+    cells = expand_merged_cells(cells)
     rows_data: dict[int, dict[str, str]] = defaultdict(dict)
     for cell in cells:
         row = int(cell.get("row") or 0)
