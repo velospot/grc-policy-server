@@ -280,24 +280,28 @@ def get_profile_for_document(
     """Identify which profile applies to a document.
 
     Detection order (most reliable first):
-    1. Body text / section headings — standard identifiers found in content are
-       stable across filename convention changes and document editions.
-    2. Filename hints — fast fallback when content lacks recognisable identifiers.
-    3. Domain-keyword scoring on section headings (TL 81000 signal words).
+    1. Tier 1 (strict content matches) — full family identifiers only; avoids
+       false positives from citations to other standards embedded in body text.
+    2. Tier 2 (filename hints) — fast fallback when content lacks recognisable identifiers.
+    3. Tier 3 (loose content + domain-keyword scoring) — substring matches and
+       signal-word scoring, only if tiers 1-2 found nothing.
     """
-    # 1. Content-based: scan section headings and early body text
     combined_content = " ".join(section_path or []) + " " + " ".join(body_texts or [])
+    name_lower = (filename or "").lower()
+
+    # Tier 1: Strict content-based — precise family identifiers only
     if combined_content.strip():
         c = combined_content.lower()
         if "tl 81000" in c or "tl81000" in c or "tl-81000" in c or "tl_81000" in c:
             return TL81000_PROFILE
         if "dnvgl-cg-0339" in c or "dnv-cg-0339" in c or "cg-0339" in c or "cg 0339" in c:
             return DNV_CG_0339_PROFILE
-        if "60068" in c:
+        # DIN EN 60068 — require full identifier context, not bare "60068" substring
+        # (which appears in citations to other standards like "IEC 60068-2-78")
+        if "din en 60068" in c or "din_en_60068" in c or "en 60068-2" in c:
             return DIN_EN_60068_PROFILE
 
-    # 2. Filename hints (fallback)
-    name_lower = (filename or "").lower()
+    # Tier 2: Filename hints — run before loose fallback
     if any(hint in name_lower for hint in _TL81000_FILENAME_HINTS):
         return TL81000_PROFILE
     if any(hint in name_lower for hint in _DIN_EN_60068_FILENAME_HINTS):
@@ -305,7 +309,12 @@ def get_profile_for_document(
     if any(hint in name_lower for hint in _DNV_CG_0339_FILENAME_HINTS):
         return DNV_CG_0339_PROFILE
 
-    # 3. Domain-keyword scoring on section headings
+    # Tier 3: Loose content match (bare substring) + domain-keyword scoring
+    if combined_content.strip():
+        c = combined_content.lower()
+        if "60068" in c:
+            return DIN_EN_60068_PROFILE
+
     if section_path:
         combined = " ".join(section_path).lower()
         hits = sum(1 for word in _TL81000_CAPTION_SIGNALS if word in combined)

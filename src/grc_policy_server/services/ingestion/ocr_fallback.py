@@ -116,10 +116,10 @@ def build_ocr_fallback_chunks(
                         pil_image,
                         lang=languages,
                         config=f"--psm {page_segmentation_mode}",
-                        output_type="dataframe",
+                        output_type=pytesseract.Output.DATAFRAME,
                     )
-                    # Filter out empty/low-confidence words, normalize to 0.0–1.0
-                    word_confidences = data[data["conf"] > 0]["conf"].tolist()
+                    # Filter out non-text rows (-1) and invalid entries; valid confidences are 0–100
+                    word_confidences = data[data["conf"] >= 0]["conf"].tolist()
                     page_ocr_confidence = sum(word_confidences) / (100 * len(word_confidences)) if word_confidences else 0.0
                 except Exception:
                     # Fallback: if confidence extraction fails, assume moderate confidence

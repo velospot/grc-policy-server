@@ -172,6 +172,187 @@ def _table_quality_flags(
     return flags
 
 
+def _resolve_column_roles(headers: list[str]) -> list[str | None]:
+    """Map table column headers to semantic roles for confidence scoring.
+
+    Uses the ontology's map_header() to classify each header to an OntologyEntityType,
+    then collapses to 4 coarse roles: "limit", "result", "condition", "row_key", or None.
+    """
+    from grc_policy_server.services.ingestion.ontology.column_mapper import map_header
+    from grc_policy_server.services.ingestion.ontology.emc_ontology import OntologyEntityType
+
+    roles = []
+    for header in headers:
+        entity_type = map_header(header)
+        if entity_type in (
+            OntologyEntityType.EMISSION_LIMIT,
+            OntologyEntityType.FIELD_STRENGTH,
+            OntologyEntityType.IMMUNITY_LEVEL,
+            OntologyEntityType.NUMERIC_LIMIT,
+        ):
+            roles.append("limit")
+        elif entity_type == OntologyEntityType.ACCEPTANCE_CRITERION:
+            roles.append("result")
+        elif entity_type in (OntologyEntityType.TEST_METHOD, OntologyEntityType.NORMATIVE_TERM):
+            roles.append("condition")
+        elif entity_type in (
+            OntologyEntityType.PHENOMENON,
+            OntologyEntityType.FREQUENCY_RANGE,
+            OntologyEntityType.TEST_NUMBER,
+        ):
+            roles.append("row_key")
+        else:
+            roles.append(None)
+    return roles
+
+
+def _score_table_rows_confidence(
+    chunk_ordinal: int,
+    structure: dict[str, Any],
+    headers: list[str],
+    table_confidence: float,
+) -> tuple[list["CellConfidence"], list["RequirementConfidence"]]:
+    """Score confidence for all cells and rows in a table.
+
+    Returns (cell_confidences, row_confidences) lists ready for attachment to chunk.metadata.
+    """
+    from grc_policy_server.models.schemas import CellConfidence, RequirementConfidence
+
+    cells = list(structure.get("cells") or [])
+    column_roles = _resolve_column_roles(headers)
+
+    cell_confidences: list[CellConfidence] = []
+    cells_by_row: dict[int, list[dict]] = {}
+    for cell in cells:
+        row = cell.get("row", 0)
+        cells_by_row.setdefault(row, []).append(cell)
+
+    row_confidences: list[RequirementConfidence] = []
+    for row_idx in sorted(cells_by_row.keys()):
+        row_cells = cells_by_row[row_idx]
+
+        # Score individual cells in this row
+        row_cell_confidences: list[CellConfidence] = []
+        row_key_text = None
+        for cell in sorted(row_cells, key=lambda c: c.get("col", 0)):
+            col = cell.get("col", 0)
+            column_role = column_roles[col] if col < len(column_roles) else None
+            column_name = headers[col] if col < len(headers) else None
+            cell_data = {
+                **cell,
+                "chunk_id": f"chunk-{chunk_ordinal}",
+                "column_name": column_name,
+            }
+            cell_conf = _score_cell_confidence(cell_data, column_role)
+            row_cell_confidences.append(cell_conf)
+            cell_confidences.append(cell_conf)
+
+            # Capture first row_key-role cell for row identification
+            if column_role == "row_key" and not row_key_text and cell.get("text"):
+                row_key_text = str(cell.get("text", "")).strip()
+
+        # Score the row
+        row_data = {
+            "row_id": f"chunk-{chunk_ordinal}:row{row_idx}",
+            "row_key": row_key_text,
+        }
+        row_conf = _score_row_confidence(row_data, table_confidence, row_cell_confidences)
+        row_confidences.append(row_conf)
+
+    return cell_confidences, row_confidences
+
+
+def _build_document_confidence_metrics(
+    document_id: str, parsed_chunks: list[ParsedChunk]
+) -> dict[str, Any]:
+    """Aggregate per-cell/row confidence data into document-level ConfidenceMetrics.
+
+    Scans all table chunks for cell/row/table-level confidence scores already
+    computed by _stage_normalize_tables, and produces a document summary.
+    """
+    from grc_policy_server.models.schemas import ConfidenceMetrics, ExtractionFlag
+
+    table_confidences: list[float] = []
+    all_cell_confidences: list[dict[str, Any]] = []
+    all_row_confidences: list[dict[str, Any]] = []
+    extraction_flags: list[ExtractionFlag] = []
+    requires_human_review_count = 0
+
+    for chunk in parsed_chunks:
+        if chunk.chunk_type != "table":
+            continue
+        metadata = chunk.metadata or {}
+
+        # Table-level score
+        extraction_quality = metadata.get("extraction_quality_score", 0.0)
+        if extraction_quality > 0.0:
+            table_confidences.append(extraction_quality)
+
+        # Table-level flags
+        table_quality_flags = metadata.get("table_quality_flags") or []
+        if table_quality_flags:
+            extraction_flags.append(
+                ExtractionFlag(
+                    flag_type="table_quality",
+                    severity="warning",
+                    description="; ".join(str(f) for f in table_quality_flags),
+                    affected_object=f"chunk-{chunk.ordinal}",
+                )
+            )
+
+        # Cell-level confidences (already scored and stored)
+        cell_confs = metadata.get("cell_confidences") or []
+        all_cell_confidences.extend(cell_confs)
+
+        # Row-level confidences and review flags
+        row_confs = metadata.get("row_confidences") or []
+        all_row_confidences.extend(row_confs)
+        for row_conf_dict in row_confs:
+            if row_conf_dict.get("requires_review"):
+                requires_human_review_count += 1
+                review_reason = row_conf_dict.get("review_reason")
+                extraction_flags.append(
+                    ExtractionFlag(
+                        flag_type=review_reason or "low_confidence",
+                        severity="warning",
+                        description=f"Row confidence {row_conf_dict.get('confidence', 0.0):.2f} below threshold",
+                        affected_object=row_conf_dict.get("row_id"),
+                        confidence_if_applicable=row_conf_dict.get("confidence"),
+                    )
+                )
+
+    # Compute aggregates
+    table_confidence_avg = sum(table_confidences) / len(table_confidences) if table_confidences else 0.0
+    cell_confidence_avg = (
+        sum(cc.get("confidence", 0.0) for cc in all_cell_confidences) / len(all_cell_confidences)
+        if all_cell_confidences
+        else 0.0
+    )
+    requirement_confidence_avg = (
+        sum(rc.get("confidence", 0.0) for rc in all_row_confidences) / len(all_row_confidences)
+        if all_row_confidences
+        else 0.0
+    )
+
+    high_confidence_cells = sum(1 for cc in all_cell_confidences if cc.get("confidence", 0.0) >= 0.85)
+    medium_confidence_cells = sum(
+        1 for cc in all_cell_confidences if 0.50 <= cc.get("confidence", 0.0) < 0.85
+    )
+    low_confidence_cells = sum(1 for cc in all_cell_confidences if cc.get("confidence", 0.0) < 0.50)
+
+    return ConfidenceMetrics(
+        document_id=document_id,
+        table_confidence_avg=round(table_confidence_avg, 3),
+        cell_confidence_avg=round(cell_confidence_avg, 3),
+        requirement_confidence_avg=round(requirement_confidence_avg, 3),
+        extraction_flags=extraction_flags,
+        high_confidence_cells=high_confidence_cells,
+        medium_confidence_cells=medium_confidence_cells,
+        low_confidence_cells=low_confidence_cells,
+        requires_human_review_count=requires_human_review_count,
+    ).model_dump()
+
+
 def _is_sparse_placeholder_table_metadata(metadata: dict[str, Any]) -> bool:
     flags = {str(flag) for flag in (metadata.get("table_quality_flags") or [])}
     if {"sparse_cells", "placeholder_headers"} <= flags:
@@ -574,6 +755,7 @@ class _IngestionContext:
     docling_graph: DoclingGraphArtifact | None = None
     chunks_stored: int = 0
     resolved_standards: dict[str, StandardResolution] = field(default_factory=dict)
+    confidence_metrics: dict[str, Any] | None = None
 
 
 class DocumentIngestionService:
@@ -721,15 +903,24 @@ class DocumentIngestionService:
                     num_cols,
                     headers,
                 )
+            cell_confidences, row_confidences = _score_table_rows_confidence(
+                chunk.ordinal, structure, headers, quality
+            )
             new_meta = {
                 **chunk.metadata,
                 "table_type": table_type,
                 "extraction_quality_score": round(quality, 3),
                 "table_quality_flags": flags,
                 "low_confidence_table": bool(flags),
+                "cell_confidences": [cc.model_dump() for cc in cell_confidences],
+                "row_confidences": [rc.model_dump() for rc in row_confidences],
+                "requires_review": any(rc.requires_review for rc in row_confidences),
             }
             updated.append(dc_replace(chunk, metadata=new_meta))
         context.parsed_chunks = updated
+        context.confidence_metrics = _build_document_confidence_metrics(
+            context.document_id, updated
+        )
         return context
 
     async def _stage_resolve_standards(self, context: _IngestionContext) -> _IngestionContext:
@@ -823,6 +1014,8 @@ class DocumentIngestionService:
         context.normalized_tree["metadata"]["ignored_changes"] = list(
             context.docling_graph.ignored_nodes
         )
+        if context.confidence_metrics is not None:
+            context.normalized_tree["metadata"]["confidence_metrics"] = context.confidence_metrics
         if self.canonical_store is not None:
             self.canonical_store.save_document(
                 document_id=context.document_id,
