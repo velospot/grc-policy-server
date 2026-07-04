@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+import warnings
 from io import BytesIO
 from typing import Any, Optional
 
@@ -54,8 +55,13 @@ def confidence_report_to_dict(report: Any) -> dict[str, Any] | None:
             field: _safe_score(getattr(scores, field, None))
             for field in _SCORE_FIELDS
         }
-        payload["mean_score"] = _safe_score(getattr(scores, "mean_score", None))
-        payload["low_score"] = _safe_score(getattr(scores, "low_score", None))
+        # Suppress "All-NaN slice" warning from docling's own computed
+        # properties when a page has no scoreable components (blank pages, etc).
+        # The resulting NaN is correctly converted to None by _safe_score.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            payload["mean_score"] = _safe_score(getattr(scores, "mean_score", None))
+            payload["low_score"] = _safe_score(getattr(scores, "low_score", None))
         payload["mean_grade"] = str(
             getattr(getattr(scores, "mean_grade", None), "value", "") or ""
         )

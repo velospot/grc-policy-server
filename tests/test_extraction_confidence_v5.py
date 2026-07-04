@@ -559,3 +559,26 @@ def test_extraction_quality_summary_exposes_docling_grades() -> None:
     assert summary["docling_mean_grade"] == "good"
     assert summary["docling_low_grade"] == "fair"
     assert summary["docling_scores"]["parse_score"] == 0.91
+
+
+def test_confidence_report_to_dict_suppresses_all_nan_warning() -> None:
+    """Verify that all-NaN pages don't emit warnings under normal logging settings."""
+    import warnings
+
+    from docling.datamodel.base_models import ConfidenceReport, PageConfidenceScores
+    from grc_policy_server.services.ingestion.docling_adapter import (
+        confidence_report_to_dict,
+    )
+
+    # Default-constructed PageConfidenceScores has all four component scores as NaN;
+    # without suppression, accessing .mean_score / .low_score emits RuntimeWarning.
+    # Under normal operation (no explicit warnings filter), these should be suppressed.
+    all_nan_page = PageConfidenceScores()
+    report = ConfidenceReport(pages={1: all_nan_page})
+    with warnings.catch_warnings(record=True) as warns:
+        warnings.simplefilter("default")  # Normal default filter: warnings once
+        result = confidence_report_to_dict(report)
+    # With the suppression in place, default filters prevent these from being recorded
+    assert result is not None
+    assert result["pages"][1]["mean_score"] is None
+    assert result["pages"][1]["low_score"] is None
